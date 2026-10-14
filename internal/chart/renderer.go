@@ -25,7 +25,7 @@ type Rendered struct {
 	// Objects are optional typed workload manifests. ValuesRenderer leaves this
 	// empty so the default reconciler remains plan-only until a workload
 	// renderer is explicitly injected.
-	Objects    []*unstructured.Unstructured
+	Objects []*unstructured.Unstructured
 }
 
 type Values struct {
