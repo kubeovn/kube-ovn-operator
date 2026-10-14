@@ -36,4 +36,9 @@ func TestBuildOrdersMembershipAndHCPGates(t *testing.T) {
 			t.Fatalf("missing action %q in %#v", action, plan.Actions)
 		}
 	}
+	for index, action := range []string{"ValidateVersionContract", "AcquireInstallationLease", "RenderChartValues", "AcquireCentralMembershipLease", "ValidateQuorum", "JoinBeforeReplicaIncrease", "LeaveBeforeReplicaDecrease", "CoordinateHCPPeer", "ResolveDualStackEndpoints", "VerifyPeerVersionContract", "PublishObservedStatus"} {
+		if plan.Actions[index] != action {
+			t.Fatalf("action %d should be %q, got %q in %#v", index, action, plan.Actions[index], plan.Actions)
+		}
+	}
 }

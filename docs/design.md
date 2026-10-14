@@ -21,7 +21,10 @@ and requires a cluster ID, a majority of healthy members, and committed-data
 evidence before it returns a join, leave, or kick operation. An unhealthy
 member can only be kicked when the caller supplies explicit permanent-loss
 approval. `internal/upgrade` applies the corresponding version, backup, CRD,
-and central-mode gates before a workload rollout.
+and central-mode gates before a workload rollout. `internal/chart` renders the
+same contract as Helm values, while `internal/ovnadmin.Executor` re-reads
+quorum, identity, and commit indexes immediately before invoking an injected
+OVNDB transport.
 
 The status phase distinguishes installing, adopting, upgrading, recovering
 and degraded plans. `Ready` means the plan passed safety validation and was
@@ -32,11 +35,11 @@ not perform a database wipe automatically.
 
 ## Next adapter boundaries
 
-1. Implement a chart renderer that consumes the ConfigMap values and performs
+1. Connect the chart renderer to a Helm SDK or sidecar that performs
    server-side dry-run before applying resources.
-2. Implement an OVNDB admin client that reads cluster ID, server ID, address,
-   leader and commit index, then executes one membership operation under the
-   central Lease.
+2. Supply an OVNDB transport (libovsdb or an authenticated admin sidecar) that
+   implements the `internal/ovnadmin.Client` interface and executes one
+   membership operation under the central Lease.
 3. Add backup and network probe providers; a missing provider keeps the phase
    `Degraded` when the corresponding gate is required.
 4. Add HCP peer transport using Secret references only. Private key material

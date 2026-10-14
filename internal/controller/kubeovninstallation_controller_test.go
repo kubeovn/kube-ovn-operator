@@ -2,10 +2,13 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,6 +49,9 @@ func TestReconcileWritesPlanAndSafetyLeases(t *testing.T) {
 	if plan.Data["install-mode"] != "full" || plan.Data["central-replicas"] != "3" {
 		t.Fatalf("unexpected plan data: %#v", plan.Data)
 	}
+	if !strings.Contains(plan.Data["values.yaml"], "installMode: full") {
+		t.Fatalf("rendered chart values are missing from plan: %q", plan.Data["values.yaml"])
+	}
 	for _, name := range []string{installationLeasePrefix + "demo", membershipLeasePrefix + "demo"} {
 		if err := client.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, new(coordinationv1.Lease)); err != nil {
 			t.Fatalf("lease %s was not written: %v", name, err)
@@ -80,5 +86,34 @@ func TestReconcileBlocksInvalidSpecBeforeWritingChildren(t *testing.T) {
 	}
 	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || len(got.Status.Conditions) != 2 {
 		t.Fatalf("unexpected invalid status: %#v", got.Status)
+	}
+}
+
+type failingRenderer struct{}
+
+func (failingRenderer) Render(context.Context, operatorv1alpha1.KubeOVNInstallationSpec) (chart.Rendered, error) {
+	return chart.Rendered{}, fmt.Errorf("chart dry-run rejected rendered objects")
+}
+
+func TestReconcileBlocksWhenRendererFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "render-failure", Namespace: "default", Generation: 1}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+	reconciler := &KubeOVNInstallationReconciler{Client: client, Scheme: scheme, Renderer: failingRenderer{}}
+	if _, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: installation.Name, Namespace: installation.Namespace}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(context.Background(), types.NamespacedName{Name: planConfigMapPrefix + installation.Name, Namespace: installation.Namespace}, new(corev1.ConfigMap)); err == nil {
+		t.Fatal("renderer failure unexpectedly wrote a plan")
+	}
+	got := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := client.Get(context.Background(), types.NamespacedName{Name: installation.Name, Namespace: installation.Namespace}, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || got.Status.Conditions[0].Reason != "SafetyGateBlocked" {
+		t.Fatalf("unexpected renderer failure status: %#v", got.Status)
 	}
 }

@@ -2,7 +2,6 @@ package planner
 
 import (
 	"fmt"
-	"slices"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/validation"
@@ -44,7 +43,6 @@ func Build(spec operatorv1alpha1.KubeOVNInstallationSpec, observedVersion string
 		actions = append(actions, "CoordinateHCPPeer", "ResolveDualStackEndpoints", "VerifyPeerVersionContract")
 	}
 	actions = append(actions, "PublishObservedStatus")
-	slices.Sort(actions)
 	values := map[string]string{
 		"installMode":     string(spec.Mode),
 		"centralMode":     string(spec.Central.Mode),

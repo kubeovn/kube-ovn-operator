@@ -6,6 +6,7 @@ import (
 	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	"github.com/kubeovn/kube-ovn-operator/internal/planner"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -33,8 +34,9 @@ const (
 
 type KubeOVNInstallationReconciler struct {
 	client.Client
-	Scheme *apiruntime.Scheme
-	Clock  func() time.Time
+	Scheme   *apiruntime.Scheme
+	Clock    func() time.Time
+	Renderer chart.Renderer
 }
 
 func (r *KubeOVNInstallationReconciler) SetupWithManager(mgr manager.Manager) error {
@@ -63,6 +65,20 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		logger.Info("installation plan is blocked", "reason", plan.Blocking)
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+	renderer := r.Renderer
+	if renderer == nil {
+		renderer = chart.ValuesRenderer{}
+	}
+	rendered, err := renderer.Render(ctx, installation.Spec)
+	if err != nil {
+		plan.Phase = operatorv1alpha1.PhaseDegraded
+		plan.Step = "Render"
+		plan.Blocking = err.Error()
+		if statusErr := r.updateStatus(ctx, installation, plan, now()); statusErr != nil {
+			return reconcile.Result{}, statusErr
+		}
+		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
 	if err := r.ensureLease(ctx, installation, installationLeasePrefix); err != nil {
 		return reconcile.Result{}, err
 	}
@@ -71,7 +87,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			return reconcile.Result{}, err
 		}
 	}
-	if err := r.ensurePlanConfigMap(ctx, installation, plan); err != nil {
+	if err := r.ensurePlanConfigMap(ctx, installation, plan, rendered); err != nil {
 		return reconcile.Result{}, err
 	}
 	if err := r.updateStatus(ctx, installation, plan, now()); err != nil {
@@ -110,7 +126,7 @@ func (r *KubeOVNInstallationReconciler) ensureLease(ctx context.Context, install
 	return nil
 }
 
-func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan) error {
+func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, rendered chart.Rendered) error {
 	planBytes, err := json.Marshal(plan)
 	if err != nil {
 		return fmt.Errorf("marshal plan: %w", err)
@@ -132,6 +148,9 @@ func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context,
 		}
 		configMap.Data = map[string]string{
 			"plan.json":        string(planBytes),
+			"values.yaml":      string(rendered.ValuesYAML),
+			"chart.source":     rendered.Source,
+			"chart.digest":     rendered.Digest,
 			"install-mode":     plan.Values["installMode"],
 			"central-mode":     plan.Values["centralMode"],
 			"central-replicas": plan.Values["centralReplicas"],

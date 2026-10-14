@@ -37,3 +37,6 @@ if ! kubectl wait --for=condition=Ready kubeovninstallation/kube-ovn -n kube-ovn
   exit 1
 fi
 kubectl get configmap kube-ovn-operator-plan-kube-ovn -n kube-ovn-operator-system -o jsonpath='{.data.plan\.json}' | grep -q 'ValidateVersionContract'
+kubectl get configmap kube-ovn-operator-plan-kube-ovn -n kube-ovn-operator-system -o jsonpath='{.data.values\.yaml}' | grep -q 'installMode: full'
+kubectl get lease kube-ovn-operator-installation-kube-ovn -n kube-ovn-operator-system >/dev/null
+kubectl get lease kube-ovn-operator-central-kube-ovn -n kube-ovn-operator-system >/dev/null
