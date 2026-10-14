@@ -19,6 +19,10 @@ lint:
 manifests:
 	@test -s config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml
 	@test -s config/crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml
+	@test -s config/manager/manager.yaml
+	@test -s config/rbac/role.yaml
+	@test -s config/rbac/service_account.yaml
+	@test -s config/samples/operator_v1alpha1_kubeovninstallation.yaml
 	@grep -q '^kind: CustomResourceDefinition$$' config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml
 	@grep -q '^kind: CustomResourceDefinition$$' config/crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml
 	@grep -q 'name: kubeovninstallations.operator.kubeovn.io' config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml

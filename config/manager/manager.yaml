@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-ovn-operator
+  namespace: kube-ovn-operator-system
+  labels:
+    app.kubernetes.io/name: kube-ovn-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-ovn-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-ovn-operator
+    spec:
+      serviceAccountName: kube-ovn-operator
+      containers:
+        - name: manager
+          image: ghcr.io/kubeovn/kube-ovn-operator:latest
+          args: ["--leader-elect=true"]
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: probes
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
