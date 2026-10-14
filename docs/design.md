@@ -16,6 +16,13 @@ confirmed member -> change workload replicas`; a future admin adapter must
 preserve this ordering. `cluster/kick` is never inferred from a Pod name or
 from deployment-time `NODE_IPS`.
 
+The side-effect-free `internal/membership` planner implements this ordering
+and requires a cluster ID, a majority of healthy members, and committed-data
+evidence before it returns a join, leave, or kick operation. An unhealthy
+member can only be kicked when the caller supplies explicit permanent-loss
+approval. `internal/upgrade` applies the corresponding version, backup, CRD,
+and central-mode gates before a workload rollout.
+
 The status phase distinguishes installing, adopting, upgrading, recovering
 and degraded plans. `Ready` means the plan passed safety validation and was
 serialized; the workload adapter must add the observed central leader,

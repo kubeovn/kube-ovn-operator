@@ -13,6 +13,12 @@ stored in a ConfigMap and guarded by an installation Lease and a dedicated
 central-membership Lease. Chart rendering and the central admin adapter can be
 added behind these stable boundaries without changing the API.
 
+The pure membership and upgrade planners under `internal/membership` and
+`internal/upgrade` are the adapter contract: they return an ordered operation
+only when quorum, committed data, backup, CRD, and central-mode invariants are
+proven. The Kubernetes reconciler serializes that plan and exposes the gate
+reason in status.
+
 ## Quick start
 
 ```bash
