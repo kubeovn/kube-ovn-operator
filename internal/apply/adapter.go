@@ -53,9 +53,10 @@ type Client struct {
 var _ ApplyClient = (*Client)(nil)
 
 type preparedObject struct {
-	object   *unstructured.Unstructured
-	resource dynamic.ResourceInterface
-	exists   bool
+	object                  *unstructured.Unstructured
+	resource                dynamic.ResourceInterface
+	exists                  bool
+	expectedResourceVersion string
 }
 
 func (c *Client) DryRun(ctx context.Context, objects []*unstructured.Unstructured) error {
@@ -120,7 +121,7 @@ func dryRunAll(ctx context.Context, objects []preparedObject) error {
 func patch(ctx context.Context, item preparedObject, dryRun bool) (*unstructured.Unstructured, error) {
 	applyObject := item.object.DeepCopy()
 	applyObject.SetUID("")
-	applyObject.SetResourceVersion("")
+	applyObject.SetResourceVersion(item.expectedResourceVersion)
 	applyObject.SetManagedFields(nil)
 	payload, err := json.Marshal(applyObject.Object)
 	if err != nil {
@@ -216,6 +217,7 @@ func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, obj
 				return nil, fmt.Errorf("%s is deleting or has no UID/resourceVersion", objectKey(copy))
 			}
 			item.exists = true
+			item.expectedResourceVersion = existing.GetResourceVersion()
 		}
 		prepared = append(prepared, item)
 	}
