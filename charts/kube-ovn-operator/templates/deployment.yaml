@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-ovn-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "kube-ovn-operator.name" . }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "kube-ovn-operator.name" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "kube-ovn-operator.name" . }}
+    spec:
+      serviceAccountName: {{ include "kube-ovn-operator.serviceAccountName" . }}
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --leader-elect={{ .Values.leaderElect }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: probes
+              containerPort: 8081
+          readinessProbe:
+            httpGet: {path: /readyz, port: probes}
+          livenessProbe:
+            httpGet: {path: /healthz, port: probes}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      nodeSelector: {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations: {{- toYaml .Values.tolerations | nindent 8 }}
+      affinity: {{- toYaml .Values.affinity | nindent 8 }}

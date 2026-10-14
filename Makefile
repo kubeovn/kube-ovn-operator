@@ -1,6 +1,6 @@
 IMG ?= ghcr.io/kubeovn/kube-ovn-operator:dev
 
-.PHONY: all build test vet lint manifests docker-build docker-push e2e
+.PHONY: all build test vet lint manifests chart-lint docker-build docker-push e2e
 
 all: test build
 
@@ -27,6 +27,9 @@ manifests:
 	@grep -q '^kind: CustomResourceDefinition$$' config/crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml
 	@grep -q 'name: kubeovninstallations.operator.kubeovn.io' config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml
 	@grep -q 'name: kubeovnrecoveryrequests.operator.kubeovn.io' config/crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml
+
+chart-lint:
+	helm lint charts/kube-ovn-operator
 
 docker-build:
 	docker build -t $(IMG) .

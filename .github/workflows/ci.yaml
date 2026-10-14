@@ -21,6 +21,7 @@ jobs:
         run: |
           test -z "$(gofmt -l .)"
           make manifests
+          make chart-lint
       - name: Test
         run: make test
       - name: Vet

@@ -1,0 +1,113 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kubeovninstallations.operator.kubeovn.io
+spec:
+  group: operator.kubeovn.io
+  scope: Namespaced
+  names:
+    plural: kubeovninstallations
+    singular: kubeovninstallation
+    kind: KubeOVNInstallation
+    shortNames: [koi]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Version
+          type: string
+          jsonPath: .status.observedVersion
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [version, mode, central]
+              properties:
+                version: {type: string, minLength: 1}
+                chart:
+                  type: object
+                  properties:
+                    source: {type: string}
+                    digest: {type: string}
+                mode:
+                  type: string
+                  enum: [full, controlPlaneOnly, dataPlaneOnly]
+                central:
+                  type: object
+                  required: [mode, replicas]
+                  properties:
+                    mode: {type: string, enum: [raft, single]}
+                    replicas: {type: integer, format: int32, minimum: 1, maximum: 5}
+                    placement:
+                      type: object
+                      properties:
+                        nodeSelector: {type: object, additionalProperties: {type: string}}
+                        topologyKey: {type: string}
+                    storage:
+                      type: object
+                      properties:
+                        className: {type: string}
+                        size: {type: string}
+                    dynamicMembership: {type: boolean}
+                dataPlane:
+                  type: object
+                  properties:
+                    nodeSelector: {type: object, additionalProperties: {type: string}}
+                    ovsUpdateStrategy: {type: string, enum: [RollingUpdate, OnDelete]}
+                    externalOvnCentral:
+                      type: object
+                      properties:
+                        nbEndpoint: {type: string}
+                        sbEndpoint: {type: string}
+                        nbPort: {type: integer, format: int32}
+                        sbPort: {type: integer, format: int32}
+                hcp:
+                  type: object
+                  properties:
+                    enabled: {type: boolean}
+                    role: {type: string, enum: [none, management, dataPlane]}
+                    pairRef: {type: string}
+                    centralNamespace: {type: string}
+                    nbEndpoint: {type: string}
+                    sbEndpoint: {type: string}
+                    tlsSecretRef:
+                      type: object
+                      properties: {name: {type: string}}
+                upgrade:
+                  type: object
+                  properties:
+                    strategy: {type: string}
+                    pauseOnDegraded: {type: boolean}
+                    allowRollback: {type: boolean}
+                    backup:
+                      type: object
+                      properties:
+                        required: {type: boolean}
+                        destination: {type: string}
+                adoption:
+                  type: object
+                  properties:
+                    enabled: {type: boolean}
+                    selector: {type: object, additionalProperties: {type: string}}
+            status:
+              type: object
+              properties:
+                observedVersion: {type: string}
+                phase: {type: string}
+                observedGeneration: {type: integer, format: int64}
+                conditions:
+                  type: array
+                  items: {type: object, x-kubernetes-preserve-unknown-fields: true}
+                topology: {type: object, x-kubernetes-preserve-unknown-fields: true}
+                upgrade: {type: object, x-kubernetes-preserve-unknown-fields: true}
+                hcp: {type: object, x-kubernetes-preserve-unknown-fields: true}
+                lastBackup: {type: object, x-kubernetes-preserve-unknown-fields: true}

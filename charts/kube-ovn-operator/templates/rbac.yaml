@@ -1,0 +1,27 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kube-ovn-operator.fullname" . }}
+rules:
+  - apiGroups: [operator.kubeovn.io]
+    resources: [kubeovninstallations, kubeovninstallations/status, kubeovnrecoveryrequests, kubeovnrecoveryrequests/status]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kube-ovn-operator.fullname" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kube-ovn-operator.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-ovn-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
