@@ -31,7 +31,7 @@ if ! curl --fail --silent http://127.0.0.1:8081/readyz >/dev/null 2>&1; then
   exit 1
 fi
 kubectl apply -f config/samples/operator_v1alpha1_kubeovninstallation.yaml
-if ! kubectl wait --for=jsonpath='{.status.phase}'=Ready kubeovninstallation/kube-ovn -n kube-ovn-operator-system --timeout=120s; then
+if ! kubectl wait --for=condition=Ready kubeovninstallation/kube-ovn -n kube-ovn-operator-system --timeout=120s; then
   kubectl get kubeovninstallation/kube-ovn -n kube-ovn-operator-system -o yaml
   cat /tmp/kube-ovn-operator-e2e.log
   exit 1

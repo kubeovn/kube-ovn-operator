@@ -41,7 +41,6 @@ func (r *KubeOVNInstallationReconciler) SetupWithManager(mgr manager.Manager) er
 	return builder.ControllerManagedBy(mgr).
 		For(&operatorv1alpha1.KubeOVNInstallation{}).
 		Owns(&corev1.ConfigMap{}).
-		Owns(&coordinationv1.Lease{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }
