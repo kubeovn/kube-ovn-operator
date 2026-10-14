@@ -6,6 +6,7 @@ import (
 	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	"github.com/kubeovn/kube-ovn-operator/internal/planner"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -28,15 +29,15 @@ const (
 	installationLeasePrefix = "kube-ovn-operator-installation-"
 	membershipLeasePrefix   = "kube-ovn-operator-central-"
 	planConfigMapPrefix     = "kube-ovn-operator-plan-"
-	managedByLabel          = "app.kubernetes.io/managed-by"
-	managedByValue          = "kube-ovn-operator"
 )
 
 type KubeOVNInstallationReconciler struct {
 	client.Client
-	Scheme   *apiruntime.Scheme
-	Clock    func() time.Time
-	Renderer chart.Renderer
+	Scheme          *apiruntime.Scheme
+	Clock           func() time.Time
+	Renderer        chart.Renderer
+	Workload        apply.ApplyClient
+	WorkloadFactory func(apply.InstallationIdentity) apply.ApplyClient
 }
 
 func (r *KubeOVNInstallationReconciler) SetupWithManager(mgr manager.Manager) error {
@@ -90,6 +91,22 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	if err := r.ensurePlanConfigMap(ctx, installation, plan, rendered); err != nil {
 		return reconcile.Result{}, err
 	}
+	workload := r.Workload
+	if r.WorkloadFactory != nil {
+		workload = r.WorkloadFactory(apply.InstallationIdentity{Namespace: installation.Namespace, Name: installation.Name, UID: installation.UID})
+	}
+	if workload != nil && len(rendered.Objects) != 0 {
+		if err := workload.Apply(ctx, rendered.Objects); err != nil {
+			plan.Phase = operatorv1alpha1.PhaseDegraded
+			plan.Step = "Apply"
+			plan.Blocking = err.Error()
+			if statusErr := r.updateStatus(ctx, installation, plan, now()); statusErr != nil {
+				return reconcile.Result{}, statusErr
+			}
+			logger.Info("installation workload apply is blocked", "reason", err.Error())
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+	}
 	if err := r.updateStatus(ctx, installation, plan, now()); err != nil {
 		return reconcile.Result{}, err
 	}
@@ -141,8 +158,10 @@ func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context,
 		if configMap.Labels == nil {
 			configMap.Labels = map[string]string{}
 		}
-		configMap.Labels[managedByLabel] = managedByValue
-		configMap.Labels["operator.kubeovn.io/installation"] = installation.Name
+		configMap.Labels[apply.ManagedByLabel] = apply.ManagedByValue
+		configMap.Labels[apply.InstallationLabel] = installation.Name
+		configMap.Labels[apply.InstallationUIDLabel] = string(installation.UID)
+		configMap.Labels[apply.InstallationNamespaceLabel] = installation.Namespace
 		if err := controllerutil.SetControllerReference(installation, configMap, r.Scheme); err != nil {
 			return err
 		}

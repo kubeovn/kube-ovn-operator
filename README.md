@@ -23,6 +23,15 @@ last safety check immediately before an injected OVNDB transport calls
 join/leave/kick. The Kubernetes reconciler serializes the plan and exposes the
 gate reason in status.
 
+The `internal/apply` adapter is the workload boundary for rendered Kubernetes
+objects. It performs uncached ownership checks, server-side dry-run, and then
+server-side apply (or create for a new object) with an installation name,
+namespace, UID, and controller owner reference. It never uses force ownership:
+objects managed by another controller or installation return an explicit
+`ErrOwnershipConflict`. The reconciler accepts an `ApplyClient` or an
+identity-aware `WorkloadFactory`; both are unset by default, so the default
+controller continues to serialize plans without changing workload resources.
+
 ## Quick start
 
 ```bash

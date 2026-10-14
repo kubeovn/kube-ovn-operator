@@ -1,0 +1,262 @@
+// Package apply provides an ownership-checked Kubernetes workload boundary.
+package apply
+
+import (
+	"context"
+	"encoding/json/v2"
+	"errors"
+	"fmt"
+
+	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+)
+
+const (
+	ManagedByLabel             = "app.kubernetes.io/managed-by"
+	ManagedByValue             = "kube-ovn-operator"
+	InstallationLabel          = "operator.kubeovn.io/installation"
+	InstallationNamespaceLabel = "operator.kubeovn.io/installation-namespace"
+	InstallationUIDLabel       = "operator.kubeovn.io/installation-uid"
+	DefaultFieldManager        = "kube-ovn-operator"
+)
+
+// ErrOwnershipConflict means a resource cannot be adopted by this adapter.
+var ErrOwnershipConflict = errors.New("kubernetes resource ownership conflict")
+
+type InstallationIdentity struct {
+	Namespace string
+	Name      string
+	UID       types.UID
+}
+
+// ApplyClient validates and applies one rendered workload batch. Apply must
+// dry-run the entire batch before making any persistent change.
+type ApplyClient interface {
+	DryRun(context.Context, []*unstructured.Unstructured) error
+	Apply(context.Context, []*unstructured.Unstructured) error
+}
+
+// Client uses uncached reads and server-side apply without force ownership.
+// New objects use create-only semantics after dry-run to prevent an SSA upsert
+// from overwriting a resource created concurrently by another actor.
+type Client struct {
+	Dynamic  dynamic.Interface
+	Mapper   meta.RESTMapper
+	Identity InstallationIdentity
+}
+
+var _ ApplyClient = (*Client)(nil)
+
+type preparedObject struct {
+	object   *unstructured.Unstructured
+	resource dynamic.ResourceInterface
+	exists   bool
+}
+
+func (c *Client) DryRun(ctx context.Context, objects []*unstructured.Unstructured) error {
+	if len(objects) == 0 {
+		return nil
+	}
+	prepared, err := c.prepare(ctx, c.Identity, objects)
+	if err != nil {
+		return err
+	}
+	return dryRunAll(ctx, prepared)
+}
+
+// Apply uses the same immutable snapshots for preflight and persistence.
+// Kubernetes does not provide multi-object transactions: a later write failure may leave earlier
+// objects applied; the caller must retry the whole batch after observing state.
+func (c *Client) Apply(ctx context.Context, objects []*unstructured.Unstructured) error {
+	if len(objects) == 0 {
+		return nil
+	}
+	prepared, err := c.prepare(ctx, c.Identity, objects)
+	if err != nil {
+		return err
+	}
+	if err := dryRunAll(ctx, prepared); err != nil {
+		return err
+	}
+	for _, item := range prepared {
+		if item.exists {
+			_, err = patch(ctx, item, false)
+		} else {
+			_, err = item.resource.Create(ctx, item.object, metav1.CreateOptions{
+				FieldManager: DefaultFieldManager, FieldValidation: metav1.FieldValidationStrict,
+			})
+		}
+		if err != nil {
+			return fmt.Errorf("apply %s: %w", objectKey(item.object), err)
+		}
+	}
+	return nil
+}
+
+func dryRunAll(ctx context.Context, objects []preparedObject) error {
+	for _, item := range objects {
+		if _, err := patch(ctx, item, true); err != nil {
+			return fmt.Errorf("server-side dry-run %s: %w", objectKey(item.object), err)
+		}
+		// Admission can distinguish CREATE from PATCH. Validate the exact
+		// persistence operation as well when the object does not exist yet.
+		if !item.exists {
+			if _, err := item.resource.Create(ctx, item.object, metav1.CreateOptions{
+				FieldManager: DefaultFieldManager, FieldValidation: metav1.FieldValidationStrict,
+				DryRun: []string{metav1.DryRunAll},
+			}); err != nil {
+				return fmt.Errorf("create dry-run %s: %w", objectKey(item.object), err)
+			}
+		}
+	}
+	return nil
+}
+
+func patch(ctx context.Context, item preparedObject, dryRun bool) (*unstructured.Unstructured, error) {
+	applyObject := item.object.DeepCopy()
+	applyObject.SetUID("")
+	applyObject.SetResourceVersion("")
+	applyObject.SetManagedFields(nil)
+	payload, err := json.Marshal(applyObject.Object)
+	if err != nil {
+		return nil, err
+	}
+	options := metav1.PatchOptions{FieldManager: DefaultFieldManager, FieldValidation: metav1.FieldValidationStrict}
+	if dryRun {
+		options.DryRun = []string{metav1.DryRunAll}
+	}
+	return item.resource.Patch(ctx, item.object.GetName(), types.ApplyPatchType, payload, options)
+}
+
+func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, objects []*unstructured.Unstructured) ([]preparedObject, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.Dynamic == nil || c.Mapper == nil {
+		return nil, errors.New("dynamic Kubernetes client and REST mapper are required")
+	}
+	if identity.Namespace == "" || identity.Name == "" || identity.UID == "" {
+		return nil, errors.New("installation namespace, name and UID are required")
+	}
+	prepared := make([]preparedObject, 0, len(objects))
+	seen := make(map[string]bool, len(objects))
+	for _, object := range objects {
+		if object == nil {
+			return nil, errors.New("rendered workload contains a nil object")
+		}
+		gvk := object.GroupVersionKind()
+		if gvk.Version == "" || gvk.Kind == "" || object.GetName() == "" || object.GetGenerateName() != "" {
+			return nil, errors.New("rendered objects require apiVersion, kind and a fixed name")
+		}
+		if object.GetUID() != "" || object.GetResourceVersion() != "" || len(object.GetManagedFields()) != 0 || object.GetDeletionTimestamp() != nil {
+			return nil, fmt.Errorf("%s contains server-owned metadata", objectKey(object))
+		}
+		if _, hasStatus := object.Object["status"]; hasStatus {
+			return nil, fmt.Errorf("%s contains status", objectKey(object))
+		}
+		mapping, err := c.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		if err != nil {
+			return nil, fmt.Errorf("map %s: %w", gvk, err)
+		}
+		var resource dynamic.ResourceInterface
+		namespaced := mapping.Scope.Name() == meta.RESTScopeNameNamespace
+		if namespaced {
+			if object.GetNamespace() != identity.Namespace {
+				return nil, fmt.Errorf("%s must be in installation namespace %q", objectKey(object), identity.Namespace)
+			}
+			resource = c.Dynamic.Resource(mapping.Resource).Namespace(object.GetNamespace())
+		} else {
+			if object.GetNamespace() != "" {
+				return nil, fmt.Errorf("cluster-scoped %s cannot have a namespace", objectKey(object))
+			}
+			resource = c.Dynamic.Resource(mapping.Resource)
+		}
+		key := mapping.Resource.GroupResource().String() + "/" + object.GetNamespace() + "/" + object.GetName()
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate rendered object %s", key)
+		}
+		seen[key] = true
+		copy := object.DeepCopy()
+		if err := checkOwnership(copy, identity, false, namespaced); err != nil {
+			return nil, err
+		}
+		labels := copy.GetLabels()
+		if labels == nil {
+			labels = make(map[string]string)
+		}
+		for label, value := range identity.labels() {
+			labels[label] = value
+		}
+		copy.SetLabels(labels)
+		if namespaced {
+			copy.SetOwnerReferences([]metav1.OwnerReference{{
+				APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation",
+				Name: identity.Name, UID: identity.UID, Controller: new(true),
+			}})
+		}
+		item := preparedObject{object: copy, resource: resource}
+		existing, err := resource.Get(ctx, copy.GetName(), metav1.GetOptions{})
+		switch {
+		case apierrors.IsNotFound(err):
+		case err != nil:
+			return nil, fmt.Errorf("read %s: %w", objectKey(copy), err)
+		default:
+			if existing.GetName() != copy.GetName() || existing.GetNamespace() != copy.GetNamespace() {
+				return nil, ownershipConflict(copy, "live resource identity differs from requested identity")
+			}
+			if err := checkOwnership(existing, identity, true, namespaced); err != nil {
+				return nil, err
+			}
+			if existing.GetDeletionTimestamp() != nil || existing.GetUID() == "" || existing.GetResourceVersion() == "" {
+				return nil, fmt.Errorf("%s is deleting or has no UID/resourceVersion", objectKey(copy))
+			}
+			item.exists = true
+		}
+		prepared = append(prepared, item)
+	}
+	return prepared, nil
+}
+
+func (i InstallationIdentity) labels() map[string]string {
+	return map[string]string{
+		ManagedByLabel: ManagedByValue, InstallationLabel: i.Name,
+		InstallationNamespaceLabel: i.Namespace, InstallationUIDLabel: string(i.UID),
+	}
+}
+
+func checkOwnership(object *unstructured.Unstructured, identity InstallationIdentity, existing, namespaced bool) error {
+	labels := object.GetLabels()
+	for label, expected := range identity.labels() {
+		actual, present := labels[label]
+		if (existing || present) && actual != expected {
+			return ownershipConflict(object, fmt.Sprintf("label %q is %q, expected %q", label, actual, expected))
+		}
+	}
+	owners := object.GetOwnerReferences()
+	if existing && namespaced && len(owners) != 1 {
+		return ownershipConflict(object, "exactly one installation controller owner is required")
+	}
+	for _, owner := range owners {
+		if !namespaced || owner.APIVersion != operatorv1alpha1.GroupVersion.String() || owner.Kind != "KubeOVNInstallation" ||
+			owner.Name != identity.Name || owner.UID != identity.UID || owner.Controller == nil || !*owner.Controller {
+			return ownershipConflict(object, "owner reference does not match the installation")
+		}
+	}
+	if len(owners) > 1 {
+		return ownershipConflict(object, "multiple owner references are not supported")
+	}
+	return nil
+}
+
+func objectKey(object *unstructured.Unstructured) string {
+	return object.GroupVersionKind().String() + " " + object.GetNamespace() + "/" + object.GetName()
+}
+
+func ownershipConflict(object *unstructured.Unstructured, reason string) error {
+	return fmt.Errorf("%w: %s: %s", ErrOwnershipConflict, objectKey(object), reason)
+}

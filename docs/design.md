@@ -33,10 +33,33 @@ readiness and network probe evidence before reporting data-plane availability.
 The `KubeOVNRecoveryRequest` API records an auditable human decision and does
 not perform a database wipe automatically.
 
+## Kubernetes workload apply contract
+
+`internal/apply.Client` is a dynamic-client boundary for rendered workload
+objects. Every object must have a fixed name and a namespace matching the
+installation. The adapter stamps these labels and, for namespaced objects, a
+single controller owner reference:
+
+* `app.kubernetes.io/managed-by=kube-ovn-operator`
+* `operator.kubeovn.io/installation=<name>`
+* `operator.kubeovn.io/installation-namespace=<namespace>`
+* `operator.kubeovn.io/installation-uid=<UID>`
+
+Before any mutation, the adapter re-reads every existing object, rejects a
+different owner or installation identity, and sends server-side dry-run
+requests for the complete batch. New objects also pass a server-side create
+dry-run before the real create. Only after all preflight requests succeed does
+it persist objects; existing objects use server-side apply without force
+ownership. This gives a failed dry-run an all-or-nothing guarantee for the
+batch's persistent requests while preserving Kubernetes retry semantics for a
+later write race. A reconciler can inject one adapter per installation through
+`WorkloadFactory`; leaving both workload fields unset preserves the plan-only
+default.
+
 ## Next adapter boundaries
 
-1. Connect the chart renderer to a Helm SDK or sidecar that performs
-   server-side dry-run before applying resources.
+1. Connect the chart renderer to a Helm SDK or sidecar that returns typed
+   workload objects and uses the apply contract above.
 2. Supply an OVNDB transport (libovsdb or an authenticated admin sidecar) that
    implements the `internal/ovnadmin.Client` interface and executes one
    membership operation under the central Lease.

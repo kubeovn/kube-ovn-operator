@@ -8,6 +8,7 @@ import (
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/validation"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
 )
 
@@ -21,6 +22,10 @@ type Rendered struct {
 	Source     string
 	Digest     string
 	ValuesYAML []byte
+	// Objects are optional typed workload manifests. ValuesRenderer leaves this
+	// empty so the default reconciler remains plan-only until a workload
+	// renderer is explicitly injected.
+	Objects    []*unstructured.Unstructured
 }
 
 type Values struct {

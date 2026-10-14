@@ -7,6 +7,8 @@ cleanup() {
   if [[ -n "${operator_pid:-}" ]]; then
     kill "${operator_pid}" 2>/dev/null || true
   fi
+  kubectl delete configmap kube-ovn-operator-workload-smoke kube-ovn-operator-external-owner \
+    -n kube-ovn-operator-system --ignore-not-found >/dev/null 2>&1 || true
   if [[ "${created_cluster}" == 1 ]]; then
     kind delete cluster --name "${cluster_name}" >/dev/null 2>&1 || true
   fi
@@ -40,3 +42,10 @@ kubectl get configmap kube-ovn-operator-plan-kube-ovn -n kube-ovn-operator-syste
 kubectl get configmap kube-ovn-operator-plan-kube-ovn -n kube-ovn-operator-system -o jsonpath='{.data.values\.yaml}' | grep -q 'installMode: full'
 kubectl get lease kube-ovn-operator-installation-kube-ovn -n kube-ovn-operator-system >/dev/null
 kubectl get lease kube-ovn-operator-central-kube-ovn -n kube-ovn-operator-system >/dev/null
+
+installation_uid=$(kubectl get kubeovninstallation/kube-ovn -n kube-ovn-operator-system -o jsonpath='{.metadata.uid}')
+go run ./test/e2e/apply-smoke --namespace kube-ovn-operator-system --installation kube-ovn --installation-uid "${installation_uid}"
+kubectl get configmap kube-ovn-operator-workload-smoke -n kube-ovn-operator-system -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' | grep -qx 'kube-ovn-operator'
+kubectl get configmap kube-ovn-operator-workload-smoke -n kube-ovn-operator-system -o jsonpath='{.metadata.labels.operator\.kubeovn\.io/installation-uid}' | grep -qx "${installation_uid}"
+go run ./test/e2e/apply-smoke --external-owner --name kube-ovn-operator-external-owner --namespace kube-ovn-operator-system --installation kube-ovn --installation-uid "${installation_uid}"
+kubectl delete configmap kube-ovn-operator-workload-smoke kube-ovn-operator-external-owner -n kube-ovn-operator-system --ignore-not-found >/dev/null
