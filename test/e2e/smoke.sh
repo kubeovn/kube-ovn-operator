@@ -26,6 +26,14 @@ for _ in $(seq 1 60); do
   fi
   sleep 1
 done
+if ! curl --fail --silent http://127.0.0.1:8081/readyz >/dev/null 2>&1; then
+  cat /tmp/kube-ovn-operator-e2e.log
+  exit 1
+fi
 kubectl apply -f config/samples/operator_v1alpha1_kubeovninstallation.yaml
-kubectl wait --for=jsonpath='{.status.phase}'=Ready kubeovninstallation/kube-ovn -n kube-ovn-operator-system --timeout=120s
+if ! kubectl wait --for=jsonpath='{.status.phase}'=Ready kubeovninstallation/kube-ovn -n kube-ovn-operator-system --timeout=120s; then
+  kubectl get kubeovninstallation/kube-ovn -n kube-ovn-operator-system -o yaml
+  cat /tmp/kube-ovn-operator-e2e.log
+  exit 1
+fi
 kubectl get configmap kube-ovn-operator-plan-kube-ovn -n kube-ovn-operator-system -o jsonpath='{.data.plan\.json}' | grep -q 'ValidateVersionContract'
