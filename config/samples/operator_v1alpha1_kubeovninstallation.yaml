@@ -1,0 +1,25 @@
+apiVersion: operator.kubeovn.io/v1alpha1
+kind: KubeOVNInstallation
+metadata:
+  name: kube-ovn
+  namespace: kube-ovn-operator-system
+spec:
+  version: v1.17.0
+  chart:
+    source: oci://ghcr.io/kubeovn/kube-ovn-chart
+  mode: full
+  central:
+    mode: raft
+    replicas: 3
+    placement:
+      topologyKey: kubernetes.io/hostname
+    dynamicMembership: false
+  dataPlane:
+    ovsUpdateStrategy: RollingUpdate
+  upgrade:
+    strategy: gatedRolling
+    pauseOnDegraded: true
+    allowRollback: true
+    backup:
+      required: true
+      destination: s3://example/kube-ovn

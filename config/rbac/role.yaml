@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-ovn-operator
+rules:
+  - apiGroups: [operator.kubeovn.io]
+    resources: [kubeovninstallations, kubeovninstallations/status, kubeovninstallations/finalizers, kubeovnrecoveryrequests, kubeovnrecoveryrequests/status]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]

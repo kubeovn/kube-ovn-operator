@@ -1,0 +1,30 @@
+name: E2E
+
+on:
+  pull_request:
+    paths:
+      - 'api/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'config/**'
+      - 'test/**'
+      - '.github/workflows/e2e.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kind-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: kube-ovn-operator-e2e
+      - name: Run operator smoke test
+        run: make e2e
