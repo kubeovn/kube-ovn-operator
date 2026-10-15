@@ -467,7 +467,7 @@ func (p *Provisioner) read(ctx context.Context, name, key string, value any, par
 
 func (p *Provisioner) decode(record *corev1.ConfigMap, key string, value any, parent *Reference) error {
 	if record.UID == "" || record.DeletionTimestamp != nil || record.Immutable == nil || !*record.Immutable ||
-		len(record.Data) != 1 || len(record.BinaryData) != 0 || record.Data[key] == "" || len(record.Data[key]) > 32<<10 || !p.owned(record, parent) {
+		len(record.OwnerReferences) != 0 || len(record.Data) != 1 || len(record.BinaryData) != 0 || record.Data[key] == "" || len(record.Data[key]) > 32<<10 || !p.owned(record, parent) {
 		return errors.New("invalid member record identity or immutable contents")
 	}
 	return json.Unmarshal([]byte(record.Data[key]), value, json.RejectUnknownMembers(true))

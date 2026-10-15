@@ -283,7 +283,7 @@ func TestAmbiguousCreationResponseReusesOriginalJob(t *testing.T) {
 }
 
 func TestClaimReservationAndForeignConsumer(t *testing.T) {
-	for _, which := range []string{"reserved", "consumer", "new-operation", "missing-job", "mutated-job", "truncated-result", "spoofed-pod"} {
+	for _, which := range []string{"reserved", "consumer", "new-operation", "missing-job", "mutated-job", "truncated-result", "spoofed-pod", "collectable-record"} {
 		t.Run(which, func(t *testing.T) {
 			f := setup(t, nil)
 			ref := f.prepare(t).Record
@@ -297,6 +297,15 @@ func TestClaimReservationAndForeignConsumer(t *testing.T) {
 				}
 			case "new-operation":
 				f.request.Preparation.OperationID = uuid.New().String()
+			case "collectable-record":
+				record := new(corev1.ConfigMap)
+				if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: ref.Name}, record); err != nil {
+					t.Fatal(err)
+				}
+				record.OwnerReferences = f.p.owner()
+				if err := f.kube.Update(t.Context(), record); err != nil {
+					t.Fatal(err)
+				}
 			case "missing-job", "mutated-job":
 				job := new(batchv1.Job)
 				_ = f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: ref.Name + "-prepare"}, job)
