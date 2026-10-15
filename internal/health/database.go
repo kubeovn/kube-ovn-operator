@@ -1,4 +1,4 @@
-// Package health collects read-only evidence from the running installation.
+// Package health collects runtime evidence and binds access to owned OVN processes.
 package health
 
 import (
