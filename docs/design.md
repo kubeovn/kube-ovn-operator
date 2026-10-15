@@ -61,9 +61,14 @@ installation/operation/member-bound plan, create native join files, validate and
 sync both, then record their generated server identities. Retrying after partial
 preparation or after joining preserves those identities; damaged or mismatched
 files are retained with an error. It does not start processes or prove remote
-quorum. The workload provisioner must avoid upstream automatic bootstrap/recovery
-paths and persist the prepared identities before startup. See
+quorum. `/member-run` now validates and holds those identities while supervising
+explicit NB/SB servers and northd, with inherited locks and parent-death cleanup.
+Northd uses full client inventories and pinned cluster UUIDs. The Kubernetes
+workload provisioner must persist those identities and authorize startup; it
+must not invoke upstream automatic bootstrap/recovery paths. See
 [preparation and launcher requirements](member-preparation.md).
+The [launcher contract](member-launch.md) defines process/storage ownership and
+the remaining Kubernetes lifecycle integration.
 
 The status phase distinguishes installing, adopting, upgrading, recovering
 and degraded plans. `Ready` requires successful workload, database, runtime and

@@ -102,8 +102,10 @@ Do not run unmodified upstream `start-db.sh` recovery logic over these files.
 The pinned v1.16.13 script can archive an unjoined file after 120 seconds and has
 bootstrap/recovery branches. The new-member launcher must use explicit prepared
 files and must not turn missing quorum or slow joining into automatic rebuilding.
-Northd startup, supervision, storage mounts, health checks and Kubernetes
-ownership still belong to the workload provisioner/launcher.
+The explicit `/member-run` launcher now validates and holds these files while
+supervising both databases and northd; see [the launch contract](member-launch.md).
+Storage mounts, health probes, Kubernetes ownership and startup authorization
+still belong to the workload provisioner and persistent lifecycle executor.
 
 ## Validation scope
 
