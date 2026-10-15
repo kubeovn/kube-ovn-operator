@@ -148,11 +148,32 @@ request only: both databases must converge before workload changes.
 The planner supports replacement at the same desired replica count: join one
 replacement, wait for it to catch up, remove the old member, then permit workload
 scaling. The command transport cannot prepare a database or start a joining
-server. Joining still needs a workload provisioner and `ovsdb-tool join-cluster`.
+server. `internal/prepare` and `/member-prepare` now prepare a persistent pair of
+native NB/SB join files and return their generated server identities. Joining
+still needs a workload provisioner/launcher and persistent lifecycle executor
+to authorize startup and observe both databases catching up.
 A backup capture and verification adapter is available as described below.
 The durable approval adapter is described below. Its production wiring, the
 persistent NB/SB lifecycle state machine and strict in-flight fencing remain
 required before enabling automatic membership changes in the default reconciler.
+
+## New member preparation
+
+The Linux `/member-prepare` helper accepts a versioned plan binding installation
+UID, operation UUID, stable member name and both databases' cluster UUIDs and
+literal-IP RAFT addresses. It persists the immutable request, uses native
+`ovsdb-tool --cid=... join-cluster`, validates both files and publishes their
+generated server identities after file/directory fsync. Partial attempts reuse
+already generated identities across retry. Corrupt or incompatible files are
+retained with an error; existing installation databases are never reset.
+
+The root must be an existing private directory owned by the invoking OS user,
+with flock, atomic rename and fsync support. The helper uses no Kubernetes
+credentials, cannot verify remote quorum and does not start servers. The
+operator image includes it, but its distroless runtime has no `ovsdb-tool`;
+a workload provisioner must supply a compatible native execution environment.
+Default dynamic membership is still disabled. See
+[preparation persistence and startup requirements](docs/member-preparation.md).
 
 ## Permanent-loss approvals
 
@@ -246,6 +267,11 @@ backup and approval providers to check healthy leave, explicit replacement provi
 quorum-loss refusal and preservation of committed data. This tests admin
 operations and 3-to-2-to-3 convergence; it does not exercise Kubernetes node or
 workload replacement.
+Another live test prepares one new central member against actual OVN NB/SB
+schemas. Both databases grow from three to four healthy members with preserved
+row UUIDs/data, and preparation retry after joining retains the same identities.
+This does not exercise the future Kubernetes workload provisioner or joint
+replacement executor.
 Set `OVSDB_TEST_BIN` to a directory containing `ovsdb-tool`,
 `ovsdb-server`, `ovsdb-client` and `ovs-appctl` to run those tests locally. The kind job checks live Lease contention,
 renewal past the initial expiry, release, and loss cancellation.
