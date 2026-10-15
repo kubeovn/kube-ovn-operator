@@ -17,7 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
@@ -105,17 +104,31 @@ func run() error {
 	if err := adapter.Apply(ctx, objects); err != nil {
 		return fmt.Errorf("repeat apply: %w", err)
 	}
-	serverKey := types.NamespacedName{Namespace: installation.Namespace, Name: probe.Name(string(installation.UID)) + "-server"}
-	server := new(appsv1.DaemonSet)
-	if err := kube.Get(ctx, serverKey, server); err != nil {
-		return err
-	}
-	for i, env := range server.Spec.Template.Spec.Containers[0].Env {
-		if env.Name == "POD_UID" {
-			server.Spec.Template.Spec.Containers[0].Env[i] = corev1.EnvVar{Name: "POD_UID", Value: "foreign-backend"}
+	fmt.Println("repeated probe resource apply succeeded")
+	// Inject the fault through the same SSA manager. Update would introduce
+	// separately owned fields that non-forcing apply must preserve on recovery.
+	faultObjects := make([]*unstructured.Unstructured, len(objects))
+	for i, object := range objects {
+		faultObjects[i] = object.DeepCopy()
+		if object.GetKind() != "DaemonSet" || object.GetName() != probe.Name(string(installation.UID))+"-server" {
+			continue
 		}
+		var server appsv1.DaemonSet
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &server); err != nil {
+			return err
+		}
+		for j, env := range server.Spec.Template.Spec.Containers[0].Env {
+			if env.Name == "POD_UID" {
+				server.Spec.Template.Spec.Containers[0].Env[j] = corev1.EnvVar{Name: "POD_UID", Value: "foreign-backend"}
+			}
+		}
+		spec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&server.Spec)
+		if err != nil {
+			return err
+		}
+		faultObjects[i].Object["spec"] = spec
 	}
-	if err := kube.Update(ctx, server, client.FieldOwner(apply.DefaultFieldManager)); err != nil {
+	if err := adapter.Apply(ctx, faultObjects); err != nil {
 		return err
 	}
 	if err := wait(ctx, func() error {
