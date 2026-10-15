@@ -52,7 +52,7 @@ starts an asynchronous change and does not authorize workload scaling.
 These checks do not make the multiple OVSDB/Kubernetes observations atomic or
 fence an already submitted command after Lease loss. The default reconciler does
 not invoke membership mutations. It still needs lifecycle wiring for the backup
-provider and durable approval adapter, persistent NB/SB operation state and a new-member provisioner. There
+provider, durable approval adapter and new-member provisioner, plus persistent NB/SB operation state. There
 is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
 a new database before its process starts, and a departed server cannot rejoin.
 
@@ -67,8 +67,10 @@ Northd uses full client inventories and pinned cluster UUIDs. The Kubernetes
 workload provisioner must persist those identities and authorize startup; it
 must not invoke upstream automatic bootstrap/recovery paths. See
 [preparation and launcher requirements](member-preparation.md).
-The [launcher contract](member-launch.md) defines process/storage ownership and
-the remaining Kubernetes lifecycle integration.
+The [launcher contract](member-launch.md) defines process/storage ownership.
+The [Kubernetes workload adapter](member-workloads.md) now provides the durable
+Job/result/StatefulSet handoff with pinned installation, Node and volume
+identities. Default-controller wiring and joint membership convergence remain open.
 
 The status phase distinguishes installing, adopting, upgrading, recovering
 and degraded plans. `Ready` requires successful workload, database, runtime and

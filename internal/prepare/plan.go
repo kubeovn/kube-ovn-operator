@@ -49,6 +49,30 @@ type PreparedDatabase struct {
 	Path      string `json:"path"`
 }
 
+// Canonical validates a plan and returns an independent, deterministically
+// ordered copy and its content digest for durable orchestration records.
+func (plan Plan) Canonical() (Plan, string, error) { return canonical(plan) }
+
+// Validate checks a published result without reading the native files. The
+// launcher must still Acquire those files before starting any native process.
+func (result Result) Validate(plan Plan) error {
+	plan, digest, err := canonical(plan)
+	if err != nil {
+		return err
+	}
+	if result.PlanDigest != digest || len(result.Databases) != len(plan.Databases) {
+		return errors.New("prepared result does not match the plan")
+	}
+	for i, db := range plan.Databases {
+		got := result.Databases[i]
+		if got.Name != db.Name || got.ClusterID != db.ClusterID || got.Address != db.LocalAddress ||
+			!membership.ValidID(got.ServerID) || got.Path != plan.OperationID+"/"+databaseFile(db.Name) {
+			return errors.New("prepared database identity does not match the plan")
+		}
+	}
+	return nil
+}
+
 func canonical(plan Plan) (Plan, string, error) {
 	if plan.FormatVersion != 1 {
 		return Plan{}, "", errors.New("unsupported preparation format version")

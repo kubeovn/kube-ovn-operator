@@ -151,9 +151,9 @@ scaling. The command transport cannot prepare a database or start a joining
 server. `internal/prepare` and `/member-prepare` now prepare a persistent pair of
 native NB/SB join files and return their generated server identities.
 `internal/central` and `/member-run` supervise explicit NB/SB and northd startup
-from those files. Joining still needs a Kubernetes workload provisioner and
-persistent lifecycle executor to authorize startup and observe both databases
-catching up.
+from those files. `internal/workload` supplies the Kubernetes preparation and
+startup adapter. Joining still needs the persistent lifecycle executor to
+authorize startup and observe both databases catching up.
 A backup capture and verification adapter is available as described below.
 The durable approval adapter is described below. Its production wiring, the
 persistent NB/SB lifecycle state machine and strict in-flight fencing remain
@@ -185,9 +185,32 @@ reuse the files and identities. Northd uses explicit peer client endpoints with
 pinned cluster UUIDs; local follower sockets alone cannot reach both leaders.
 Running processes do not prove readiness. A separate `central-runtime` Docker
 target packages both helpers with a digest-pinned Kube-OVN v1.16.13 native image
-and runs as UID/GID 65532. Kubernetes workload/storage wiring, runtime image
+and runs as UID/GID 65532. Default-controller/storage wiring, runtime image
 publication/selection and lifecycle authorization are still required. See
 [launch request and supervision](docs/member-launch.md).
+
+## Member workloads
+
+`internal/workload.Provisioner` creates a preparation Job and, only after an
+explicit `Start` call with its durably recorded native result, a one-member
+StatefulSet using `/member-run`. Immutable records bind the installation UID and
+generation, operation, Node UID, PVC/PV UIDs, runtime image digest and workload
+identities. A resourceVersion-guarded PVC reservation excludes another member.
+Retries recover an accepted create response without regenerating database IDs;
+recorded objects that disappear, change identity or change spec are rejected.
+
+The caller supplies a previously provisioned, Bound filesystem PVC with a private
+mount root owned by UID 65532. Preparation does not start a server. The workload
+uses host networking on the pinned Node, unprivileged high ports, dropped Linux
+capabilities and no service-account token. Records and storage reservations are
+retained; this adapter has no delete, resize or automatic retirement path.
+
+The default controller is not yet connected to this adapter. A persistent joint
+NB/SB executor must authorize `Start` from fresh quorum/backup evidence, observe
+both new members catching up and only then remove an old member. Runtime image
+publication, automatic storage provisioning, TLS Secret identity management and
+Kubernetes node replacement remain separate work. Pod readiness alone does not
+prove database health. See [member workload contract](docs/member-workloads.md).
 
 ## Permanent-loss approvals
 
@@ -284,7 +307,7 @@ workload replacement.
 Another live test prepares one new central member against actual OVN NB/SB
 schemas. Both databases grow from three to four healthy members with preserved
 row UUIDs/data, and preparation retry after joining retains the same identities.
-This does not exercise the future Kubernetes workload provisioner or joint
+This does not exercise the Kubernetes workload adapter or joint
 replacement executor.
 Set `OVSDB_TEST_BIN` to a directory containing `ovsdb-tool`,
 `ovsdb-server`, `ovsdb-client` and `ovs-appctl` to run those tests locally. The kind job checks live Lease contention,

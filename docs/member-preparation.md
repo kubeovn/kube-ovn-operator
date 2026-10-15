@@ -1,9 +1,9 @@
 # New central member preparation
 
 `internal/prepare` and the Linux `member-prepare` command prepare local files
-for a new central member. The persistent NB/SB lifecycle executor and Kubernetes
-workload provisioner are still required; default dynamic membership remains
-disabled.
+for a new central member. The [Kubernetes workload adapter](member-workloads.md)
+persists the handoff to a preparation Job and explicit launcher. The persistent
+NB/SB lifecycle executor is still required; default dynamic membership remains disabled.
 
 ## Plan and invocation
 
