@@ -217,3 +217,31 @@ func (r *recordingResource) Create(_ context.Context, _ *unstructured.Unstructur
 	r.createOptions = append(r.createOptions, options)
 	return new(unstructured.Unstructured), nil
 }
+
+func TestRetainedResourceHasNoGarbageCollectionOwner(t *testing.T) {
+	identity := InstallationIdentity{Namespace: "default", Name: "installation", UID: "installation-uid"}
+	for _, kind := range []string{"ConfigMap", "PersistentVolumeClaim"} {
+		t.Run(kind, func(t *testing.T) {
+			object := configMap("retained", nil)
+			object.SetKind(kind)
+			if kind == "ConfigMap" {
+				object.SetAnnotations(map[string]string{"helm.sh/resource-policy": "keep"})
+			}
+			mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
+			mapper.Add(corev1.SchemeGroupVersion.WithKind(kind), meta.RESTScopeNamespace)
+			dynamic := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+			adapter := &Client{Dynamic: dynamic, Mapper: mapper, Identity: identity}
+			prepared, err := adapter.prepare(t.Context(), identity, []*unstructured.Unstructured{object})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(prepared[0].object.GetOwnerReferences()) != 0 {
+				t.Fatal("retained resource has a garbage collection owner")
+			}
+			assertIdentityLabels(t, prepared[0].object, identity)
+			if err := checkOwnership(prepared[0].object, identity, true, false); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

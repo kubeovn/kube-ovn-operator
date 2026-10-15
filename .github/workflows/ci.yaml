@@ -22,6 +22,10 @@ jobs:
           test -z "$(gofmt -l .)"
           make manifests
           make chart-lint
+      - name: Render pinned upstream chart
+        run: |
+          curl --fail --location --silent --show-error https://github.com/kubeovn/kube-ovn/releases/download/v1.16.13/kube-ovn-v1.16.13.tgz --output /tmp/kube-ovn-v1.16.13.tgz
+          KUBE_OVN_CHART_ARCHIVE=/tmp/kube-ovn-v1.16.13.tgz go test ./internal/chart -run TestReleasedKubeOVNChart -count=1
       - name: Test
         run: make test
       - name: Vet

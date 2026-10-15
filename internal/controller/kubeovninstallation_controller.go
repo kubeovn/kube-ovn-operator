@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	stdjson "encoding/json/v2"
 	"fmt"
 	"time"
 
@@ -36,6 +38,7 @@ type KubeOVNInstallationReconciler struct {
 	Scheme          *apiruntime.Scheme
 	Clock           func() time.Time
 	Renderer        chart.Renderer
+	RendererFactory func(*operatorv1alpha1.KubeOVNInstallation) chart.Renderer
 	Workload        apply.ApplyClient
 	WorkloadFactory func(apply.InstallationIdentity) apply.ApplyClient
 }
@@ -54,19 +57,25 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	if err := r.Get(ctx, req.NamespacedName, installation); err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
+	if !installation.DeletionTimestamp.IsZero() {
+		return reconcile.Result{}, nil
+	}
 	now := time.Now
 	if r.Clock != nil {
 		now = r.Clock
 	}
 	plan := planner.Build(installation.Spec, installation.Status.ObservedVersion)
 	if plan.Blocking != "" {
-		if err := r.updateStatus(ctx, installation, plan, now()); err != nil {
+		if err := r.updateStatus(ctx, installation, plan, now(), nil); err != nil {
 			return reconcile.Result{}, err
 		}
 		logger.Info("installation plan is blocked", "reason", plan.Blocking)
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	renderer := r.Renderer
+	if r.RendererFactory != nil {
+		renderer = r.RendererFactory(installation)
+	}
 	if renderer == nil {
 		renderer = chart.ValuesRenderer{}
 	}
@@ -75,7 +84,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		plan.Phase = operatorv1alpha1.PhaseDegraded
 		plan.Step = "Render"
 		plan.Blocking = err.Error()
-		if statusErr := r.updateStatus(ctx, installation, plan, now()); statusErr != nil {
+		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil); statusErr != nil {
 			return reconcile.Result{}, statusErr
 		}
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
@@ -95,19 +104,40 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	if r.WorkloadFactory != nil {
 		workload = r.WorkloadFactory(apply.InstallationIdentity{Namespace: installation.Namespace, Name: installation.Name, UID: installation.UID})
 	}
+	var observation *apply.Observation
 	if workload != nil && len(rendered.Objects) != 0 {
+		if err := r.ensureApplyCheckpoint(ctx, installation, rendered); err != nil {
+			plan.Phase = operatorv1alpha1.PhaseDegraded
+			plan.Step = "ApplyCheckpoint"
+			plan.Blocking = err.Error()
+			if statusErr := r.updateStatus(ctx, installation, plan, now(), nil); statusErr != nil {
+				return reconcile.Result{}, statusErr
+			}
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
 		if err := workload.Apply(ctx, rendered.Objects); err != nil {
 			plan.Phase = operatorv1alpha1.PhaseDegraded
 			plan.Step = "Apply"
 			plan.Blocking = err.Error()
-			if statusErr := r.updateStatus(ctx, installation, plan, now()); statusErr != nil {
+			if statusErr := r.updateStatus(ctx, installation, plan, now(), nil); statusErr != nil {
 				return reconcile.Result{}, statusErr
 			}
 			logger.Info("installation workload apply is blocked", "reason", err.Error())
 			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 		}
+
+		if observer, ok := workload.(apply.Observer); ok {
+			observed, err := observer.Observe(ctx, rendered.Objects)
+			if err != nil {
+				plan.Phase = operatorv1alpha1.PhaseDegraded
+				plan.Step = "Observe"
+				plan.Blocking = err.Error()
+			} else {
+				observation = &observed
+			}
+		}
 	}
-	if err := r.updateStatus(ctx, installation, plan, now()); err != nil {
+	if err := r.updateStatus(ctx, installation, plan, now(), observation); err != nil {
 		return reconcile.Result{}, err
 	}
 	logger.Info("installation plan reconciled", "phase", plan.Phase, "step", plan.Step)
@@ -183,29 +213,76 @@ func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context,
 	return nil
 }
 
-func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time) error {
+func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time, observation *apply.Observation) error {
 	status := installation.Status.DeepCopy()
+	if status.ApplyCheckpoint == nil {
+		status.ObservedVersion = ""
+	}
 	status.Phase = plan.Phase
 	status.ObservedGeneration = installation.Generation
 	status.Topology.DesiredCentralReplicas = installation.Spec.Central.Replicas
+	status.Topology.ReadyCentralReplicas = 0
+	status.HCP = operatorv1alpha1.HCPStatus{}
 	status.Upgrade.Step = plan.Step
-	status.Upgrade.CanRollback = installation.Spec.Upgrade.AllowRollback
-	if plan.Blocking == "" {
-		status.ObservedVersion = installation.Spec.Version
-		status.Topology.ReadyCentralReplicas = installation.Spec.Central.Replicas
-		status.HCP.Paired = installation.Spec.HCP.Enabled
-		status.HCP.EndpointReady = !installation.Spec.HCP.Enabled || (installation.Spec.HCP.NBEndpoint != "" && installation.Spec.HCP.SBEndpoint != "")
-		setCondition(&status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "PlanReady", Message: "The installation plan passed validation and is serialized for the workload adapter.", ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now)})
-		setCondition(&status.Conditions, metav1.Condition{Type: "Degraded", Status: metav1.ConditionFalse, Reason: "PlanValid", Message: "No safety gate is currently blocking reconciliation.", ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now)})
-	} else {
-		setCondition(&status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "SafetyGateBlocked", Message: plan.Blocking, ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now)})
-		setCondition(&status.Conditions, metav1.Condition{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "SafetyGateBlocked", Message: plan.Blocking, ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now)})
-	}
-	if err := r.Status().Update(ctx, installationWithStatus(installation, *status)); err != nil {
-		if apierrors.IsConflict(err) {
-			return nil
+	status.Upgrade.CanRollback = false
+	readyReason, message := "PlanOnly", "The installation plan is valid; workload readiness has not been observed."
+	workloadStatus := metav1.ConditionUnknown
+	workloadReason := "NotObserved"
+	degraded := metav1.ConditionFalse
+	degradedReason := "PlanValid"
+	if observation != nil {
+		status.Topology.ReadyCentralReplicas = observation.ReadyCentralReplicas
+		workloadStatus = metav1.ConditionFalse
+		workloadReason = "RolloutProgressing"
+		readyReason, message = "WorkloadsProgressing", observation.Message
+		if observation.Ready {
+			workloadStatus, workloadReason = metav1.ConditionTrue, "RolloutComplete"
+			status.ObservedVersion = installation.Spec.Version
+			readyReason = "VerificationPending"
 		}
-		return fmt.Errorf("update installation status: %w", err)
+	}
+	if plan.Blocking != "" {
+		readyReason, message = "SafetyGateBlocked", plan.Blocking
+		degraded, degradedReason = metav1.ConditionTrue, "SafetyGateBlocked"
+	}
+	for _, condition := range []metav1.Condition{
+		{Type: "Ready", Status: metav1.ConditionFalse, Reason: readyReason, Message: message},
+		{Type: "Degraded", Status: degraded, Reason: degradedReason, Message: message},
+		{Type: "WorkloadsReady", Status: workloadStatus, Reason: workloadReason, Message: message},
+	} {
+		condition.ObservedGeneration = installation.Generation
+		condition.LastTransitionTime = metav1.NewTime(now)
+		setCondition(&status.Conditions, condition)
+	}
+	return r.Status().Update(ctx, installationWithStatus(installation, *status))
+}
+
+func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, rendered chart.Rendered) error {
+	specJSON, err := stdjson.Marshal(installation.Spec, stdjson.Deterministic(true))
+	if err != nil {
+		return err
+	}
+	manifestJSON, err := stdjson.Marshal(rendered.Objects, stdjson.Deterministic(true))
+	if err != nil {
+		return err
+	}
+	checkpoint := operatorv1alpha1.ApplyCheckpointStatus{
+		SpecHash:     fmt.Sprintf("%x", sha256.Sum256(specJSON)),
+		ManifestHash: fmt.Sprintf("%x", sha256.Sum256(manifestJSON)),
+		Version:      installation.Spec.Version,
+	}
+	if existing := installation.Status.ApplyCheckpoint; existing != nil {
+		if *existing != checkpoint {
+			return fmt.Errorf("installation inputs changed after the first apply checkpoint; a lifecycle executor is required")
+		}
+		return nil
+	}
+	installation.Status.ApplyCheckpoint = &checkpoint
+	// Persist before any workload write so a restart or partial apply cannot
+	// turn a topology/version change into a fresh installation.
+	if err := r.Status().Update(ctx, installation); err != nil {
+		installation.Status.ApplyCheckpoint = nil
+		return fmt.Errorf("persist apply checkpoint: %w", err)
 	}
 	return nil
 }

@@ -167,6 +167,9 @@ func (in *AdoptionSpec) DeepCopyInto(out *AdoptionSpec) {
 }
 func (in *KubeOVNInstallationStatus) DeepCopyInto(out *KubeOVNInstallationStatus) {
 	*out = *in
+	if in.ApplyCheckpoint != nil {
+		out.ApplyCheckpoint = new(*in.ApplyCheckpoint)
+	}
 	if in.Conditions != nil {
 		out.Conditions = make([]metav1.Condition, len(in.Conditions))
 		copy(out.Conditions, in.Conditions)
