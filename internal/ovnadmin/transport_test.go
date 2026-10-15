@@ -225,6 +225,37 @@ func TestBackupVerifierSeesFinalCommittedFence(t *testing.T) {
 	}
 }
 
+func TestJointGuardRunsAtLeaveAndKickDispatch(t *testing.T) {
+	for _, operation := range []membership.Operation{membership.OperationLeave, membership.OperationKick} {
+		t.Run(string(operation), func(t *testing.T) {
+			writes, guards := 0, 0
+			c := &CommandClient{ClusterID: testClusterID, Endpoints: testEndpoints(), Runner: runFunc(func(_ context.Context, endpoint string, command []string) ([]byte, error) {
+				if command[4] != "cluster/status" {
+					writes++
+					return nil, nil
+				}
+				if operation == membership.OperationKick && endpoint == "server-1" {
+					return nil, fmt.Errorf("offline")
+				}
+				return []byte(testStatus(endpoint)), nil
+			})}
+			executor := approvedExecutor(t, c)
+			executor.BeforeDispatch = func(_ context.Context, final Snapshot) error {
+				guards++
+				if final.CommitIndex != 20 {
+					t.Fatalf("guard received wrong final fence: %+v", final)
+				}
+				return fmt.Errorf("other OVN database lost replacement health")
+			}
+			change := membership.Change{Operation: operation, ClusterID: testClusterID, Member: testSnapshot().Members[1], Reason: "joint replacement", BackupRef: "verified-backup", PermanentLossApproved: operation == membership.OperationKick}
+			err := withCentralLease(t, func(ctx context.Context) error { return executor.Execute(ctx, "server-0", change) })
+			if err == nil || writes != 0 || guards != 1 {
+				t.Fatalf("guards=%d writes=%d err=%v", guards, writes, err)
+			}
+		})
+	}
+}
+
 func TestDispatchRejectsChangesDuringBackupReadback(t *testing.T) {
 	for _, scenario := range []string{"commit", "term", "target recovered"} {
 		t.Run(scenario, func(t *testing.T) {

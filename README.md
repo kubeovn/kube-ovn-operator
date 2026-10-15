@@ -152,12 +152,12 @@ server. `internal/prepare` and `/member-prepare` now prepare a persistent pair o
 native NB/SB join files and return their generated server identities.
 `internal/central` and `/member-run` supervise explicit NB/SB and northd startup
 from those files. `internal/workload` supplies the Kubernetes preparation and
-startup adapter. Joining still needs the persistent lifecycle executor to
-authorize startup and observe both databases catching up.
+startup adapter. `internal/lifecycle` now persists joint operation intent,
+authorizes startup and observes both databases catching up before removal.
 A backup capture and verification adapter is available as described below.
-The durable approval adapter is described below. Its production wiring, the
-persistent NB/SB lifecycle state machine and strict in-flight fencing remain
-required before enabling automatic membership changes in the default reconciler.
+The durable approval adapter is described below. Default-controller operation
+selection, production wiring and strict in-flight fencing remain required before
+enabling automatic membership changes in the default reconciler.
 
 ## New member preparation
 
@@ -205,12 +205,28 @@ uses host networking on the pinned Node, unprivileged high ports, dropped Linux
 capabilities and no service-account token. Records and storage reservations are
 retained; this adapter has no delete, resize or automatic retirement path.
 
-The default controller is not yet connected to this adapter. A persistent joint
-NB/SB executor must authorize `Start` from fresh quorum/backup evidence, observe
-both new members catching up and only then remove an old member. Runtime image
+The default controller is not yet connected to this adapter. The joint
+NB/SB executor now authorizes `Start` from fresh quorum/backup evidence, observes
+both new members catching up and only then removes an old member. Runtime image
 publication, automatic storage provisioning, TLS Secret identity management and
 Kubernetes node replacement remain separate work. Pod readiness alone does not
 prove database health. See [member workload contract](docs/member-workloads.md).
+
+## Joint membership lifecycle
+
+`internal/lifecycle.Executor` persists an immutable operation request and a
+resourceVersion-guarded installation journal before preparing, starting or removing
+members. `NewKubernetes` connects the actual workload, pod admin, backup and
+approval providers. Its inventory includes temporarily added peers, independently
+of the final replica count. Both databases must catch up before either old member
+can leave; both must converge before the exact old one-member StatefulSet is
+scaled to zero. Completion waits for its Pods to disappear and retains storage.
+
+Reconstructed executors recover partial NB/SB transitions, lost responses and
+the original completion receipt. A changed identity, missing retained member,
+lost quorum or stale backup blocks progress. Ordinary Chart Deployment retirement,
+node selection, generation transitions and default-controller apply-checkpoint
+wiring remain open. See [joint lifecycle contract](docs/joint-lifecycle.md).
 
 ## Permanent-loss approvals
 
