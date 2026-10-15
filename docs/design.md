@@ -51,8 +51,9 @@ starts an asynchronous change and does not authorize workload scaling.
 
 These checks do not make the multiple OVSDB/Kubernetes observations atomic or
 fence an already submitted command after Lease loss. The default reconciler does
-not invoke membership mutations. It still needs lifecycle wiring for the backup
-provider, durable approval adapter and new-member provisioner, plus persistent NB/SB operation state. There
+not invoke membership mutations. `internal/lifecycle` now connects the backup,
+approval and member providers with persistent joint NB/SB operation state. The
+default controller still needs operation selection and apply-checkpoint wiring. There
 is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
 a new database before its process starts, and a departed server cannot rejoin.
 
@@ -70,7 +71,9 @@ must not invoke upstream automatic bootstrap/recovery paths. See
 The [launcher contract](member-launch.md) defines process/storage ownership.
 The [Kubernetes workload adapter](member-workloads.md) now provides the durable
 Job/result/StatefulSet handoff with pinned installation, Node and volume
-identities. Default-controller wiring and joint membership convergence remain open.
+identities. The [joint lifecycle executor](joint-lifecycle.md) now performs
+joint convergence and exact single-member StatefulSet retirement, while
+default-controller wiring and ordinary Chart Deployment handoff remain open.
 
 The status phase distinguishes installing, adopting, upgrading, recovering
 and degraded plans. `Ready` requires successful workload, database, runtime and
@@ -175,10 +178,11 @@ installations skip them; external/HCP verification still awaits peer evidence.
    values, complete target RBAC and live installation/network acceptance. The
    initial renderer verifies archive SHA-256, chart appVersion and kubeVersion,
    maps upstream values, and separates lifecycle hooks from normal resources.
-2. Wire the guarded unixctl membership transport into a persistent NB/SB
-   lifecycle executor, with stable workload identities, the backup provider,
-   durable approvals and a new-member provisioner. Validate node replacement and every
-   intermediate quorum state before enabling automatic changes.
+2. Connect the persistent joint lifecycle executor to default-controller operation
+   selection, durable topology inventory and generation/apply-checkpoint changes.
+   Migrate ordinary Chart Deployments to independently controlled members.
+   Validate node replacement and every intermediate quorum state before enabling
+   automatic changes.
 3. Complete backup storage/policy and lifecycle execution providers and verify complete Kube-OVN
    installation/transition networking. A missing health provider keeps
    `Ready=False`. Add transport-level fencing for

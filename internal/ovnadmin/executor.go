@@ -53,6 +53,9 @@ type Executor struct {
 	Database      string
 	Backups       BackupVerifier
 	PermanentLoss LossVerifier
+	// BeforeDispatch lets a joint lifecycle executor invalidate authorization
+	// if the other database changed while this database was being verified.
+	BeforeDispatch func(context.Context, Snapshot) error
 }
 
 func (e Executor) Execute(ctx context.Context, endpoint string, change membership.Change) error {
@@ -114,8 +117,13 @@ func (e Executor) Execute(ctx context.Context, endpoint string, change membershi
 				if !currentExpiry.Equal(validUntil) || !time.Now().Before(currentExpiry) {
 					return fmt.Errorf("approval expiry changed or passed before dispatch")
 				}
+				if e.BeforeDispatch != nil {
+					return e.BeforeDispatch(ctx, final)
+				}
 				return nil
 			}
+		} else if e.BeforeDispatch != nil {
+			grant.recheck = e.BeforeDispatch
 		}
 		if err := lease.Check(ctx, lease.Central); err != nil {
 			return grant, fmt.Errorf("guard membership change: %w", err)

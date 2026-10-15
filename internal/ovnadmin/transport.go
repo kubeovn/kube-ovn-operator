@@ -269,7 +269,7 @@ func (c *CommandClient) mutate(ctx context.Context, endpoint string, expected Sn
 	}
 	if grant.recheck != nil {
 		if err := grant.recheck(ctx, final); err != nil {
-			return fmt.Errorf("recheck permanent-loss approval before dispatch: %w", err)
+			return fmt.Errorf("recheck membership authorization before dispatch: %w", err)
 		}
 	}
 	if err := lease.Check(ctx, lease.Central); err != nil {

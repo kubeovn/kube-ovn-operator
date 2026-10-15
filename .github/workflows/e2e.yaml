@@ -43,12 +43,12 @@ jobs:
         run: |
           bash test/e2e/probe-image.sh kube-ovn-operator-e2e
           go run ./test/e2e/network-smoke
-      - name: Verify native member workload provisioning
+      - name: Verify durable joint NB/SB replacement and workload retirement
         run: bash test/e2e/member-image.sh kube-ovn-operator-e2e
       - name: Diagnose member provisioning failure
         if: failure()
         run: |
           kubectl get jobs,pods,statefulsets,pvc -n kube-ovn-operator-system -o wide
           kubectl get events -n kube-ovn-operator-system --sort-by=.metadata.creationTimestamp
-          kubectl logs -n kube-ovn-operator-system member-seed --all-containers --tail=100 || true
+          kubectl logs -n kube-ovn-operator-system member-seed-0 --all-containers --tail=100 || true
           kubectl logs -n kube-ovn-operator-system -l app=ovn-central --all-containers --tail=100 || true
