@@ -48,6 +48,16 @@ func nativeCall(t *testing.T, binary string, args ...string) []byte {
 	return out
 }
 
+func TestLiveOVNCentralRejectsPrivilegedTool(t *testing.T) {
+	path := os.Getenv("CENTRAL_TEST_PRIVILEGED_SERVER")
+	if path == "" {
+		t.Skip("set CENTRAL_TEST_PRIVILEGED_SERVER to an existing capability-bearing native binary")
+	}
+	if err := validateExecutable(path); err == nil || !strings.Contains(err.Error(), "privilege transitions") {
+		t.Fatalf("privileged native tool was not rejected: %v", err)
+	}
+}
+
 func newLaunchFixture(t *testing.T) *launchFixture {
 	t.Helper()
 	toolDir, ovnDir, schemas := os.Getenv("OVSDB_TEST_BIN"), os.Getenv("OVN_TEST_BIN"), os.Getenv("OVN_TEST_SCHEMA_DIR")

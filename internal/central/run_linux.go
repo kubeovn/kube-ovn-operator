@@ -38,12 +38,8 @@ func Run(ctx context.Context, options Options, request Request) error {
 		return err
 	}
 	for _, binary := range []string{options.OVSDBTool, options.OVSDBServer, options.Northd} {
-		if !filepath.IsAbs(binary) {
-			return errors.New("native tool paths must be absolute")
-		}
-		info, err := os.Stat(binary)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
-			return errors.New("native tools must already exist and be executable")
+		if err := validateExecutable(binary); err != nil {
+			return err
 		}
 	}
 	if options.ShutdownTimeout == 0 {
@@ -116,6 +112,29 @@ func Run(ctx context.Context, options Options, request Request) error {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	}
 	return supervise(ctx, commands, options.ShutdownTimeout)
+}
+
+func validateExecutable(path string) error {
+	if !filepath.IsAbs(path) {
+		return errors.New("native tool paths must be absolute")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		return errors.New("native tools must already exist and be executable")
+	}
+	// Linux may clear PR_SET_PDEATHSIG across a privileged exec. Keep the
+	// supervisor guarantee independent of a binary's file capabilities or IDs.
+	if info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+		return errors.New("native tools must not perform file-based privilege transitions")
+	}
+	size, err := syscall.Getxattr(path, "security.capability", nil)
+	if err != nil && !errors.Is(err, syscall.ENODATA) && !errors.Is(err, syscall.ENOTSUP) {
+		return fmt.Errorf("inspect native tool capabilities: %w", err)
+	}
+	if size > 0 {
+		return errors.New("native tools must not perform file-based privilege transitions")
+	}
+	return nil
 }
 
 func attachRuntime(cmd *exec.Cmd, directory, lock *os.File) string {

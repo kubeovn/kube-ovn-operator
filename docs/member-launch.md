@@ -81,10 +81,17 @@ provide the request, private directories owned by that UID, storage and required
 network placement. The native runtime version is fixed by this image; do not
 treat it as compatible with arbitrary installation versions. Publication, version
 selection and Kubernetes deployment still belong to the lifecycle integration.
+The upstream image's `ovsdb-server` has a file capability. The runtime installs
+ordinary executable copies under `/opt/ovn-native` without preserving capability
+attributes and puts that directory first in `PATH`. The launcher rejects setuid,
+setgid and capability-bearing tool files, because privileged exec can clear the
+parent-death signal. The copies retain the original native binary contents.
 
 CI builds the derived `central-test` target and runs the real native lifecycle
 tests as UID/GID 65532 inside it. The test binary and tool-directory symlinks are
 absent from `central-runtime`. Container builds run in CI, not local validation.
+The image test also verifies that the original capability-bearing server is
+rejected; it does not relax process-inspection checks or grant extra capabilities.
 
 ## Storage, process ownership and restart
 
