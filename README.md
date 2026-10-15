@@ -52,7 +52,24 @@ updated and ready replicas, and matching StatefulSet revisions. Jobs, PVCs and
 CRDs must also reach their relevant completion/binding/establishment states.
 `observedVersion` is populated only after rollout completes.
 
-`Ready` remains false until OVN and network verification is implemented. A
+`OVNDBReady` reports live NB/SB metadata after rollout. The operator follows
+Pod controller UID links to the installation's Deployment/StatefulSet and uses
+bounded, read-only `ovsdb-client query` commands through `pods/exec`. For RAFT,
+all expected pods must report the same cluster ID per database, unique full
+server IDs, positive client-visible data indexes, storage connectivity and
+exactly one leader. Standalone mode checks the actual standalone database
+model and connectivity. Failed observations clear previous health evidence.
+Database identities and sampled member indexes are published in `status.topology`.
+
+These are sampled health observations; they do not prove an atomic RAFT
+membership snapshot or authorize membership changes. In particular, the
+server's `connected` signal can lag a failure while an election is in progress.
+Northd, data-plane connections and network probes still require verification.
+External/HCP databases await a peer provider. Observation requires pod list,
+ReplicaSet/Deployment/StatefulSet read and `pods/exec` create permissions; the
+limited shipped RBAC still requires environment-specific review and expansion.
+
+`Ready` remains false until complete OVN and network verification is implemented. A
 successful rollout reports `VerificationPending`; a valid plan alone reports
 `PlanOnly`. Neither is evidence of network availability. Installation and RAFT
 central operations acquire separate Leases with unique
@@ -94,7 +111,10 @@ make e2e
 The kind smoke test exercises plan status and the Kubernetes apply adapter.
 The release-chart integration test renders a checksum-pinned v1.16.13 archive
 in all three installation modes. These tests do not yet install Kube-OVN or
-verify a working network. The kind job also checks live Lease contention,
+verify a working network. The CI job also starts isolated OVSDB processes to
+check standalone/clustered metadata, leader failover and a minority follower
+after quorum loss. Set `OVSDB_TEST_BIN` to a directory containing `ovsdb-tool`,
+`ovsdb-server` and `ovsdb-client` to run those tests locally. The kind job checks live Lease contention,
 renewal past the initial expiry, release, and loss cancellation.
 
 The manually dispatched `Kube-OVN installation` workflow provisions a separate
@@ -103,6 +123,6 @@ v1.16.13 chart through the operator, waits for workload rollout, records live
 NB/SB cluster status and probes Pod IP and Service DNS traffic between two nodes.
 It uses the job's existing admin kubeconfig and creates the upstream chart's
 ServiceAccounts and RBAC; it is separate from the default smoke workflow.
-Production ServiceAccount permissions and controller health-provider integration
+Production ServiceAccount permissions and complete network/OVN verification
 remain separate acceptance items. See [docs/design.md](docs/design.md) for the remaining
 execution boundaries and safety contract.

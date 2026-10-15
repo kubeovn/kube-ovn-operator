@@ -68,6 +68,16 @@ owner reference and survive installation deletion.
 
 ## Next adapter boundaries
 
+The initial read-only OVN health provider queries each owned central pod's
+`_Server.Database` metadata through bounded `pods/exec` requests. `OVNDBReady`
+requires matching NB/SB cluster identities, unique member IDs, client-visible
+data, storage connectivity and a single leader per database; standalone mode
+checks its own model. These sampled observations are separate from membership
+mutation preflight and from `NetworkReady`, which awaits a network provider.
+Failed observations and incomplete workload rollouts invalidate old evidence.
+Northd and data-plane connection verification are still required. Production
+pod read/exec permissions require the same deployment review as the full chart.
+
 1. Extend the Helm SDK archive renderer with OCI support, configurable network
    values, complete target RBAC and live installation/network acceptance. The
    initial renderer verifies archive SHA-256, chart appVersion and kubeVersion,

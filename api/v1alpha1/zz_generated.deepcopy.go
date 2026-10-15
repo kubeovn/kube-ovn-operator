@@ -196,6 +196,10 @@ func (in *TopologyStatus) DeepCopyInto(out *TopologyStatus) {
 		out.Members = make([]CentralMemberStatus, len(in.Members))
 		copy(out.Members, in.Members)
 	}
+	if in.Databases != nil {
+		out.Databases = make([]CentralDatabaseStatus, len(in.Databases))
+		copy(out.Databases, in.Databases)
+	}
 }
 func (in *UpgradeStatus) DeepCopyInto(out *UpgradeStatus) { *out = *in }
 func (in *HCPStatus) DeepCopyInto(out *HCPStatus)         { *out = *in }

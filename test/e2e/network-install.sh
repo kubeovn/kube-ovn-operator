@@ -54,6 +54,7 @@ spec:
     ovsUpdateStrategy: RollingUpdate
 YAML
 kubectl -n kube-system wait koi/network --for=condition=WorkloadsReady --timeout=900s
+kubectl -n kube-system wait koi/network --for=condition=OVNDBReady --timeout=180s
 kubectl wait nodes --all --for=condition=Ready --timeout=180s
 kubectl -n kube-system rollout status deployment/coredns --timeout=180s
 

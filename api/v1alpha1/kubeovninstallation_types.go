@@ -139,9 +139,10 @@ type KubeOVNInstallationStatus struct {
 }
 
 type TopologyStatus struct {
-	DesiredCentralReplicas int32                 `json:"desiredCentralReplicas,omitempty"`
-	ReadyCentralReplicas   int32                 `json:"readyCentralReplicas,omitempty"`
-	Members                []CentralMemberStatus `json:"members,omitempty"`
+	DesiredCentralReplicas int32                   `json:"desiredCentralReplicas,omitempty"`
+	ReadyCentralReplicas   int32                   `json:"readyCentralReplicas,omitempty"`
+	Members                []CentralMemberStatus   `json:"members,omitempty"`
+	Databases              []CentralDatabaseStatus `json:"databases,omitempty"`
 }
 
 type CentralMemberStatus struct {
@@ -150,7 +151,19 @@ type CentralMemberStatus struct {
 	Pod          string      `json:"pod,omitempty"`
 	Address      string      `json:"address,omitempty"`
 	State        string      `json:"state,omitempty"`
+	Leader       bool        `json:"leader,omitzero"`
+	AppliedIndex int64       `json:"appliedIndex,omitzero"`
 	LastObserved metav1.Time `json:"lastObserved,omitempty"`
+}
+
+// CentralDatabaseStatus summarizes the most recent read-only observation.
+// It is health evidence, not authorization for a membership operation.
+type CentralDatabaseStatus struct {
+	Database         string `json:"database"`
+	ClusterID        string `json:"clusterID,omitempty"`
+	LeaderServerID   string `json:"leaderServerID,omitempty"`
+	ObservedMembers  int32  `json:"observedMembers,omitzero"`
+	ConnectedMembers int32  `json:"connectedMembers,omitzero"`
 }
 
 type UpgradeStatus struct {

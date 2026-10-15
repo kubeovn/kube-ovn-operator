@@ -9,6 +9,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	"github.com/kubeovn/kube-ovn-operator/internal/controller"
+	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"helm.sh/helm/v3/pkg/chartutil"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
@@ -62,6 +63,12 @@ func main() {
 			os.Exit(1)
 		}
 		reconciler.Leases = lease.New(directClient)
+		podExecutor, err := health.NewPodExecutor(config)
+		if err != nil {
+			ctrl.Log.Error(err, "create OVN health executor")
+			os.Exit(1)
+		}
+		reconciler.OVN = &health.OVNObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
 		dynamicClient, err := dynamic.NewForConfig(config)
 		if err != nil {
 			ctrl.Log.Error(err, "create workload client")
