@@ -166,6 +166,15 @@ func CheckAll(ctx context.Context) error {
 	return Check(ctx, Installation)
 }
 
+// CheckFor also binds the held scope to the installation being operated on.
+func CheckFor(ctx context.Context, scope Scope, installationUID types.UID) error {
+	g, ok := ctx.Value(scopeKey(scope)).(*guard)
+	if !ok || installationUID == "" || g.installation.UID != installationUID {
+		return ErrOwnership
+	}
+	return Check(ctx, scope)
+}
+
 func (m *Manager) acquire(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, scope Scope) (*guard, error) {
 	if m.client == nil || installation == nil || installation.Name == "" || installation.Namespace == "" || installation.UID == "" {
 		return nil, errors.New("lease client and installation namespace/name/UID are required")

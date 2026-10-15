@@ -3,6 +3,7 @@ package health
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -43,11 +44,14 @@ func TestPodExecutorTargetsExplicitContainerWithoutShell(t *testing.T) {
 }
 
 func TestPodExecutorSPDYSuccessLimitAndCancellation(t *testing.T) {
-	for _, scenario := range []string{"success", "oversized", "cancelled"} {
+	for _, scenario := range []string{"success", "oversized", "cancelled", "streamed", "writer failure", "short write", "remote failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			payload := []byte(`[{"rows":[]}]`)
+			if scenario == "streamed" {
+				payload = bytes.Repeat([]byte("backup bytes"), 32<<10)
+			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if _, err := httpstream.Handshake(r, w, []string{remotecommandconsts.StreamProtocolV4Name}); err != nil {
 					return
@@ -85,7 +89,11 @@ func TestPodExecutorSPDYSuccessLimitAndCancellation(t *testing.T) {
 				}
 				_ = stdout.Close()
 				_ = byType[corev1.StreamTypeStderr].Close()
-				_, _ = byType[corev1.StreamTypeError].Write([]byte(`{"status":"Success"}`))
+				status := `{"status":"Success"}`
+				if scenario == "remote failure" {
+					status = `{"status":"Failure","reason":"NonZeroExitCode","details":{"causes":[{"reason":"ExitCode","message":"17"}]}}`
+				}
+				_, _ = byType[corev1.StreamTypeError].Write([]byte(status))
 				_ = byType[corev1.StreamTypeError].Close()
 			}))
 			defer server.Close()
@@ -93,9 +101,24 @@ func TestPodExecutorSPDYSuccessLimitAndCancellation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := executor.Run(ctx, "default", "central", "ovn-central", []string{"ovsdb-client", "query"})
+			var got []byte
+			writeFailure := errors.New("destination unavailable")
+			if scenario == "streamed" || scenario == "writer failure" || scenario == "short write" || scenario == "remote failure" {
+				var output bytes.Buffer
+				var destination io.Writer = &output
+				switch scenario {
+				case "writer failure":
+					destination = outputWriterFunc(func([]byte) (int, error) { return 0, writeFailure })
+				case "short write":
+					destination = outputWriterFunc(func([]byte) (int, error) { return 0, nil })
+				}
+				err = executor.Stream(ctx, "default", "central", "ovn-central", []string{"ovsdb-client", "backup"}, destination)
+				got = output.Bytes()
+			} else {
+				got, err = executor.Run(ctx, "default", "central", "ovn-central", []string{"ovsdb-client", "query"})
+			}
 			switch scenario {
-			case "success":
+			case "success", "streamed":
 				if err != nil || !bytes.Equal(got, payload) {
 					t.Fatalf("got %q, %v", got, err)
 				}
@@ -107,10 +130,26 @@ func TestPodExecutorSPDYSuccessLimitAndCancellation(t *testing.T) {
 				if err == nil {
 					t.Fatal("cancelled stream succeeded")
 				}
+			case "writer failure":
+				if !errors.Is(err, writeFailure) {
+					t.Fatalf("lost writer error: %v", err)
+				}
+			case "short write":
+				if !errors.Is(err, io.ErrShortWrite) {
+					t.Fatalf("accepted short write: %v", err)
+				}
+			case "remote failure":
+				if err == nil {
+					t.Fatal("accepted output from failed command")
+				}
 			}
 		})
 	}
 }
+
+type outputWriterFunc func([]byte) (int, error)
+
+func (f outputWriterFunc) Write(data []byte) (int, error) { return f(data) }
 
 func TestPodOutputLimitCannotBeBypassedByIOCopy(t *testing.T) {
 	output := new(boundedBuffer)

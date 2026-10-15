@@ -149,9 +149,48 @@ The planner supports replacement at the same desired replica count: join one
 replacement, wait for it to catch up, remove the old member, then permit workload
 scaling. The command transport cannot prepare a database or start a joining
 server. Joining still needs a workload provisioner and `ovsdb-tool join-cluster`.
-Production backup/approval providers, the persistent NB/SB lifecycle state
-machine and strict in-flight fencing remain required before wiring automatic
-membership changes into the default reconciler.
+A backup capture and verification adapter is available as described below.
+Durable approval verification, the persistent NB/SB lifecycle state machine
+and strict in-flight fencing remain required before wiring automatic membership
+changes into the default reconciler.
+
+## Database backups
+
+`internal/backup.Provider` captures native `ovsdb-client backup` output from an
+owned, pinned central Pod through `health.NewBackupSource`. Data streams to the
+store without the metadata exec path's 64 KiB buffer. Capture requires both
+operation Leases for the same installation and records the installation/Pod/
+container identities, database UUID, full member inventory, leader, term and
+committed/applied index. The sampled fence must remain unchanged across capture.
+A concurrent transaction or election causes capture to fail and be retried by
+the future lifecycle executor; the provider never invents an index from the
+backup file, which does not encode RAFT metadata.
+
+The file backend publishes an immutable snapshot and record with file/directory
+fsync and atomic directory rename. Its content-addressed reference binds the
+record and the snapshot's SHA-256. Capture reopens the published files before
+returning a reference. Verification after restart repeats that readback, native
+record/JSON/schema-shape checks and the configured age/size policy. It rejects
+foreign installation or database identities, a changed committed fence, altered
+files and incomplete captures. Membership dispatch observes the database again
+after backup readback to reject changes while storage was being verified.
+
+`OpenFileStore` requires an existing operator-owned persistent directory, such
+as a previously provisioned volume mount, with atomic rename and fsync support.
+The caller must explicitly configure maximum age and size (at most 1 GiB).
+Parsing also limits schemas to 4 MiB, JSON tokens to 1 MiB and each table to
+250,000 rows. Published files are private to their owner; the store never
+deletes them. File digests prove integrity, not human approval or authenticity
+against an actor who can rewrite both the store and trusted references.
+
+This adapter is not yet wired to `spec.upgrade.backup.destination` or
+`status.lastBackup`; the persistent lifecycle executor must own those updates.
+S3, retention, backup scheduling, cross-database NB/SB checkpoints, recovery
+execution and product RPO/RTO policy remain to be implemented. The provider
+checks the native file structure and provenance, not all OVSDB schema semantics;
+tests load the stored files into fresh OVSDB processes and verify recovered data
+and row UUIDs for both OVN schemas. It does not restore over a live database or
+authorize a lost-quorum recovery.
 
 ## Development
 
@@ -173,8 +212,8 @@ check standalone/clustered metadata, leader failover and a minority follower
 after quorum loss, plus real northd active/standby/pause and SB disconnect
 behavior. Isolated ovs-vswitchd and ovn-controller processes verify `br-int`
 with a dummy datapath and detect loss of SB connectivity.
-The membership integration test uses real OVSDB processes and a verified backup
-file to check healthy leave, explicit replacement provisioning, approved kick,
+The membership integration test uses real OVSDB processes and the persistent
+backup provider to check healthy leave, explicit replacement provisioning, approved kick,
 quorum-loss refusal and preservation of committed data. This tests admin
 operations and 3-to-2-to-3 convergence; it does not exercise Kubernetes node or
 workload replacement.

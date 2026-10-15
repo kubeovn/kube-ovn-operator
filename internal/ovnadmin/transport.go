@@ -245,6 +245,19 @@ func (c *CommandClient) mutate(ctx context.Context, endpoint string, expected Sn
 	if err := authorize(ctx, current); err != nil {
 		return err
 	}
+	// Reading and verifying a persisted backup can take time. Invalidate its
+	// authorization if the database advanced, changed leaders, or the removal
+	// target changed health while the provider was reading storage.
+	final, err := c.Status(ctx, current.Database, endpoint)
+	if err != nil {
+		return err
+	}
+	if final.ClusterID != current.ClusterID || final.Term != current.Term || final.LeaderServerID != current.LeaderServerID || final.CommitIndex != current.CommitIndex || !sameMembership(final.Members, current.Members) {
+		return fmt.Errorf("database changed while verifying membership authorization")
+	}
+	if err := validateChange(final, change); err != nil {
+		return err
+	}
 	if err := lease.Check(ctx, lease.Central); err != nil {
 		return fmt.Errorf("guard unixctl dispatch: %w", err)
 	}

@@ -18,6 +18,14 @@ import (
 // central Pod/container identities. It does not discover or approve a topology
 // transition. Callers must persist full database identities before losing a Pod.
 func NewMembershipClient(ctx context.Context, reader client.Reader, runner CommandRunner, installation *operatorv1alpha1.KubeOVNInstallation, clusterID string, endpoints []ovnadmin.Endpoint) (*ovnadmin.CommandClient, error) {
+	bound, err := newMembershipRunner(ctx, reader, runner, installation)
+	if err != nil {
+		return nil, err
+	}
+	return &ovnadmin.CommandClient{Runner: bound, ClusterID: clusterID, Endpoints: slices.Clone(endpoints)}, nil
+}
+
+func newMembershipRunner(ctx context.Context, reader client.Reader, runner CommandRunner, installation *operatorv1alpha1.KubeOVNInstallation) (*membershipRunner, error) {
 	if reader == nil || runner == nil || installation == nil || installation.UID == "" || installation.Name == "" || installation.Namespace == "" || installation.Spec.Central.Mode != operatorv1alpha1.CentralModeRaft || installation.Spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly || installation.Spec.HCP.Enabled {
 		return nil, fmt.Errorf("membership transport requires a local managed RAFT installation")
 	}
@@ -29,7 +37,7 @@ func NewMembershipClient(ctx context.Context, reader client.Reader, runner Comma
 	for _, pod := range pods {
 		bound.pods[pod.Name] = *pod.DeepCopy()
 	}
-	return &ovnadmin.CommandClient{Runner: bound, ClusterID: clusterID, Endpoints: slices.Clone(endpoints)}, nil
+	return bound, nil
 }
 
 type membershipRunner struct {
@@ -47,7 +55,7 @@ func (r *membershipRunner) Run(ctx context.Context, endpoint string, command []s
 		return nil, fmt.Errorf("unsupported membership command")
 	}
 	if command[4] != "cluster/status" {
-		if err := lease.Check(ctx, lease.Central); err != nil {
+		if err := lease.CheckFor(ctx, lease.Central, r.installation.UID); err != nil {
 			return nil, err
 		}
 	}

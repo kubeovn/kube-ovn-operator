@@ -58,7 +58,7 @@ jobs:
           "$OVN_TEST_BIN/ovn-northd" --version
           go test ./internal/health -run 'TestLive(OVSDB|OVN)' -count=1 -v
       - name: Race-check operation coordination
-        run: go test -race ./internal/lease ./internal/apply ./internal/controller ./internal/ovnadmin ./internal/health ./internal/probe
+        run: go test -race ./internal/lease ./internal/apply ./internal/controller ./internal/ovnadmin ./internal/health ./internal/probe ./internal/backup
       - name: Vet
         run: make vet
       - uses: golangci/golangci-lint-action@v7
