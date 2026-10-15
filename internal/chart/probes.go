@@ -82,6 +82,9 @@ func NetworkProbeObjects(installation *operatorv1alpha1.KubeOVNInstallation, obj
 		if err != nil {
 			return nil, err
 		}
+		// Typed Kubernetes objects serialize an empty status. Desired manifests
+		// must omit it: the apply boundary rejects caller-supplied status.
+		delete(data, "status")
 		result = append(result, &unstructured.Unstructured{Object: data})
 	}
 	return result, nil

@@ -26,6 +26,11 @@ func TestNetworkProbeResourcesKeepOVSPlacementWithoutHostPrivileges(t *testing.T
 	if err != nil || len(objects) != 3 {
 		t.Fatalf("probe resources: %d %v", len(objects), err)
 	}
+	for _, object := range objects {
+		if _, found := object.Object["status"]; found {
+			t.Fatal("desired probe manifest includes server-owned status")
+		}
+	}
 	for _, object := range objects[:2] {
 		var ds appsv1.DaemonSet
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &ds); err != nil {
