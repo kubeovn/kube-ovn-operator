@@ -54,10 +54,18 @@ func startRuntimeDaemon(t *testing.T, root, name string, args ...string) (string
 		t.Fatal(err)
 	}
 	control := filepath.Join(dir, "ctl")
-	args = append(args, "--no-chdir", "--unixctl="+control, "--pidfile="+filepath.Join(dir, "pid"))
+	args = append(args, "--no-chdir", "--pidfile="+filepath.Join(dir, "pid"))
+	// OVN 24.03 does not support --unixctl on ovn-controller. Its default
+	// socket is scoped by OVN_RUNDIR and the foreground process ID instead.
+	if name != "ovn-controller" {
+		args = append(args, "--unixctl="+control)
+	}
 	command := exec.Command(ovnBinary(t, name), args...)
 	command.Env = append(os.Environ(), "OVS_RUNDIR="+dir, "OVN_RUNDIR="+dir)
 	stop := startTestProcess(t, dir, command)
+	if name == "ovn-controller" {
+		control = filepath.Join(dir, fmt.Sprintf("ovn-controller.%d.ctl", command.Process.Pid))
+	}
 	waitOVSDB(t, func() error { _, err := os.Stat(control); return err })
 	return control, stop
 }

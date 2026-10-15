@@ -70,7 +70,14 @@ func startTestProcess(t *testing.T, dir string, command *exec.Cmd) func() {
 			<-done
 		}
 	}
-	t.Cleanup(stop)
+	t.Cleanup(func() {
+		stop()
+		if t.Failed() {
+			if data, err := os.ReadFile(filepath.Join(dir, "server.log")); err == nil {
+				t.Logf("%s diagnostics:\n%s", filepath.Base(command.Path), data)
+			}
+		}
+	})
 	return stop
 }
 
