@@ -149,9 +149,11 @@ The planner supports replacement at the same desired replica count: join one
 replacement, wait for it to catch up, remove the old member, then permit workload
 scaling. The command transport cannot prepare a database or start a joining
 server. `internal/prepare` and `/member-prepare` now prepare a persistent pair of
-native NB/SB join files and return their generated server identities. Joining
-still needs a workload provisioner/launcher and persistent lifecycle executor
-to authorize startup and observe both databases catching up.
+native NB/SB join files and return their generated server identities.
+`internal/central` and `/member-run` supervise explicit NB/SB and northd startup
+from those files. Joining still needs a Kubernetes workload provisioner and
+persistent lifecycle executor to authorize startup and observe both databases
+catching up.
 A backup capture and verification adapter is available as described below.
 The durable approval adapter is described below. Its production wiring, the
 persistent NB/SB lifecycle state machine and strict in-flight fencing remain
@@ -174,6 +176,18 @@ operator image includes it, but its distroless runtime has no `ovsdb-tool`;
 a workload provisioner must supply a compatible native execution environment.
 Default dynamic membership is still disabled. See
 [preparation persistence and startup requirements](docs/member-preparation.md).
+
+The Linux `/member-run` launcher validates the recorded preparation result and
+native identities while holding the storage lock, starts foreground NB/SB and
+northd processes, and stops the entire member if any child exits. Children
+inherit storage/runtime locks and terminate if the supervisor dies. Restarts
+reuse the files and identities. Northd uses explicit peer client endpoints with
+pinned cluster UUIDs; local follower sockets alone cannot reach both leaders.
+Running processes do not prove readiness. A separate `central-runtime` Docker
+target packages both helpers with a digest-pinned Kube-OVN v1.16.13 native image
+and runs as UID/GID 65532. Kubernetes workload/storage wiring, runtime image
+publication/selection and lifecycle authorization are still required. See
+[launch request and supervision](docs/member-launch.md).
 
 ## Permanent-loss approvals
 
