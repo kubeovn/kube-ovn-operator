@@ -397,10 +397,22 @@ func TestLiveOVNCentralSupervisorCrashStopsChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = p.Close() }()
-	result, err := p.Prepare(t.Context(), f.request.Preparation)
-	if err != nil || !reflect.DeepEqual(result, f.request.Prepared) {
-		t.Fatalf("crash left locked data or changed identities: %+v %v", result, err)
-	}
+	// A killed thread-group leader may already be a zombie while other native
+	// threads are still releasing inherited file descriptors. PID state alone
+	// is not proof of storage handoff: require both locks and the exact native
+	// identities before attempting restart.
+	waitFor(t, func() error {
+		held, err := p.Acquire(t.Context(), f.request.Preparation, f.request.Prepared)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = held.Close() }()
+		directory, lock, err := acquireRuntime(f.options.RuntimeDirectory)
+		if err != nil {
+			return err
+		}
+		return errors.Join(directory.Close(), lock.Close())
+	})
 	cancel, done := f.start(t)
 	cancel()
 	waitStopped(t, done, true)

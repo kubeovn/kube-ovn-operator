@@ -66,10 +66,25 @@ Run in a trusted image containing compatible native tools:
 ```
 
 `--ovsdb-tool`, `--ovsdb-server` and `--ovn-northd` accept absolute executable
-paths, or resolve from `PATH` when omitted. The operator image contains the
-launcher binary but does not contain those native tools. The workload provisioner
-must supply the execution image and mounts. This binary alone is not a deployed
-central workload.
+paths, or resolve from `PATH` when omitted. The default `operator` image contains
+the launcher binary but does not contain those native tools. Build the separate
+`central-runtime` target for a complete execution image:
+
+```bash
+docker build --target central-runtime -t kube-ovn-central-runtime:local .
+```
+
+That target adds both helpers to the published Kube-OVN v1.16.13 image pinned at
+`sha256:03ca6c879a95a73faa12d9531a8fbfc7b2f5f038c939847fa19a5dda2e425e2b`.
+It runs as UID/GID 65532 and starts `/member-run` directly. The provisioner must
+provide the request, private directories owned by that UID, storage and required
+network placement. The native runtime version is fixed by this image; do not
+treat it as compatible with arbitrary installation versions. Publication, version
+selection and Kubernetes deployment still belong to the lifecycle integration.
+
+CI builds the derived `central-test` target and runs the real native lifecycle
+tests as UID/GID 65532 inside it. The test binary and tool-directory symlinks are
+absent from `central-runtime`. Container builds run in CI, not local validation.
 
 ## Storage, process ownership and restart
 
@@ -88,6 +103,9 @@ The supervisor keeps their creating OS thread alive and configures Linux's
 parent-death SIGKILL. If the supervisor is killed, its native children terminate
 and release their inherited locks. This does not fence an already accepted
 remote command or a privileged actor that rewrites the trusted storage.
+After a crash, native threads may briefly retain those locks even after their
+leader appears as a zombie. A new attempt must wait for actual lock release;
+it must never unlink a lock file to bypass an outstanding owner.
 
 Any native child exit, including a clean exit, stops the entire member and
 returns an error. SIGINT/SIGTERM cancellation signals all children with SIGTERM,
@@ -115,7 +133,7 @@ startup, graceful restart, child failure, supervisor SIGKILL and restart after
 that crash. Tests also cover missing/changed preparation records and files,
 invalid launch inputs, partial process startup and SIGKILL escalation.
 
-Workload creation, stable Node/volume/Pod ownership, probe configuration, live
+Workload creation, runtime image publication/selection, stable Node/volume/Pod ownership, probe configuration, live
 startup authorization and the persistent joint NB/SB replacement state machine
 remain open. These native tests do not exercise Kubernetes node replacement,
 TLS, a complete Kube-OVN installation or packet delivery after a transition.

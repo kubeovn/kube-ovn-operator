@@ -183,8 +183,10 @@ northd processes, and stops the entire member if any child exits. Children
 inherit storage/runtime locks and terminate if the supervisor dies. Restarts
 reuse the files and identities. Northd uses explicit peer client endpoints with
 pinned cluster UUIDs; local follower sockets alone cannot reach both leaders.
-Running processes do not prove readiness. The launcher and native tools still
-need Kubernetes workload/image/storage wiring and lifecycle authorization. See
+Running processes do not prove readiness. A separate `central-runtime` Docker
+target packages both helpers with a digest-pinned Kube-OVN v1.16.13 native image
+and runs as UID/GID 65532. Kubernetes workload/storage wiring, runtime image
+publication/selection and lifecycle authorization are still required. See
 [launch request and supervision](docs/member-launch.md).
 
 ## Permanent-loss approvals

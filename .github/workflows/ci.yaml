@@ -82,3 +82,24 @@ jobs:
           context: .
           push: false
           tags: ghcr.io/kubeovn/kube-ovn-operator:${{ github.sha }}
+
+  central-runtime:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: central-test
+          load: true
+          push: false
+          tags: kube-ovn-central-test:${{ github.sha }}
+      - name: Verify helpers and native lifecycle in the pinned runtime image
+        env:
+          TEST_IMAGE: kube-ovn-central-test:${{ github.sha }}
+        run: |
+          docker run --rm --init --entrypoint /member-prepare "$TEST_IMAGE" --help
+          docker run --rm --init --entrypoint /member-run "$TEST_IMAGE" --help
+          docker run --rm --init "$TEST_IMAGE"
