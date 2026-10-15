@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -88,5 +89,21 @@ func TestProbeRejectsAddressFamilyAndDNSMismatch(t *testing.T) {
 		if _, err := Check(t.Context(), Identity{}, request); err == nil {
 			t.Fatalf("accepted %+v", request)
 		}
+	}
+}
+
+func TestProbeResolvesLiteralIPsAndLocalDNS(t *testing.T) {
+	for _, target := range []struct{ host, address, family string }{
+		{"127.0.0.1", "127.0.0.1", "IPv4"},
+		{"::1", "::1", "IPv6"},
+		{"localhost", "127.0.0.1", "IPv4"},
+	} {
+		t.Run(target.host, func(t *testing.T) {
+			request := Request{Host: target.host, ExpectedAddress: target.address, Family: target.family, Nonce: strings.Repeat("ab", 16)}
+			address, err := resolveAddress(t.Context(), request)
+			if err != nil || address != netip.MustParseAddr(target.address) {
+				t.Fatalf("valid destination rejected: address=%v, err=%v", address, err)
+			}
+		})
 	}
 }

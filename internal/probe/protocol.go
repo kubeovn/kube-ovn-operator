@@ -74,12 +74,20 @@ func Handler(identity Identity) http.Handler {
 func Check(ctx context.Context, source Identity, request Request) (Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	expected, err := resolveAddress(ctx, request)
+	if err != nil {
+		return Response{}, err
+	}
+	return checkAddress(ctx, source, request, net.JoinHostPort(expected.String(), fmt.Sprint(Port)))
+}
+
+func resolveAddress(ctx context.Context, request Request) (netip.Addr, error) {
 	if !validNonce(request.Nonce) || (request.Family != "IPv4" && request.Family != "IPv6") {
-		return Response{}, fmt.Errorf("invalid probe request")
+		return netip.Addr{}, fmt.Errorf("invalid probe request")
 	}
 	expected, err := netip.ParseAddr(request.ExpectedAddress)
 	if err != nil || expected.Is4In6() || expected.Zone() != "" || expected.Is4() != (request.Family == "IPv4") {
-		return Response{}, fmt.Errorf("invalid expected address")
+		return netip.Addr{}, fmt.Errorf("invalid expected address")
 	}
 	network := "ip4"
 	if expected.Is6() {
@@ -87,17 +95,22 @@ func Check(ctx context.Context, source Identity, request Request) (Response, err
 	}
 	addresses, err := net.DefaultResolver.LookupNetIP(ctx, network, request.Host)
 	if err != nil {
-		return Response{}, fmt.Errorf("resolve probe destination: %w", err)
+		return netip.Addr{}, fmt.Errorf("resolve probe destination: %w", err)
+	}
+	// Go can return IPv4 literals as IPv4-mapped IPv6 addresses. Compare
+	// canonical addresses while retaining the requested family constraint.
+	for i := range addresses {
+		addresses[i] = addresses[i].Unmap()
 	}
 	if len(addresses) == 0 || !slices.Contains(addresses, expected) {
-		return Response{}, fmt.Errorf("probe DNS did not return the expected Service address")
+		return netip.Addr{}, fmt.Errorf("probe DNS did not return the expected Service address")
 	}
 	for _, address := range addresses {
 		if address != expected {
-			return Response{}, fmt.Errorf("probe DNS returned an unexpected address")
+			return netip.Addr{}, fmt.Errorf("probe DNS returned an unexpected address")
 		}
 	}
-	return checkAddress(ctx, source, request, net.JoinHostPort(expected.String(), fmt.Sprint(Port)))
+	return expected, nil
 }
 
 func checkAddress(ctx context.Context, source Identity, request Request, address string) (Response, error) {
