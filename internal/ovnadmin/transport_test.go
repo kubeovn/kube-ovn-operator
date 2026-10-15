@@ -223,3 +223,40 @@ func TestBackupVerifierSeesFinalCommittedFence(t *testing.T) {
 		t.Fatalf("fence=%d writes=%d err=%v", observedFence, writes, err)
 	}
 }
+
+func TestDispatchRejectsChangesDuringBackupReadback(t *testing.T) {
+	for _, scenario := range []string{"commit", "term", "target recovered"} {
+		t.Run(scenario, func(t *testing.T) {
+			verified, writes := false, 0
+			c := &CommandClient{ClusterID: testClusterID, Endpoints: testEndpoints(), Runner: runFunc(func(_ context.Context, endpoint string, command []string) ([]byte, error) {
+				if command[4] != "cluster/status" {
+					writes++
+					return nil, nil
+				}
+				if scenario == "target recovered" && endpoint == "server-1" && !verified {
+					return nil, fmt.Errorf("offline")
+				}
+				data := testStatus(endpoint)
+				if verified {
+					switch scenario {
+					case "commit":
+						data = strings.Replace(data, "Log: [1, 21]", "Log: [1, 22]", 1)
+					case "term":
+						data = strings.Replace(data, "Term: 7", "Term: 8", 1)
+					}
+				}
+				return []byte(data), nil
+			})}
+			executor := approvedExecutor(t, c)
+			executor.Backups = backupFunc(func(context.Context, Snapshot, string) error { verified = true; return nil })
+			change := membership.Change{Operation: membership.OperationLeave, ClusterID: testClusterID, Member: testSnapshot().Members[1], Reason: "replace", BackupRef: "verified-backup"}
+			if scenario == "target recovered" {
+				change.Operation, change.PermanentLossApproved = membership.OperationKick, true
+			}
+			err := withCentralLease(t, func(ctx context.Context) error { return executor.Execute(ctx, "server-0", change) })
+			if err == nil || writes != 0 || !verified {
+				t.Fatalf("stale authorization: writes=%d verified=%v err=%v", writes, verified, err)
+			}
+		})
+	}
+}

@@ -42,7 +42,8 @@ observation rather than becoming a removable offline member.
 `health.NewMembershipClient` validates central workload ownership and pins the
 Pod UID and container instance around each exec. The executor verifies the
 backup and, for kick, permanent-loss approval against the final transport
-observation. Both verifier interfaces are mandatory for their relevant action;
+observation. After provider readback the transport observes membership again and
+rejects a changed fence, term, leader or target health. Both verifier interfaces are mandatory for their relevant action;
 a reference, reason or boolean alone is insufficient. Every dispatch rechecks
 the central Lease. All operations are bounded; an exec error after dispatch has
 an uncertain outcome and requires fresh observation. A successful unixctl reply
@@ -50,8 +51,8 @@ starts an asynchronous change and does not authorize workload scaling.
 
 These checks do not make the multiple OVSDB/Kubernetes observations atomic or
 fence an already submitted command after Lease loss. The default reconciler does
-not invoke membership mutations. It still needs production backup/approval
-providers, persistent NB/SB operation state and a new-member provisioner. There
+not invoke membership mutations. It still needs lifecycle wiring for the backup
+provider, durable approval verification, persistent NB/SB operation state and a new-member provisioner. There
 is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
 a new database before its process starts, and a departed server cannot rejoin.
 
@@ -63,6 +64,33 @@ a complete observed rollout updates `observedVersion`. A serialized plan alone
 never populates ready replica counts, peer state or the observed version.
 The `KubeOVNRecoveryRequest` API records an auditable human decision and does
 not perform a database wipe automatically.
+
+## Backup capture contract
+
+The backup adapter streams native `ovsdb-client backup` from the same owned,
+pinned Pod/container used for RAFT observation. It requires installation-bound
+Leases and a healthy quorum, and records an unchanged database identity,
+membership, term, leader and committed/applied fence across capture. Native
+backups contain a standalone schema and data transaction, not the RAFT IDs or
+index. Continuous writes may prevent this conservative capture from completing;
+there is no claim of an atomic NB/SB checkpoint or an application write barrier.
+
+The initial store writes private files beneath an existing persistent root,
+fsyncs the data, metadata and directories, then publishes by atomic rename.
+A SHA-256 reference binds metadata to the snapshot digest. Capture and every
+membership verification reopen and stream the stored data. Native lengths,
+SHA-1 framing, JSON/schema shape, SHA-256, installation/database identities,
+the committed fence and an explicit age/size policy must all pass. Schema,
+token and row-count limits bound parsing memory. Truncated data, exec/disk
+failure, cancellation and stale process identity cannot yield a usable reference.
+
+The store is a trusted, operator-owned boundary; content hashes are not human
+approval signatures. No published backup is automatically deleted. The default
+controller does not provision a volume or connect this provider to the CR yet.
+S3, retention/scheduling, NB/SB checkpoint coordination, RPO/RTO policy and the
+restore/recovery executor remain part of the full lifecycle goal. Native OVSDB
+restore tests verify schema/data loading and preserved row UUIDs, but runtime
+format validation does not reimplement the OVSDB semantic type checker.
 
 ## Kubernetes workload apply contract
 
@@ -127,10 +155,10 @@ installations skip them; external/HCP verification still awaits peer evidence.
    initial renderer verifies archive SHA-256, chart appVersion and kubeVersion,
    maps upstream values, and separates lifecycle hooks from normal resources.
 2. Wire the guarded unixctl membership transport into a persistent NB/SB
-   lifecycle executor, with stable workload identities, actual backup/approval
-   providers and a new-member provisioner. Validate node replacement and every
+   lifecycle executor, with stable workload identities, the backup provider,
+   durable approvals and a new-member provisioner. Validate node replacement and every
    intermediate quorum state before enabling automatic changes.
-3. Add backup and lifecycle execution providers and verify complete Kube-OVN
+3. Complete backup storage/policy and lifecycle execution providers and verify complete Kube-OVN
    installation/transition networking. A missing health provider keeps
    `Ready=False`. Add transport-level fencing for
    remote operations already in flight when a Lease is lost.

@@ -3,8 +3,10 @@ package health
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -16,6 +18,10 @@ import (
 
 type CommandRunner interface {
 	Run(context.Context, string, string, string, []string) ([]byte, error)
+}
+
+type StreamingCommandRunner interface {
+	Stream(context.Context, string, string, string, []string, io.Writer) error
 }
 
 type PodExecutor struct {
@@ -35,22 +41,69 @@ func NewPodExecutor(config *rest.Config) (*PodExecutor, error) {
 func (e *PodExecutor) Run(ctx context.Context, namespace, pod, container string, command []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	output := new(boundedBuffer)
+	if err := e.Stream(ctx, namespace, pod, container, command, output); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
+// Stream avoids buffering database snapshots in memory. The caller supplies a
+// bounded destination. Writer errors cancel exec and remain visible even when
+// client-go only logs a stdout-copy error or the remote process exits zero.
+func (e *PodExecutor) Stream(ctx context.Context, namespace, pod, container string, command []string, destination io.Writer) error {
+	if destination == nil {
+		return errors.New("pod stream destination is required")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
 	request := e.client.RESTClient().Post().Resource("pods").Namespace(namespace).Name(pod).SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{Container: container, Command: command, Stdout: true, Stderr: true}, scheme.ParameterCodec)
 	executor, err := remotecommand.NewSPDYExecutor(e.config, "POST", request.URL())
 	if err != nil {
-		return nil, fmt.Errorf("create pod executor: %w", err)
+		return fmt.Errorf("create pod executor: %w", err)
 	}
-	output := new(boundedBuffer)
-	if err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: output, Stderr: io.Discard}); err != nil {
-		return nil, fmt.Errorf("read OVN metadata from pod %s: %w", pod, err)
+	output := &streamOutput{destination: destination, cancel: cancel}
+	streamErr := executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: output, Stderr: io.Discard})
+	if err := errors.Join(output.finish(), streamErr, ctx.Err()); err != nil {
+		return fmt.Errorf("stream from pod %s: %w", pod, err)
 	}
-	// client-go logs stdout writer errors without returning them from Stream.
-	// Reject truncated output even when the remote command reports success.
-	if output.err != nil {
-		return nil, output.err
+	return nil
+}
+
+type streamOutput struct {
+	mu          sync.Mutex
+	destination io.Writer
+	cancel      context.CancelFunc
+	err         error
+	finished    bool
+}
+
+func (w *streamOutput) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.finished {
+		return 0, io.ErrClosedPipe
 	}
-	return output.Bytes(), nil
+	if w.err != nil {
+		return 0, w.err
+	}
+	n, err := w.destination.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		w.err = err
+		w.cancel()
+	}
+	return n, err
+}
+
+func (w *streamOutput) finish() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.finished = true
+	return w.err
 }
 
 type boundedBuffer struct {
