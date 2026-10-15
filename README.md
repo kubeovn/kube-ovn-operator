@@ -91,9 +91,8 @@ awaiting checks reports `VerificationPending`; a valid plan alone reports
 `PlanOnly`. Control-plane-only installations do not schedule data-plane probes.
 External/HCP databases still require a peer provider. Installation and RAFT
 central operations acquire separate Leases with unique
-operation identities. The pure
-membership/upgrade planners and injected OVN admin interface are not yet a
-complete lifecycle execution state machine.
+operation identities. The membership/upgrade planners and OVN admin transport
+are not yet a complete lifecycle execution state machine.
 
 Network verification adds client and server DaemonSets using the OVS scheduling
 constraints, plus a ClusterIP Service. These are unprivileged ordinary pods
@@ -128,6 +127,32 @@ context; cleanup releases only the same holder, UID and transition number.
 These checks stop subsequent writes. Strict fencing of requests already
 submitted to an API/OVN server still requires transport support.
 
+## Membership administration
+
+The admin boundary reads live `cluster/status` through fixed, bounded unixctl
+commands. Its inventory pins full cluster/server UUIDs and literal-IP RAFT
+addresses; the four-character IDs printed in member lists never create a new
+identity. Leader and peer observations must agree on membership and term.
+Healthy members must have applied the leader's committed fence and have live
+RAFT connections. Commit indexes use the explicit uncommitted/unapplied counters,
+not the log boundary alone. A second leader read invalidates stale observations.
+
+`health.NewMembershipClient` binds that inventory to owned central Pods and
+checks Pod/container identities before and after exec. `ovnadmin.Executor`
+requires the operation Leases, verifies a backup against the final observation,
+and additionally verifies a durable permanent-loss approval before a kick.
+Healthy members leave through their own process; a confirmed lost member is
+kicked through the leader using its full server UUID. Success acknowledges the
+request only: both databases must converge before workload changes.
+
+The planner supports replacement at the same desired replica count: join one
+replacement, wait for it to catch up, remove the old member, then permit workload
+scaling. The command transport cannot prepare a database or start a joining
+server. Joining still needs a workload provisioner and `ovsdb-tool join-cluster`.
+Production backup/approval providers, the persistent NB/SB lifecycle state
+machine and strict in-flight fencing remain required before wiring automatic
+membership changes into the default reconciler.
+
 ## Development
 
 ```bash
@@ -148,8 +173,13 @@ check standalone/clustered metadata, leader failover and a minority follower
 after quorum loss, plus real northd active/standby/pause and SB disconnect
 behavior. Isolated ovs-vswitchd and ovn-controller processes verify `br-int`
 with a dummy datapath and detect loss of SB connectivity.
+The membership integration test uses real OVSDB processes and a verified backup
+file to check healthy leave, explicit replacement provisioning, approved kick,
+quorum-loss refusal and preservation of committed data. This tests admin
+operations and 3-to-2-to-3 convergence; it does not exercise Kubernetes node or
+workload replacement.
 Set `OVSDB_TEST_BIN` to a directory containing `ovsdb-tool`,
-`ovsdb-server` and `ovsdb-client` to run those tests locally. The kind job checks live Lease contention,
+`ovsdb-server`, `ovsdb-client` and `ovs-appctl` to run those tests locally. The kind job checks live Lease contention,
 renewal past the initial expiry, release, and loss cancellation.
 The OVN runtime tests additionally use `OVN_TEST_BIN`, `OVN_TEST_SCHEMA_DIR`
 and `OVS_TEST_SCHEMA`; see the CI workflow for the extracted package layout.

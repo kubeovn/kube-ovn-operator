@@ -17,19 +17,43 @@ use locally observed expiry to tolerate wall-clock skew. Release cannot clear a
 replacement holder. Plan-only reconciliation does not acquire these Leases.
 The membership actions are ordered as
 `validate quorum -> join replacement -> wait for committed data -> leave/kick
-confirmed member -> change workload replicas`; a future admin adapter must
+confirmed member -> change workload replicas`; the lifecycle executor must
 preserve this ordering. `cluster/kick` is never inferred from a Pod name or
 from deployment-time `NODE_IPS`.
 
 The side-effect-free `internal/membership` planner implements this ordering
-and requires a cluster ID, a majority of healthy members, and committed-data
-evidence before it returns a join, leave, or kick operation. An unhealthy
-member can only be kicked when the caller supplies explicit permanent-loss
-approval. `internal/upgrade` applies the corresponding version, backup, CRD,
-and central-mode gates before a workload rollout. `internal/chart` renders the
-same contract as Helm values, while `internal/ovnadmin.Executor` re-reads
-quorum, identity, and commit indexes immediately before invoking an injected
-OVNDB transport, and requires the central operation Lease for each mutation.
+and requires full UUIDs, unique literal-IP RAFT addresses, a healthy leader,
+quorum and committed-data evidence before returning one operation. Replacement
+at the same replica count first joins a new member and waits for it to catch up.
+Workload scaling is permitted only after all desired members are healthy and
+membership has converged. An unhealthy member can only be kicked with explicit
+permanent-loss approval. `internal/upgrade` applies the corresponding version,
+backup, CRD and central-mode gates before a workload rollout.
+
+`internal/ovnadmin.CommandClient` executes fixed `cluster/status`, `cluster/leave`
+and `cluster/kick` commands. It resolves abbreviated member-list IDs only against
+a previously pinned full UUID/address inventory, requires consistent membership
+and terms across reachable peers, and rechecks the leader after sampling. Peer
+health requires application of the leader's committed fence plus RAFT connections
+observed on both ends. Explicit log counters determine commit/application indexes;
+the log end alone is never committed-data evidence. Invalid identities fail the
+observation rather than becoming a removable offline member.
+
+`health.NewMembershipClient` validates central workload ownership and pins the
+Pod UID and container instance around each exec. The executor verifies the
+backup and, for kick, permanent-loss approval against the final transport
+observation. Both verifier interfaces are mandatory for their relevant action;
+a reference, reason or boolean alone is insufficient. Every dispatch rechecks
+the central Lease. All operations are bounded; an exec error after dispatch has
+an uncertain outcome and requires fresh observation. A successful unixctl reply
+starts an asynchronous change and does not authorize workload scaling.
+
+These checks do not make the multiple OVSDB/Kubernetes observations atomic or
+fence an already submitted command after Lease loss. The default reconciler does
+not invoke membership mutations. It still needs production backup/approval
+providers, persistent NB/SB operation state and a new-member provisioner. There
+is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
+a new database before its process starts, and a departed server cannot rejoin.
 
 The status phase distinguishes installing, adopting, upgrading, recovering
 and degraded plans. `Ready` requires successful workload, database, runtime and
@@ -102,9 +126,10 @@ installations skip them; external/HCP verification still awaits peer evidence.
    values, complete target RBAC and live installation/network acceptance. The
    initial renderer verifies archive SHA-256, chart appVersion and kubeVersion,
    maps upstream values, and separates lifecycle hooks from normal resources.
-2. Supply an OVNDB transport (libovsdb or an authenticated admin sidecar) that
-   implements the `internal/ovnadmin.Client` interface and executes one
-   membership operation under the central Lease.
+2. Wire the guarded unixctl membership transport into a persistent NB/SB
+   lifecycle executor, with stable workload identities, actual backup/approval
+   providers and a new-member provisioner. Validate node replacement and every
+   intermediate quorum state before enabling automatic changes.
 3. Add backup and lifecycle execution providers and verify complete Kube-OVN
    installation/transition networking. A missing health provider keeps
    `Ready=False`. Add transport-level fencing for
