@@ -38,8 +38,12 @@ func (p *Provisioner) pod(request Request, ref Reference, configName string, run
 		// emptyDir is writable; create only our private runtime subdirectory.
 		// Existing database directories are never created or permission-repaired.
 		command = "umask 077; mkdir -p /var/run/ovn; exec /member-run --root=" + dataPath + " --run-dir=/var/run/ovn --request=/member-request/request.json"
-		volumes = append(volumes, corev1.Volume{Name: "runtime", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
-		mounts = append(mounts, corev1.VolumeMount{Name: "runtime", MountPath: "/var/run"})
+		// ovsdb-server also creates temporary files for its internal database.
+		// Keep those ephemeral without making the image filesystem writable.
+		volumes = append(volumes,
+			corev1.Volume{Name: "runtime", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			corev1.Volume{Name: "temporary", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+		mounts = append(mounts, corev1.VolumeMount{Name: "runtime", MountPath: "/var/run"}, corev1.VolumeMount{Name: "temporary", MountPath: "/tmp"})
 	}
 	return corev1.PodTemplateSpec{
 		Labels: labels,

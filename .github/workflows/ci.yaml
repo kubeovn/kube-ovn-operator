@@ -102,4 +102,4 @@ jobs:
         run: |
           docker run --rm --init --entrypoint /member-prepare "$TEST_IMAGE" --help
           docker run --rm --init --entrypoint /member-run "$TEST_IMAGE" --help
-          docker run --rm --init "$TEST_IMAGE"
+          docker run --rm --init --read-only --tmpfs /tmp:rw,mode=1777 "$TEST_IMAGE"

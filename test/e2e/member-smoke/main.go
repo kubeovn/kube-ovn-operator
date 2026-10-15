@@ -203,6 +203,15 @@ func run() error {
 	podName := running.Name + "-0"
 	query := `["OVN_Northbound",{"op":"select","table":"Logical_Switch","where":[["name","==","provisioner-smoke"]],"columns":["_uuid","external_ids"]}]`
 	if err := wait(ctx, func() (bool, error) {
+		pod := new(corev1.Pod)
+		if err := kube.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: podName}, pod); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		for _, status := range pod.Status.ContainerStatuses {
+			if status.RestartCount != 0 || status.State.Terminated != nil {
+				return false, errors.New("native member exited during initial startup; inspect container logs")
+			}
+		}
 		for i, db := range []struct{ socket, name, seed string }{{"ovnnb_db", "OVN_Northbound", "nb"}, {"ovnsb_db", "OVN_Southbound", "sb"}} {
 			out, err := exec.Run(ctx, installation.Namespace, podName, "ovn-central", []string{"ovs-appctl", "-t", "/var/run/ovn/" + db.socket + ".ctl", "cluster/status", db.name})
 			if err != nil {
@@ -225,7 +234,7 @@ func run() error {
 				return false, nil
 			}
 		}
-		out, err := exec.Run(ctx, installation.Namespace, podName, "ovn-central", []string{"ovsdb-client", "transact", "unix:/var/run/ovn/ovnnb_db.sock", query})
+		out, err := exec.Run(ctx, installation.Namespace, podName, "ovn-central", []string{"ovsdb-client", "query", "unix:/var/run/ovn/ovnnb_db.sock", query})
 		if err != nil {
 			return false, nil
 		}

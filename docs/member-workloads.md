@@ -68,7 +68,8 @@ The Job and StatefulSet pin `nodeName` and use host networking. All local RAFT
 and client listeners must use current InternalIPs of the pinned Ready Node and
 unprivileged ports. The containers run as UID/GID 65532 with no additional Linux
 capabilities, no privilege escalation, no API token and a read-only root
-filesystem. The launcher creates its own private runtime directory in emptyDir;
+filesystem. Separate emptyDirs provide `/tmp` for native temporary files and
+`/var/run` for the launcher's private runtime directory;
 the persistent database root is never created or repaired during startup.
 
 The StatefulSet contains exactly one member and uses OnDelete updates. It does
