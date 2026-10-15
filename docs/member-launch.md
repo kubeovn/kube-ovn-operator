@@ -97,6 +97,8 @@ lock excludes another member using the same sockets and PID files. Existing
 symlinked or hard-linked runtime objects are rejected.
 
 Children use pinned directory descriptors for database paths and runtime files.
+Their working directory is the private runtime directory, so native crash
+artifacts do not land in the supervisor's caller directory.
 They inherit both locks and must retain the inherited descriptors. The supported
 native processes are started in foreground mode without monitoring or daemonizing.
 The supervisor keeps their creating OS thread alive and configures Linux's

@@ -130,6 +130,7 @@ func newLaunchFixture(t *testing.T) *launchFixture {
 				t.Fatal(err)
 			}
 			cmd := exec.Command(f.options.OVSDBServer, "--no-chdir", "--pidfile="+filepath.Join(dir, "pid"), "--unixctl="+filepath.Join(dir, name+".ctl"), "--remote="+passive, "--remote=punix:"+filepath.Join(dir, "socket"), file)
+			cmd.Dir = dir
 			cmd.Stderr = log
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)

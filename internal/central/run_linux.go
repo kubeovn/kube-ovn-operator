@@ -110,6 +110,7 @@ func Run(ctx context.Context, options Options, request Request) error {
 	}
 	commands = append(commands, command)
 	for _, cmd := range commands {
+		cmd.Dir = options.RuntimeDirectory
 		cmd.Stdout, cmd.Stderr = options.Stdout, options.Stderr
 		cmd.WaitDelay = time.Second
 		cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
