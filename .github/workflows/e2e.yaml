@@ -9,6 +9,9 @@ on:
       - 'cmd/**'
       - 'internal/**'
       - 'config/**'
+      - 'charts/**'
+      - 'Dockerfile'
+      - 'Makefile'
       - 'test/**'
       - '.github/workflows/e2e.yaml'
   workflow_dispatch:
