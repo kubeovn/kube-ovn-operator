@@ -34,3 +34,7 @@ jobs:
         run: bash test/e2e/runtime-smoke.sh
       - name: Verify live operation Lease coordination
         run: go run ./test/e2e/lease-smoke
+      - name: Verify pod-network probe traffic and backend identity
+        run: |
+          bash test/e2e/probe-image.sh kube-ovn-operator-e2e
+          go run ./test/e2e/network-smoke

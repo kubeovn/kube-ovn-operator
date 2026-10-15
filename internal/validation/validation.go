@@ -42,6 +42,17 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 	if spec.Upgrade.Backup.Required && strings.TrimSpace(spec.Upgrade.Backup.Destination) == "" {
 		errs = append(errs, fmt.Errorf("spec.upgrade.backup.destination is required when backup.required is true"))
 	}
+	if spec.NetworkProbe != nil {
+		image := spec.NetworkProbe.Image
+		lastPart := image[strings.LastIndex(image, "/")+1:]
+		_, tag, pinned := strings.Cut(lastPart, ":")
+		if len(image) > 512 || strings.ContainsAny(image, " \t\n\r") || !pinned || tag == "" || tag == "latest" {
+			errs = append(errs, fmt.Errorf("spec.networkProbe.image requires an explicit non-latest tag or digest"))
+		}
+		if spec.Mode == operatorv1alpha1.InstallationModeControlPlaneOnly {
+			errs = append(errs, fmt.Errorf("controlPlaneOnly cannot schedule data-plane network probes"))
+		}
+	}
 	if spec.HCP.Enabled {
 		if spec.HCP.Role != operatorv1alpha1.HCPRoleManagement && spec.HCP.Role != operatorv1alpha1.HCPRoleDataPlane {
 			errs = append(errs, fmt.Errorf("spec.hcp.role must be management or dataPlane when HCP is enabled"))

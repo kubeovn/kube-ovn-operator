@@ -32,8 +32,9 @@ quorum, identity, and commit indexes immediately before invoking an injected
 OVNDB transport, and requires the central operation Lease for each mutation.
 
 The status phase distinguishes installing, adopting, upgrading, recovering
-and degraded plans. `Ready` remains false until actual OVN and network
-verification is available. `WorkloadsReady` reports Kubernetes rollout; only
+and degraded plans. `Ready` requires successful workload, database, runtime and
+configured network verification from the current reconciliation. Missing or
+failed verification keeps it false. `WorkloadsReady` reports Kubernetes rollout; only
 a complete observed rollout updates `observedVersion`. A serialized plan alone
 never populates ready replica counts, peer state or the observed version.
 The `KubeOVNRecoveryRequest` API records an auditable human decision and does
@@ -73,7 +74,7 @@ The initial read-only OVN health provider queries each owned central pod's
 requires matching NB/SB cluster identities, unique member IDs, client-visible
 data, storage connectivity and a single leader per database; standalone mode
 checks its own model. These sampled observations are separate from membership
-mutation preflight and from `NetworkReady`, which awaits a network provider.
+mutation preflight and from `NetworkReady`, which uses separate pod canaries.
 Failed observations and incomplete workload rollouts invalidate old evidence.
 `NorthdReady` samples active/standby state and both NB/SB connections.
 `DataPlaneReady` checks every scheduled OVS node for SB connectivity, a live
@@ -84,6 +85,19 @@ which can reset SB connection state. They neither prove packet delivery nor
 authorize membership changes. Production read/exec permissions require the
 same deployment review as the full chart.
 
+An explicit `spec.networkProbe.image` adds two ordinary-pod DaemonSets and a
+Service to the initial apply/checkpoint. Scheduling copies the rendered OVS
+constraints, without copying privileges, credentials or host networking. The
+network provider requires complete coverage of the observed OVS nodes and all
+pod/Service address families. It checks same-node and cross-node ring Pod IPs,
+Service IPs and DNS with fresh nonces, strict response identities and bounded
+HTTP requests. It rejects stale pod/container/node identities or changed
+Service/DaemonSet configuration. Checks run with at most eight concurrent exec
+requests and a 60-second observation deadline. Timeout leaves the network
+unready; partial coverage is never promoted to success. These are sampled HTTP
+and DNS checks, not a complete data-plane conformance suite. Control-plane-only
+installations skip them; external/HCP verification still awaits peer evidence.
+
 1. Extend the Helm SDK archive renderer with OCI support, configurable network
    values, complete target RBAC and live installation/network acceptance. The
    initial renderer verifies archive SHA-256, chart appVersion and kubeVersion,
@@ -91,8 +105,9 @@ same deployment review as the full chart.
 2. Supply an OVNDB transport (libovsdb or an authenticated admin sidecar) that
    implements the `internal/ovnadmin.Client` interface and executes one
    membership operation under the central Lease.
-3. Add backup and network probe providers; a missing provider keeps the phase
-   `Ready=False` until evidence is available. Add transport-level fencing for
+3. Add backup and lifecycle execution providers and verify complete Kube-OVN
+   installation/transition networking. A missing health provider keeps
+   `Ready=False`. Add transport-level fencing for
    remote operations already in flight when a Lease is lost.
 4. Add HCP peer transport using Secret references only. Private key material
    must never be copied into a CR, status field or ConfigMap.
