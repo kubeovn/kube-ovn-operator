@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
@@ -40,8 +41,8 @@ type fakeClient struct {
 func (f *fakeClient) Status(context.Context, string, string) (Snapshot, error) {
 	return f.snapshot, nil
 }
-func (f *fakeClient) mutate(ctx context.Context, _ string, current Snapshot, change membership.Change, authorize func(context.Context, Snapshot) error) error {
-	if err := authorize(ctx, current); err != nil {
+func (f *fakeClient) mutate(ctx context.Context, _ string, current Snapshot, change membership.Change, authorize func(context.Context, Snapshot) (authorization, error)) error {
+	if _, err := authorize(ctx, current); err != nil {
 		return err
 	}
 	f.operation = change.Operation
@@ -52,24 +53,25 @@ type backupFunc func(context.Context, Snapshot, string) error
 
 func (f backupFunc) Verify(ctx context.Context, s Snapshot, ref string) error { return f(ctx, s, ref) }
 
-type lossFunc func(context.Context, Snapshot, membership.Change) error
+type lossFunc func(context.Context, Snapshot, membership.Change) (time.Time, error)
 
-func (f lossFunc) VerifyPermanentLoss(ctx context.Context, s Snapshot, c membership.Change) error {
+func (f lossFunc) VerifyPermanentLoss(ctx context.Context, s Snapshot, c membership.Change) (time.Time, error) {
 	return f(ctx, s, c)
 }
 
 func approvedExecutor(t *testing.T, c Client) Executor {
 	t.Helper()
+	expiry := time.Now().Add(time.Hour)
 	return Executor{Client: c, Backups: backupFunc(func(_ context.Context, s Snapshot, ref string) error {
 		if s.ClusterID != testClusterID || ref != "verified-backup" {
 			return fmt.Errorf("backup does not match")
 		}
 		return nil
-	}), PermanentLoss: lossFunc(func(_ context.Context, s Snapshot, c membership.Change) error {
+	}), PermanentLoss: lossFunc(func(_ context.Context, s Snapshot, c membership.Change) (time.Time, error) {
 		if c.ClusterID != s.ClusterID || !c.PermanentLossApproved {
-			return fmt.Errorf("approval does not match")
+			return time.Time{}, fmt.Errorf("approval does not match")
 		}
-		return nil
+		return expiry, nil
 	})}
 }
 
@@ -135,7 +137,9 @@ func TestExecutorRejectsUnsafeOrUnboundRemoval(t *testing.T) {
 			case "missing loss verifier":
 				executor.PermanentLoss = nil
 			case "bad loss approval":
-				executor.PermanentLoss = lossFunc(func(context.Context, Snapshot, membership.Change) error { return fmt.Errorf("expired approval") })
+				executor.PermanentLoss = lossFunc(func(context.Context, Snapshot, membership.Change) (time.Time, error) {
+					return time.Time{}, fmt.Errorf("expired approval")
+				})
 			case "remaining quorum":
 				change.Operation = membership.OperationLeave
 				c.snapshot.Members[1].Healthy = true

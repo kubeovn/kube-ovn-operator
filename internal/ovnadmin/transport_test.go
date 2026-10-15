@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
 )
@@ -256,6 +257,72 @@ func TestDispatchRejectsChangesDuringBackupReadback(t *testing.T) {
 			err := withCentralLease(t, func(ctx context.Context) error { return executor.Execute(ctx, "server-0", change) })
 			if err == nil || writes != 0 || !verified {
 				t.Fatalf("stale authorization: writes=%d verified=%v err=%v", writes, verified, err)
+			}
+		})
+	}
+}
+
+func TestKickRechecksApprovalAfterStatusAndBoundsDispatch(t *testing.T) {
+	for _, scenario := range []string{"valid", "revoked", "replaced", "expired during backup", "expired during status", "dispatch deadline"} {
+		t.Run(scenario, func(t *testing.T) {
+			writes, verifications := 0, 0
+			expiry := time.Now().Add(time.Minute)
+			if scenario == "dispatch deadline" || scenario == "expired during status" {
+				expiry = time.Now().Add(150 * time.Millisecond)
+			}
+			c := &CommandClient{ClusterID: testClusterID, Endpoints: testEndpoints(), Runner: runFunc(func(ctx context.Context, endpoint string, command []string) ([]byte, error) {
+				if command[4] != "cluster/status" {
+					writes++
+					deadline, ok := ctx.Deadline()
+					if !ok || deadline.After(expiry) {
+						t.Fatal("dispatch outlives approval")
+					}
+					if scenario == "dispatch deadline" {
+						<-ctx.Done()
+						return nil, ctx.Err()
+					}
+					return nil, nil
+				}
+				if verifications > 0 && scenario == "expired during status" {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				if endpoint == "server-1" {
+					return nil, fmt.Errorf("offline")
+				}
+				return []byte(testStatus(endpoint)), nil
+			})}
+			executor := approvedExecutor(t, c)
+			executor.Backups = backupFunc(func(context.Context, Snapshot, string) error {
+				if scenario == "expired during backup" {
+					expiry = time.Now().Add(-time.Second)
+				}
+				return nil
+			})
+			executor.PermanentLoss = lossFunc(func(context.Context, Snapshot, membership.Change) (time.Time, error) {
+				verifications++
+				if verifications > 1 {
+					switch scenario {
+					case "revoked":
+						return time.Time{}, fmt.Errorf("approval revoked during status read")
+					case "replaced":
+						return expiry.Add(time.Hour), nil
+					}
+				}
+				return expiry, nil
+			})
+			change := membership.Change{Operation: membership.OperationKick, ClusterID: testClusterID, Member: testSnapshot().Members[1], Reason: "permanent loss", BackupRef: "verified-backup", PermanentLossApproved: true}
+			err := withCentralLease(t, func(ctx context.Context) error { return executor.Execute(ctx, "server-0", change) })
+			if scenario == "valid" {
+				if err != nil || writes != 1 || verifications != 2 {
+					t.Fatalf("writes=%d verifications=%d err=%v", writes, verifications, err)
+				}
+			} else if scenario == "dispatch deadline" {
+				if err == nil || writes != 1 || !strings.Contains(err.Error(), "outcome is uncertain") {
+					t.Fatalf("deadline did not cancel dispatched request: writes=%d err=%v", writes, err)
+				}
+			} else if err == nil || writes != 0 {
+				t.Fatalf("unsafe dispatch: writes=%d err=%v", writes, err)
 			}
 		})
 	}

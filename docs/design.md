@@ -52,7 +52,7 @@ starts an asynchronous change and does not authorize workload scaling.
 These checks do not make the multiple OVSDB/Kubernetes observations atomic or
 fence an already submitted command after Lease loss. The default reconciler does
 not invoke membership mutations. It still needs lifecycle wiring for the backup
-provider, durable approval verification, persistent NB/SB operation state and a new-member provisioner. There
+provider and durable approval adapter, persistent NB/SB operation state and a new-member provisioner. There
 is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
 a new database before its process starts, and a departed server cannot rejoin.
 
@@ -62,8 +62,13 @@ configured network verification from the current reconciliation. Missing or
 failed verification keeps it false. `WorkloadsReady` reports Kubernetes rollout; only
 a complete observed rollout updates `observedVersion`. A serialized plan alone
 never populates ready replica counts, peer state or the observed version.
-The `KubeOVNRecoveryRequest` API records an auditable human decision and does
-not perform a database wipe automatically.
+The `KubeOVNRecoveryRequest` API stores recovery intent; its self-reported
+`approvedBy` string alone is not proof of authority and cannot authorize a kick.
+It does not perform a database wipe automatically. The independent
+`KubeOVNMemberRemovalApproval` API and provider reserve an immutable decision
+under the installation Leases and record completion for every approved database.
+The transport rechecks that decision after final observation and bounds dispatch
+by its expiry. See [approval permissions and operation flow](member-removal-approvals.md).
 
 ## Backup capture contract
 

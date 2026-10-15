@@ -185,7 +185,7 @@ func nickname(status ClusterStatus, serverID, address string) string {
 	return ""
 }
 
-func (c *CommandClient) mutate(ctx context.Context, endpoint string, expected Snapshot, change membership.Change, authorize func(context.Context, Snapshot) error) error {
+func (c *CommandClient) mutate(ctx context.Context, endpoint string, expected Snapshot, change membership.Change, authorize func(context.Context, Snapshot) (authorization, error)) error {
 	if change.Operation == membership.OperationJoin {
 		return fmt.Errorf("join requires a provisioned new database and workload transition; unixctl cannot join a running server")
 	}
@@ -242,8 +242,17 @@ func (c *CommandClient) mutate(ctx context.Context, endpoint string, expected Sn
 	if authorize == nil {
 		return fmt.Errorf("membership dispatch requires final authorization")
 	}
-	if err := authorize(ctx, current); err != nil {
+	grant, err := authorize(ctx, current)
+	if err != nil {
 		return err
+	}
+	if change.Operation == membership.OperationKick {
+		if grant.recheck == nil || !time.Now().Before(grant.validUntil) {
+			return fmt.Errorf("kick requires a live, recheckable approval")
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, grant.validUntil)
+		defer cancel()
 	}
 	// Reading and verifying a persisted backup can take time. Invalidate its
 	// authorization if the database advanced, changed leaders, or the removal
@@ -257,6 +266,11 @@ func (c *CommandClient) mutate(ctx context.Context, endpoint string, expected Sn
 	}
 	if err := validateChange(final, change); err != nil {
 		return err
+	}
+	if grant.recheck != nil {
+		if err := grant.recheck(ctx, final); err != nil {
+			return fmt.Errorf("recheck permanent-loss approval before dispatch: %w", err)
+		}
 	}
 	if err := lease.Check(ctx, lease.Central); err != nil {
 		return fmt.Errorf("guard unixctl dispatch: %w", err)

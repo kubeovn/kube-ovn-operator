@@ -13,13 +13,16 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/approval"
 	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
 	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -28,12 +31,6 @@ type membershipRunFunc func(context.Context, string, []string) ([]byte, error)
 
 func (f membershipRunFunc) Run(ctx context.Context, endpoint string, command []string) ([]byte, error) {
 	return f(ctx, endpoint, command)
-}
-
-type membershipLossFunc func(context.Context, ovnadmin.Snapshot, membership.Change) error
-
-func (f membershipLossFunc) VerifyPermanentLoss(ctx context.Context, snapshot ovnadmin.Snapshot, change membership.Change) error {
-	return f(ctx, snapshot, change)
 }
 
 // The test provisions synthetic members explicitly. It tests the real admin
@@ -150,7 +147,11 @@ func TestLiveOVNMembershipReplacementAndKick(t *testing.T) {
 	if err := coordinationv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	leases := lease.New(fake.NewClientBuilder().WithScheme(scheme).Build())
+	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&operatorv1alpha1.KubeOVNMemberRemovalApproval{}).Build()
+	leases := lease.New(kube)
 	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "membership", Namespace: "test", UID: "test-installation"}
 	guarded := func(fn func(context.Context) error) error {
 		return leases.With(t.Context(), installation, lease.Installation, func(ctx context.Context) error {
@@ -277,17 +278,46 @@ func TestLiveOVNMembershipReplacementAndKick(t *testing.T) {
 	if err := execute(change); err == nil || mutations != before {
 		t.Fatal("kick bypassed approval verification")
 	}
-	executor.PermanentLoss = membershipLossFunc(func(_ context.Context, state ovnadmin.Snapshot, action membership.Change) error {
-		if state.ClusterID != transport.ClusterID || action.Member.ServerID != lost.ServerID || action.Member.Address != lost.Address {
-			return fmt.Errorf("approval target mismatch")
-		}
-		return nil
-	})
+
+	approvalRecord := &operatorv1alpha1.KubeOVNMemberRemovalApproval{
+		Name: "lost-process", Namespace: installation.Namespace, UID: "approval-uid", Generation: 1,
+		CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Minute)),
+		Spec: operatorv1alpha1.MemberRemovalApprovalSpec{Decision: operatorv1alpha1.MemberRemovalDecision{
+			InstallationRef: operatorv1alpha1.InstallationReference{Name: installation.Name, UID: installation.UID},
+			OperationID:     uuid.New().String(), Reason: change.Reason, ExpiresAt: metav1.NewTime(time.Now().Add(time.Hour)),
+			Targets: []operatorv1alpha1.MemberRemovalTarget{{Database: snapshot.Database, ClusterID: snapshot.ClusterID, ServerID: lost.ServerID, Address: lost.Address}},
+		}},
+	}
+	if err := kube.Create(t.Context(), approvalRecord); err != nil {
+		t.Fatal(err)
+	}
+	approvals, err := approval.New(kube, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.PermanentLoss = approvals
+	change.OperationID = approvalRecord.Spec.Decision.OperationID
+	change.ApprovalRef = membership.ApprovalReference{Name: approvalRecord.Name, UID: string(approvalRecord.UID)}
+	if err := execute(change); err == nil || mutations != before {
+		t.Fatal("unreserved approval authorized kick")
+	}
+	if err := guarded(func(ctx context.Context) error { return approvals.Reserve(ctx, change.ApprovalRef, change.OperationID) }); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := execute(change); err != nil {
 		t.Fatal(err)
 	}
 	waitOVSDB(t, func() error { return observe(2) })
-	t.Log("confirmed lost member removed only after approval verification")
+	if err := guarded(func(ctx context.Context) error {
+		return approvals.Complete(ctx, change.ApprovalRef, change.OperationID, []ovnadmin.Snapshot{snapshot})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := guarded(func(ctx context.Context) error { return approvals.Reserve(ctx, change.ApprovalRef, change.OperationID) }); err == nil {
+		t.Fatal("consumed approval reserved again")
+	}
+	t.Log("confirmed lost member removed with durable approval provider; completion recorded and reuse rejected")
 	data := clientCommand("query", "unix:"+filepath.Join(dirs[leader], "socket"), `["OVN_Northbound",{"op":"select","table":"Root","where":[],"columns":["name"]}]`)
 	if !strings.Contains(string(data), "preserved-during-membership-change") {
 		t.Fatal("committed data did not survive replacement and removal")

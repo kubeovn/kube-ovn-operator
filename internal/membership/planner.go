@@ -40,6 +40,14 @@ type Change struct {
 	Reason                string
 	BackupRef             string
 	PermanentLossApproved bool
+	OperationID           string
+	ApprovalRef           ApprovalReference
+}
+
+// ApprovalReference pins a durable approval's UID, not only its reusable name.
+type ApprovalReference struct {
+	Name string
+	UID  string
 }
 
 type Plan struct {
