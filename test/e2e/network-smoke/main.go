@@ -139,10 +139,12 @@ func run() error {
 	if _, err := replaceIdentity(ctx, kube, serverKey, originalIdentity); err != nil {
 		return err
 	}
-	if err := adapter.Apply(ctx, objects); err != nil {
-		return err
-	}
 	return wait(ctx, func() error {
+		// Rollout status can change resourceVersion between the adapter's read
+		// and dry-run. Retry the full batch, as the reconciler does.
+		if err := adapter.Apply(ctx, objects); err != nil {
+			return err
+		}
 		report := observer.Observe(ctx, installation, nodes)
 		if report.Condition.Status != metav1.ConditionTrue {
 			return fmt.Errorf("network has not recovered: %s", report.Condition.Message)
