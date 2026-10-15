@@ -3,16 +3,11 @@ package health
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
-	"github.com/kubeovn/kube-ovn-operator/internal/apply"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -45,7 +40,7 @@ func (o *OVNObserver) Observe(ctx context.Context, installation *operatorv1alpha
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	pods, err := o.centralPods(ctx, installation)
+	pods, err := ownedPods(ctx, o.Reader, installation, "ovn-central")
 	if err != nil {
 		return report, err
 	}
@@ -96,13 +91,11 @@ func (o *OVNObserver) Observe(ctx context.Context, installation *operatorv1alpha
 	}
 	// Exec addresses a pod by name and has no UID precondition. Revalidate the
 	// owner chain after sampling so a replacement cannot inherit old evidence.
-	current, err := o.centralPods(ctx, installation)
+	current, err := ownedPods(ctx, o.Reader, installation, "ovn-central")
 	if err != nil {
 		return OVNReport{}, err
 	}
-	if !slices.EqualFunc(pods, current, func(before, after corev1.Pod) bool {
-		return before.UID == after.UID && after.DeletionTimestamp == nil && after.Status.Phase == corev1.PodRunning && podReady(after)
-	}) {
+	if !samePods(pods, current) {
 		return OVNReport{Reason: "CentralPodsChanged", Message: "Central pod identities or readiness changed during OVN observation"}, nil
 	}
 	report.Ready, report.Reason = true, "OVNDatabasesHealthy"
@@ -145,71 +138,4 @@ func assessDatabase(name string, mode operatorv1alpha1.CentralMode, states []Dat
 		return summary, fmt.Errorf("%s has %d/%d storage-connected members and %d leaders", name, summary.ConnectedMembers, len(states), leaders)
 	}
 	return summary, nil
-}
-
-// Pod labels alone are not ownership evidence. Follow controller UID links to
-// the exact Deployment or StatefulSet managed by this installation.
-func (o *OVNObserver) centralPods(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) ([]corev1.Pod, error) {
-	list := new(corev1.PodList)
-	if err := o.Reader.List(ctx, list, client.InNamespace(installation.Namespace), client.MatchingLabels{"app": "ovn-central"}); err != nil {
-		return nil, fmt.Errorf("list central pods: %w", err)
-	}
-	var pods []corev1.Pod
-	for _, pod := range list.Items {
-		owner := metav1.GetControllerOf(&pod)
-		if owner == nil || owner.APIVersion != "apps/v1" {
-			continue
-		}
-		if owner.Kind == "ReplicaSet" {
-			rs := new(appsv1.ReplicaSet)
-			if err := o.Reader.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: owner.Name}, rs); err != nil {
-				if client.IgnoreNotFound(err) == nil {
-					continue
-				}
-				return nil, err
-			}
-			if rs.UID != owner.UID {
-				continue
-			}
-			owner = metav1.GetControllerOf(rs)
-		}
-		if owner == nil || owner.APIVersion != "apps/v1" {
-			continue
-		}
-		var workload client.Object
-		switch owner.Kind {
-		case "Deployment":
-			workload = new(appsv1.Deployment)
-		case "StatefulSet":
-			workload = new(appsv1.StatefulSet)
-		default:
-			continue
-		}
-		if err := o.Reader.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: owner.Name}, workload); err != nil {
-			if client.IgnoreNotFound(err) == nil {
-				continue
-			}
-			return nil, err
-		}
-		labels := workload.GetLabels()
-		controller := metav1.GetControllerOf(workload)
-		if workload.GetUID() == owner.UID && controller != nil && controller.UID == installation.UID &&
-			controller.APIVersion == operatorv1alpha1.GroupVersion.String() && controller.Kind == "KubeOVNInstallation" &&
-			controller.Name == installation.Name && labels[apply.ManagedByLabel] == apply.ManagedByValue &&
-			labels[apply.InstallationUIDLabel] == string(installation.UID) && labels[apply.InstallationLabel] == installation.Name &&
-			labels[apply.InstallationNamespaceLabel] == installation.Namespace {
-			pods = append(pods, pod)
-		}
-	}
-	slices.SortFunc(pods, func(a, b corev1.Pod) int { return strings.Compare(a.Name, b.Name) })
-	return pods, nil
-}
-
-func podReady(pod corev1.Pod) bool {
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodReady {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-	return false
 }

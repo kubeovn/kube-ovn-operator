@@ -200,6 +200,14 @@ func (in *TopologyStatus) DeepCopyInto(out *TopologyStatus) {
 		out.Databases = make([]CentralDatabaseStatus, len(in.Databases))
 		copy(out.Databases, in.Databases)
 	}
+	if in.NorthdProcesses != nil {
+		out.NorthdProcesses = make([]NorthdProcessStatus, len(in.NorthdProcesses))
+		copy(out.NorthdProcesses, in.NorthdProcesses)
+	}
+	if in.Nodes != nil {
+		out.Nodes = make([]DataPlaneNodeStatus, len(in.Nodes))
+		copy(out.Nodes, in.Nodes)
+	}
 }
 func (in *UpgradeStatus) DeepCopyInto(out *UpgradeStatus) { *out = *in }
 func (in *HCPStatus) DeepCopyInto(out *HCPStatus)         { *out = *in }

@@ -89,7 +89,7 @@ func TestReconcileBlocksInvalidSpecBeforeWritingChildren(t *testing.T) {
 	if err := client.Get(t.Context(), types.NamespacedName{Name: "invalid", Namespace: "default"}, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || len(got.Status.Conditions) != 5 {
+	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || len(got.Status.Conditions) != 7 {
 		t.Fatalf("unexpected invalid status: %#v", got.Status)
 	}
 }
@@ -150,6 +150,86 @@ func TestReconcileOVNHealthDoesNotReplaceNetworkVerificationOrKeepStaleEvidence(
 }
 
 type failingRenderer struct{}
+
+type runtimeProviderFunc func(context.Context, *operatorv1alpha1.KubeOVNInstallation) health.RuntimeReport
+
+func (f runtimeProviderFunc) Observe(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) health.RuntimeReport {
+	return f(ctx, installation)
+}
+
+func TestReconcileRuntimeHealthInvalidatesEvidenceWithoutClaimingNetworkReadiness(t *testing.T) {
+	for _, failure := range []string{"northd", "data plane", "rollout", "apply", "missing provider"} {
+		t.Run(failure, func(t *testing.T) {
+			scheme := controllerScheme(t)
+			installation := &operatorv1alpha1.KubeOVNInstallation{Name: "runtime", Namespace: "default", UID: "installation", Generation: 1,
+				Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}},
+			}
+			kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+			workload := &observedWorkload{observation: apply.Observation{Ready: true, ReadyCentralReplicas: 3}}
+			report := health.RuntimeReport{
+				Northd:          metav1.Condition{Type: "NorthdReady", Status: metav1.ConditionTrue, Reason: "NorthdHealthy"},
+				DataPlane:       metav1.Condition{Type: "DataPlaneReady", Status: metav1.ConditionTrue, Reason: "DataPlaneConnected"},
+				NorthdProcesses: []operatorv1alpha1.NorthdProcessStatus{{Pod: "central", State: "active", NBConnected: true, SBConnected: true}},
+				Nodes:           []operatorv1alpha1.DataPlaneNodeStatus{{Node: "node", Pod: "ovs", ChassisID: "chassis", SBConnected: true, IntegrationBridgeReady: true}},
+			}
+			observations := 0
+			provider := runtimeProviderFunc(func(ctx context.Context, _ *operatorv1alpha1.KubeOVNInstallation) health.RuntimeReport {
+				observations++
+				if lease.Check(ctx, lease.Installation) == nil {
+					t.Fatal("runtime observation extended the operation Lease")
+				}
+				return report
+			})
+			reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Leases: lease.New(kube), Renderer: objectRenderer{}, Workload: workload, Runtime: provider}
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: installation.Name, Namespace: installation.Namespace}}
+			run := func() *operatorv1alpha1.KubeOVNInstallation {
+				t.Helper()
+				if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+					t.Fatal(err)
+				}
+				got := new(operatorv1alpha1.KubeOVNInstallation)
+				if err := kube.Get(t.Context(), req.NamespacedName, got); err != nil {
+					t.Fatal(err)
+				}
+				return got
+			}
+			got := run()
+			if !meta.IsStatusConditionTrue(got.Status.Conditions, "NorthdReady") || !meta.IsStatusConditionTrue(got.Status.Conditions, "DataPlaneReady") || meta.IsStatusConditionTrue(got.Status.Conditions, "Ready") || meta.IsStatusConditionTrue(got.Status.Conditions, "NetworkReady") {
+				t.Fatalf("runtime health was confused with network health: %+v", got.Status.Conditions)
+			}
+			if len(got.Status.Topology.NorthdProcesses) != 1 || len(got.Status.Topology.Nodes) != 1 || got.Status.Topology.NorthdProcesses[0].LastObserved.IsZero() || got.Status.Topology.Nodes[0].LastObserved.IsZero() {
+				t.Fatalf("missing runtime evidence: %+v", got.Status.Topology)
+			}
+			switch failure {
+			case "northd":
+				report.Northd.Status, report.Northd.Reason = metav1.ConditionFalse, "NorthdUnhealthy"
+				report.NorthdProcesses = nil
+			case "data plane":
+				report.DataPlane.Status, report.DataPlane.Reason = metav1.ConditionFalse, "DataPlaneUnhealthy"
+				report.Nodes = nil
+			case "rollout":
+				workload.observation.Ready = false
+			case "apply":
+				workload.err = fmt.Errorf("apply failed")
+			case "missing provider":
+				reconciler.Runtime = nil
+			}
+			got = run()
+			if failure == "northd" || failure == "data plane" {
+				condition := "NorthdReady"
+				stale := len(got.Status.Topology.NorthdProcesses) != 0
+				if failure == "data plane" {
+					condition, stale = "DataPlaneReady", len(got.Status.Topology.Nodes) != 0
+				}
+				if observations != 2 || !meta.IsStatusConditionFalse(got.Status.Conditions, condition) || !meta.IsStatusConditionTrue(got.Status.Conditions, "Degraded") || stale {
+					t.Fatalf("runtime failure retained healthy evidence: %+v", got.Status)
+				}
+			} else if observations != 1 || meta.FindStatusCondition(got.Status.Conditions, "NorthdReady").Status != metav1.ConditionUnknown || meta.FindStatusCondition(got.Status.Conditions, "DataPlaneReady").Status != metav1.ConditionUnknown || len(got.Status.Topology.NorthdProcesses) != 0 || len(got.Status.Topology.Nodes) != 0 {
+				t.Fatalf("unobserved runtime retained evidence: calls=%d, status=%+v", observations, got.Status)
+			}
+		})
+	}
+}
 
 func (failingRenderer) Render(context.Context, operatorv1alpha1.KubeOVNInstallationSpec) (chart.Rendered, error) {
 	return chart.Rendered{}, fmt.Errorf("chart dry-run rejected rendered objects")

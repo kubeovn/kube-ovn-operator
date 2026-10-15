@@ -42,6 +42,7 @@ type KubeOVNInstallationReconciler struct {
 	Workload        apply.ApplyClient
 	Leases          lease.Runner
 	OVN             health.OVNProvider
+	Runtime         health.RuntimeProvider
 	WorkloadFactory func(apply.InstallationIdentity) apply.ApplyClient
 }
 
@@ -68,7 +69,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	}
 	plan := planner.Build(installation.Spec, installation.Status.ObservedVersion)
 	if plan.Blocking != "" {
-		if err := r.updateStatus(ctx, installation, plan, now(), nil, nil); err != nil {
+		if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil); err != nil {
 			return reconcile.Result{}, err
 		}
 		logger.Info("installation plan is blocked", "reason", plan.Blocking)
@@ -86,7 +87,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		plan.Phase = operatorv1alpha1.PhaseDegraded
 		plan.Step = "Render"
 		plan.Blocking = err.Error()
-		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil); statusErr != nil {
+		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil); statusErr != nil {
 			return reconcile.Result{}, statusErr
 		}
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
@@ -160,7 +161,11 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		}
 		ovnReport = &report
 	}
-	if err := r.updateStatus(ctx, installation, plan, now(), observation, ovnReport); err != nil {
+	var runtimeReport *health.RuntimeReport
+	if err == nil && observation != nil && observation.Ready && r.Runtime != nil {
+		runtimeReport = new(r.Runtime.Observe(ctx, installation))
+	}
+	if err := r.updateStatus(ctx, installation, plan, now(), observation, ovnReport, runtimeReport); err != nil {
 		return reconcile.Result{}, err
 	}
 	if errors.Is(err, lease.ErrHeld) {
@@ -209,7 +214,7 @@ func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context,
 	return nil
 }
 
-func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time, observation *apply.Observation, ovnReport *health.OVNReport) error {
+func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time, observation *apply.Observation, ovnReport *health.OVNReport, runtimeReport *health.RuntimeReport) error {
 	status := installation.Status.DeepCopy()
 	if status.ApplyCheckpoint == nil {
 		status.ObservedVersion = ""
@@ -220,6 +225,8 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 	status.Topology.ReadyCentralReplicas = 0
 	status.Topology.Members = nil
 	status.Topology.Databases = nil
+	status.Topology.NorthdProcesses = nil
+	status.Topology.Nodes = nil
 	status.HCP = operatorv1alpha1.HCPStatus{}
 	status.Upgrade.Step = plan.Step
 	status.Upgrade.CanRollback = false
@@ -230,6 +237,8 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 	degraded := metav1.ConditionFalse
 	degradedReason := "PlanValid"
 	ovnStatus, ovnReason, ovnMessage := metav1.ConditionUnknown, "NotObserved", "OVN health has not been observed for this rollout"
+	northd := metav1.Condition{Type: "NorthdReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Northd has not been observed for this rollout"}
+	dataPlane := metav1.Condition{Type: "DataPlaneReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Data-plane connections have not been observed for this rollout"}
 	if observation != nil {
 		status.Topology.ReadyCentralReplicas = observation.ReadyCentralReplicas
 		workloadStatus = metav1.ConditionFalse
@@ -251,13 +260,35 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		}
 		if ovnReport.Ready {
 			ovnStatus = metav1.ConditionTrue
-			message = "Workloads and OVN databases are healthy; network verification is still required"
+			message = "Workloads and OVN databases are healthy; runtime and network verification are still required"
 		} else {
 			message = ovnMessage
 			if ovnReason == "OVNDatabaseUnhealthy" || ovnReason == "OVNObservationFailed" {
 				status.Phase = operatorv1alpha1.PhaseDegraded
 				degraded, degradedReason = metav1.ConditionTrue, ovnReason
 			}
+		}
+	}
+	if runtimeReport != nil {
+		northd, dataPlane = runtimeReport.Northd, runtimeReport.DataPlane
+		status.Topology.NorthdProcesses = slices.Clone(runtimeReport.NorthdProcesses)
+		status.Topology.Nodes = slices.Clone(runtimeReport.Nodes)
+		for index := range status.Topology.NorthdProcesses {
+			status.Topology.NorthdProcesses[index].LastObserved = metav1.NewTime(now)
+		}
+		for index := range status.Topology.Nodes {
+			status.Topology.Nodes[index].LastObserved = metav1.NewTime(now)
+		}
+		for _, condition := range []metav1.Condition{northd, dataPlane} {
+			if condition.Status == metav1.ConditionFalse {
+				status.Phase = operatorv1alpha1.PhaseDegraded
+				if degraded == metav1.ConditionFalse {
+					degraded, degradedReason, message = metav1.ConditionTrue, condition.Reason, condition.Message
+				}
+			}
+		}
+		if ovnStatus == metav1.ConditionTrue && northd.Status == metav1.ConditionTrue && dataPlane.Status == metav1.ConditionTrue {
+			message = "Workloads, OVN databases, northd and data-plane connections are healthy; network probes remain required"
 		}
 	}
 	if plan.Blocking != "" {
@@ -270,6 +301,7 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		{Type: "Degraded", Status: degraded, Reason: degradedReason, Message: message},
 		{Type: "WorkloadsReady", Status: workloadStatus, Reason: workloadReason, Message: workloadMessage},
 		{Type: "OVNDBReady", Status: ovnStatus, Reason: ovnReason, Message: ovnMessage},
+		northd, dataPlane,
 		{Type: "NetworkReady", Status: metav1.ConditionUnknown, Reason: "ProviderUnavailable", Message: "Network probe verification is not configured"},
 	} {
 		condition.ObservedGeneration = installation.Generation

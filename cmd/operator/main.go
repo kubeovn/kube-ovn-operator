@@ -69,6 +69,7 @@ func main() {
 			os.Exit(1)
 		}
 		reconciler.OVN = &health.OVNObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
+		reconciler.Runtime = &health.RuntimeObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
 		dynamicClient, err := dynamic.NewForConfig(config)
 		if err != nil {
 			ctrl.Log.Error(err, "create workload client")

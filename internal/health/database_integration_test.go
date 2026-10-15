@@ -39,11 +39,16 @@ func runOVSDBTool(t *testing.T, args ...string) {
 
 func startOVSDB(t *testing.T, dir, db string) func() {
 	t.Helper()
+	command := exec.Command(ovsdbBinary(t, "ovsdb-server"), "--no-chdir", "--pidfile="+filepath.Join(dir, "pid"), "--unixctl="+filepath.Join(dir, "ctl"), "--remote=punix:"+filepath.Join(dir, "socket"), db)
+	return startTestProcess(t, dir, command)
+}
+
+func startTestProcess(t *testing.T, dir string, command *exec.Cmd) func() {
+	t.Helper()
 	log, err := os.Create(filepath.Join(dir, "server.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(ovsdbBinary(t, "ovsdb-server"), "--no-chdir", "--pidfile="+filepath.Join(dir, "pid"), "--unixctl="+filepath.Join(dir, "ctl"), "--remote=punix:"+filepath.Join(dir, "socket"), db)
 	command.Stdout, command.Stderr = log, log
 	if err := command.Start(); err != nil {
 		_ = log.Close()
@@ -65,7 +70,14 @@ func startOVSDB(t *testing.T, dir, db string) func() {
 			<-done
 		}
 	}
-	t.Cleanup(stop)
+	t.Cleanup(func() {
+		stop()
+		if t.Failed() {
+			if data, err := os.ReadFile(filepath.Join(dir, "server.log")); err == nil {
+				t.Logf("%s diagnostics:\n%s", filepath.Base(command.Path), data)
+			}
+		}
+	})
 	return stop
 }
 
