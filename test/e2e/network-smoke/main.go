@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
@@ -105,30 +106,11 @@ func run() error {
 		return fmt.Errorf("repeat apply: %w", err)
 	}
 	fmt.Println("repeated probe resource apply succeeded")
-	// Inject the fault through the same SSA manager. Update would introduce
-	// separately owned fields that non-forcing apply must preserve on recovery.
-	faultObjects := make([]*unstructured.Unstructured, len(objects))
-	for i, object := range objects {
-		faultObjects[i] = object.DeepCopy()
-		if object.GetKind() != "DaemonSet" || object.GetName() != probe.Name(string(installation.UID))+"-server" {
-			continue
-		}
-		var server appsv1.DaemonSet
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &server); err != nil {
-			return err
-		}
-		for j, env := range server.Spec.Template.Spec.Containers[0].Env {
-			if env.Name == "POD_UID" {
-				server.Spec.Template.Spec.Containers[0].Env[j] = corev1.EnvVar{Name: "POD_UID", Value: "foreign-backend"}
-			}
-		}
-		spec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&server.Spec)
-		if err != nil {
-			return err
-		}
-		faultObjects[i].Object["spec"] = spec
-	}
-	if err := adapter.Apply(ctx, faultObjects); err != nil {
+	// The fault injector owns its Update fields and must restore them itself;
+	// non-forcing apply must not delete a separately owned literal value.
+	serverKey := types.NamespacedName{Namespace: installation.Namespace, Name: probe.Name(string(installation.UID)) + "-server"}
+	originalIdentity, err := replaceIdentity(ctx, kube, serverKey, corev1.EnvVar{Name: "POD_UID", Value: "foreign-backend"})
+	if err != nil {
 		return err
 	}
 	if err := wait(ctx, func() error {
@@ -154,6 +136,9 @@ func run() error {
 		return err
 	}
 	fmt.Println("healthy pods with incorrect backend identities were rejected")
+	if _, err := replaceIdentity(ctx, kube, serverKey, originalIdentity); err != nil {
+		return err
+	}
 	if err := adapter.Apply(ctx, objects); err != nil {
 		return err
 	}
@@ -165,6 +150,20 @@ func run() error {
 		fmt.Println("network probe verification recovered after restoring pod identity")
 		return nil
 	})
+}
+
+func replaceIdentity(ctx context.Context, kube client.Client, key types.NamespacedName, identity corev1.EnvVar) (corev1.EnvVar, error) {
+	server := new(appsv1.DaemonSet)
+	if err := kube.Get(ctx, key, server); err != nil {
+		return corev1.EnvVar{}, err
+	}
+	for i, env := range server.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "POD_UID" {
+			server.Spec.Template.Spec.Containers[0].Env[i] = identity
+			return env, kube.Update(ctx, server, client.FieldOwner("network-probe-smoke-fault"))
+		}
+	}
+	return corev1.EnvVar{}, fmt.Errorf("server probe has no POD_UID environment variable")
 }
 
 func wait(ctx context.Context, check func() error) error {
