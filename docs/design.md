@@ -56,6 +56,15 @@ provider and durable approval adapter, persistent NB/SB operation state and a ne
 is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
 a new database before its process starts, and a departed server cannot rejoin.
 
+`internal/prepare` now implements explicit local NB/SB preparation: persist the
+installation/operation/member-bound plan, create native join files, validate and
+sync both, then record their generated server identities. Retrying after partial
+preparation or after joining preserves those identities; damaged or mismatched
+files are retained with an error. It does not start processes or prove remote
+quorum. The workload provisioner must avoid upstream automatic bootstrap/recovery
+paths and persist the prepared identities before startup. See
+[preparation and launcher requirements](member-preparation.md).
+
 The status phase distinguishes installing, adopting, upgrading, recovering
 and degraded plans. `Ready` requires successful workload, database, runtime and
 configured network verification from the current reconciliation. Missing or
