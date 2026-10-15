@@ -4,19 +4,19 @@ import (
 	"context"
 	"crypto/sha256"
 	stdjson "encoding/json/v2"
+	"errors"
 	"fmt"
 	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/planner"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,9 +28,7 @@ import (
 )
 
 const (
-	installationLeasePrefix = "kube-ovn-operator-installation-"
-	membershipLeasePrefix   = "kube-ovn-operator-central-"
-	planConfigMapPrefix     = "kube-ovn-operator-plan-"
+	planConfigMapPrefix = "kube-ovn-operator-plan-"
 )
 
 type KubeOVNInstallationReconciler struct {
@@ -40,6 +38,7 @@ type KubeOVNInstallationReconciler struct {
 	Renderer        chart.Renderer
 	RendererFactory func(*operatorv1alpha1.KubeOVNInstallation) chart.Renderer
 	Workload        apply.ApplyClient
+	Leases          lease.Runner
 	WorkloadFactory func(apply.InstallationIdentity) apply.ApplyClient
 }
 
@@ -89,88 +88,72 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		}
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 	}
-	if err := r.ensureLease(ctx, installation, installationLeasePrefix); err != nil {
-		return reconcile.Result{}, err
-	}
-	if installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft {
-		if err := r.ensureLease(ctx, installation, membershipLeasePrefix); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
-	if err := r.ensurePlanConfigMap(ctx, installation, plan, rendered); err != nil {
-		return reconcile.Result{}, err
-	}
 	workload := r.Workload
 	if r.WorkloadFactory != nil {
 		workload = r.WorkloadFactory(apply.InstallationIdentity{Namespace: installation.Namespace, Name: installation.Name, UID: installation.UID})
 	}
 	var observation *apply.Observation
-	if workload != nil && len(rendered.Objects) != 0 {
-		if err := r.ensureApplyCheckpoint(ctx, installation, rendered); err != nil {
-			plan.Phase = operatorv1alpha1.PhaseDegraded
+	if workload == nil || len(rendered.Objects) == 0 {
+		if err := r.ensurePlanConfigMap(ctx, installation, plan, rendered); err != nil {
+			return reconcile.Result{}, err
+		}
+	} else {
+		plan.Step = "AcquireLease"
+		operation := func(operationCtx context.Context) error {
+			if err := lease.CheckAll(operationCtx); err != nil {
+				return err
+			}
+			if err := r.ensurePlanConfigMap(operationCtx, installation, plan, rendered); err != nil {
+				return err
+			}
 			plan.Step = "ApplyCheckpoint"
-			plan.Blocking = err.Error()
-			if statusErr := r.updateStatus(ctx, installation, plan, now(), nil); statusErr != nil {
-				return reconcile.Result{}, statusErr
+			if err := lease.CheckAll(operationCtx); err != nil {
+				return err
 			}
-			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		if err := workload.Apply(ctx, rendered.Objects); err != nil {
-			plan.Phase = operatorv1alpha1.PhaseDegraded
+			if err := r.ensureApplyCheckpoint(operationCtx, installation, rendered); err != nil {
+				return err
+			}
 			plan.Step = "Apply"
-			plan.Blocking = err.Error()
-			if statusErr := r.updateStatus(ctx, installation, plan, now(), nil); statusErr != nil {
-				return reconcile.Result{}, statusErr
+			if err := lease.CheckAll(operationCtx); err != nil {
+				return err
 			}
-			logger.Info("installation workload apply is blocked", "reason", err.Error())
-			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-
-		if observer, ok := workload.(apply.Observer); ok {
-			observed, err := observer.Observe(ctx, rendered.Objects)
-			if err != nil {
-				plan.Phase = operatorv1alpha1.PhaseDegraded
-				plan.Step = "Observe"
-				plan.Blocking = err.Error()
-			} else {
+			if err := workload.Apply(operationCtx, rendered.Objects); err != nil {
+				return err
+			}
+			plan.Step = "Observe"
+			if observer, ok := workload.(apply.Observer); ok {
+				observed, err := observer.Observe(operationCtx, rendered.Objects)
+				if err != nil {
+					return err
+				}
 				observation = &observed
 			}
+			return nil
+		}
+		if r.Leases == nil {
+			err = fmt.Errorf("workload management requires an operation lease manager")
+		} else {
+			err = r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+				if installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly {
+					return r.Leases.With(operationCtx, installation, lease.Central, operation)
+				}
+				return operation(operationCtx)
+			})
+		}
+		if err != nil {
+			plan.Phase = operatorv1alpha1.PhaseDegraded
+			plan.Blocking = err.Error()
+			observation = nil
+			logger.Info("installation operation blocked", "step", plan.Step, "reason", err.Error())
 		}
 	}
 	if err := r.updateStatus(ctx, installation, plan, now(), observation); err != nil {
 		return reconcile.Result{}, err
 	}
-	logger.Info("installation plan reconciled", "phase", plan.Phase, "step", plan.Step)
-	return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
-}
-
-func (r *KubeOVNInstallationReconciler) ensureLease(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, prefix string) error {
-	lease := new(coordinationv1.Lease)
-	name := prefix + installation.Name
-	key := types.NamespacedName{Name: name, Namespace: installation.Namespace}
-	lease.Name = name
-	lease.Namespace = installation.Namespace
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, lease, func() error {
-		lease.Name = name
-		lease.Namespace = installation.Namespace
-		if err := controllerutil.SetControllerReference(installation, lease, r.Scheme); err != nil {
-			return err
-		}
-		holder := string(installation.UID)
-		if holder == "" {
-			holder = installation.Name
-		}
-		lease.Spec.HolderIdentity = &holder
-		duration := int32(90)
-		lease.Spec.LeaseDurationSeconds = &duration
-		renewed := metav1.NewMicroTime(time.Now())
-		lease.Spec.RenewTime = &renewed
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("ensure lease %s: %w", key.String(), err)
+	if errors.Is(err, lease.ErrHeld) {
+		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
 	}
-	return nil
+	return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
 func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, rendered chart.Rendered) error {

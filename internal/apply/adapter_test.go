@@ -245,3 +245,25 @@ func TestRetainedResourceHasNoGarbageCollectionOwner(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyStopsTheBatchWhenOperationGuardIsLost(t *testing.T) {
+	kube := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), ownedConfigMap("first", testIdentity), ownedConfigMap("second", testIdentity))
+	patches := 0
+	installApplyReactor(kube, &patches, nil)
+	stopped := errors.New("lease lost")
+	writes := 0
+	adapter := &Client{Dynamic: kube, Mapper: testMapper(), Identity: testIdentity, BeforeWrite: func(context.Context) error {
+		writes++
+		if writes == 2 {
+			return stopped
+		}
+		return nil
+	}}
+	err := adapter.Apply(t.Context(), []*unstructured.Unstructured{configMap("first", nil), configMap("second", nil)})
+	if !errors.Is(err, stopped) {
+		t.Fatalf("guard loss not propagated: %v", err)
+	}
+	if patches != 3 {
+		t.Fatalf("expected two dry-runs and one persisted patch, got %d", patches)
+	}
+}

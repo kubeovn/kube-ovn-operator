@@ -10,6 +10,7 @@ import (
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -21,7 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-func TestReconcileWritesPlanAndSafetyLeases(t *testing.T) {
+func TestReconcileWritesPlanWithoutClaimingOperationLeases(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -55,9 +56,9 @@ func TestReconcileWritesPlanAndSafetyLeases(t *testing.T) {
 	if !strings.Contains(plan.Data["values.yaml"], "installMode: full") {
 		t.Fatalf("rendered chart values are missing from plan: %q", plan.Data["values.yaml"])
 	}
-	for _, name := range []string{installationLeasePrefix + "demo", membershipLeasePrefix + "demo"} {
-		if err := client.Get(t.Context(), types.NamespacedName{Name: name, Namespace: "default"}, new(coordinationv1.Lease)); err != nil {
-			t.Fatalf("lease %s was not written: %v", name, err)
+	for _, name := range []string{lease.Name(lease.Installation, "demo"), lease.Name(lease.Central, "demo")} {
+		if err := client.Get(t.Context(), types.NamespacedName{Name: name, Namespace: "default"}, new(coordinationv1.Lease)); err == nil {
+			t.Fatalf("plan-only reconciliation unexpectedly claimed lease %s", name)
 		}
 	}
 	got := new(operatorv1alpha1.KubeOVNInstallation)
@@ -167,7 +168,7 @@ func TestReconcileUsesInjectedWorkloadAdapter(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
 	workload := new(recordingWorkload)
 	var gotIdentity apply.InstallationIdentity
-	reconciler := &KubeOVNInstallationReconciler{Client: client, Scheme: scheme, Renderer: objectRenderer{}, WorkloadFactory: func(identity apply.InstallationIdentity) apply.ApplyClient {
+	reconciler := &KubeOVNInstallationReconciler{Client: client, Scheme: scheme, Leases: lease.New(client), Renderer: objectRenderer{}, WorkloadFactory: func(identity apply.InstallationIdentity) apply.ApplyClient {
 		gotIdentity = identity
 		return workload
 	}}
@@ -193,7 +194,7 @@ func TestReconcileRecordsWorkloadApplyFailure(t *testing.T) {
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
 	workload := &recordingWorkload{err: fmt.Errorf("ownership conflict")}
-	reconciler := &KubeOVNInstallationReconciler{Client: client, Scheme: scheme, Renderer: objectRenderer{}, Workload: workload}
+	reconciler := &KubeOVNInstallationReconciler{Client: client, Scheme: scheme, Leases: lease.New(client), Renderer: objectRenderer{}, Workload: workload}
 	if _, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Name: installation.Name, Namespace: installation.Namespace}}); err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +239,7 @@ func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
 	workload := &observedWorkload{observation: apply.Observation{Ready: true, ReadyCentralReplicas: 3, Message: "Rollout completed"}}
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: installation.Name, Namespace: installation.Namespace}}
-	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Renderer: objectRenderer{}, Workload: workload}
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Leases: lease.New(kube), Renderer: objectRenderer{}, Workload: workload}
 	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +255,7 @@ func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 	}
 	// A new reconciler must recover the checkpoint from Kubernetes, including
 	// when no process-local state survives.
-	reconciler = &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Renderer: objectRenderer{}, Workload: workload}
+	reconciler = &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Leases: lease.New(kube), Renderer: objectRenderer{}, Workload: workload}
 	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
 		t.Fatal(err)
 	}
