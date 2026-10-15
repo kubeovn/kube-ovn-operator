@@ -9,8 +9,13 @@ HCP pairing before writing a plan. The plan ConfigMap is deliberately a stable
 adapter boundary for the Kube-OVN Helm renderer and the OVN central admin
 client. It contains no credentials and no shell commands.
 
-Every installation has an installation Lease. RAFT installations also have a
-separate central-membership Lease. The membership actions are ordered as
+Every workload operation holds an installation Lease. RAFT control-plane
+operations also hold a separate central-membership Lease. Each acquisition uses
+a unique holder, optimistic concurrency and an uncached client; renewal failure
+cancels the operation and every workload mutation rechecks the Lease. Contenders
+use locally observed expiry to tolerate wall-clock skew. Release cannot clear a
+replacement holder. Plan-only reconciliation does not acquire these Leases.
+The membership actions are ordered as
 `validate quorum -> join replacement -> wait for committed data -> leave/kick
 confirmed member -> change workload replicas`; a future admin adapter must
 preserve this ordering. `cluster/kick` is never inferred from a Pod name or
@@ -24,7 +29,7 @@ approval. `internal/upgrade` applies the corresponding version, backup, CRD,
 and central-mode gates before a workload rollout. `internal/chart` renders the
 same contract as Helm values, while `internal/ovnadmin.Executor` re-reads
 quorum, identity, and commit indexes immediately before invoking an injected
-OVNDB transport.
+OVNDB transport, and requires the central operation Lease for each mutation.
 
 The status phase distinguishes installing, adopting, upgrading, recovering
 and degraded plans. `Ready` remains false until actual OVN and network
@@ -71,7 +76,7 @@ owner reference and survive installation deletion.
    implements the `internal/ovnadmin.Client` interface and executes one
    membership operation under the central Lease.
 3. Add backup and network probe providers; a missing provider keeps the phase
-   `Ready=False` until evidence is available. Add real installation/membership
-   Lease acquisition, renewal and fencing before lifecycle mutations.
+   `Ready=False` until evidence is available. Add transport-level fencing for
+   remote operations already in flight when a Lease is lost.
 4. Add HCP peer transport using Secret references only. Private key material
    must never be copied into a CR, status field or ConfigMap.

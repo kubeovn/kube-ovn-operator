@@ -1,0 +1,36 @@
+name: Kube-OVN installation
+
+# This workflow provisions a disposable cluster and installs upstream RBAC.
+# Dispatch explicitly after reviewing the target chart and test configuration.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  network-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Load Open vSwitch kernel module
+        run: sudo modprobe openvswitch
+      - uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: kube-ovn-operator-network
+          config: test/e2e/kind-cni.yaml
+          wait: 120s
+      - name: Install Kube-OVN through the operator and verify networking
+        run: bash test/e2e/network-install.sh
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-install-diagnostics
+          path: /tmp/kube-ovn-operator-network-logs
+          if-no-files-found: ignore

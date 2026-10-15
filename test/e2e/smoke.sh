@@ -44,8 +44,6 @@ if ! kubectl wait --for=condition=Ready=false kubeovninstallation/kube-ovn -n ku
 fi
 kubectl get configmap kube-ovn-operator-plan-kube-ovn -n kube-ovn-operator-system -o jsonpath='{.data.plan\.json}' | grep -q 'ValidateVersionContract'
 kubectl get configmap kube-ovn-operator-plan-kube-ovn -n kube-ovn-operator-system -o jsonpath='{.data.values\.yaml}' | grep -q 'installMode: full'
-kubectl get lease kube-ovn-operator-installation-kube-ovn -n kube-ovn-operator-system >/dev/null
-kubectl get lease kube-ovn-operator-central-kube-ovn -n kube-ovn-operator-system >/dev/null
 
 installation_uid=$(kubectl get kubeovninstallation/kube-ovn -n kube-ovn-operator-system -o jsonpath='{.metadata.uid}')
 go run ./test/e2e/apply-smoke --namespace kube-ovn-operator-system --installation kube-ovn --installation-uid "${installation_uid}"

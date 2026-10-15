@@ -9,6 +9,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	"github.com/kubeovn/kube-ovn-operator/internal/controller"
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"helm.sh/helm/v3/pkg/chartutil"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -54,6 +56,12 @@ func main() {
 	}
 	reconciler := &controller.KubeOVNInstallationReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
 	if !planOnly {
+		directClient, err := client.New(config, client.Options{Scheme: scheme})
+		if err != nil {
+			ctrl.Log.Error(err, "create lease client")
+			os.Exit(1)
+		}
+		reconciler.Leases = lease.New(directClient)
 		dynamicClient, err := dynamic.NewForConfig(config)
 		if err != nil {
 			ctrl.Log.Error(err, "create workload client")
@@ -75,7 +83,7 @@ func main() {
 			return &chart.HelmRenderer{Name: installation.Name, Namespace: installation.Namespace, Reader: mgr.GetAPIReader(), Mapper: mgr.GetRESTMapper(), Capabilities: caps}
 		}
 		reconciler.WorkloadFactory = func(identity apply.InstallationIdentity) apply.ApplyClient {
-			return &apply.Client{Dynamic: dynamicClient, Mapper: mgr.GetRESTMapper(), Identity: identity}
+			return &apply.Client{Dynamic: dynamicClient, Mapper: mgr.GetRESTMapper(), Identity: identity, BeforeWrite: lease.CheckAll}
 		}
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {

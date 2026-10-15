@@ -48,6 +48,8 @@ type Client struct {
 	Dynamic  dynamic.Interface
 	Mapper   meta.RESTMapper
 	Identity InstallationIdentity
+	// BeforeWrite, when configured, checks the operation lease before each persistent request.
+	BeforeWrite func(context.Context) error
 }
 
 var _ ApplyClient = (*Client)(nil)
@@ -85,6 +87,11 @@ func (c *Client) Apply(ctx context.Context, objects []*unstructured.Unstructured
 		return err
 	}
 	for _, item := range prepared {
+		if c.BeforeWrite != nil {
+			if err := c.BeforeWrite(ctx); err != nil {
+				return fmt.Errorf("guard workload write: %w", err)
+			}
+		}
 		if item.exists {
 			_, err = patch(ctx, item, false)
 		} else {

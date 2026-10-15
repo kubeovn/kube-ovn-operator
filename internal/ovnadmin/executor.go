@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
 )
 
@@ -78,6 +79,9 @@ func (e Executor) Execute(ctx context.Context, endpoint string, change membershi
 				return fmt.Errorf("join would duplicate existing member identity %q/%q", change.Member.ServerID, change.Member.Address)
 			}
 		}
+		if err := lease.Check(ctx, lease.Central); err != nil {
+			return fmt.Errorf("guard membership change: %w", err)
+		}
 		return e.Client.Join(ctx, database, endpoint, change.Member)
 	case membership.OperationLeave:
 		if change.Member.ServerID == "" {
@@ -85,6 +89,9 @@ func (e Executor) Execute(ctx context.Context, endpoint string, change membershi
 		}
 		if err := validateRemoval(snapshot, change.Member.ServerID); err != nil {
 			return err
+		}
+		if err := lease.Check(ctx, lease.Central); err != nil {
+			return fmt.Errorf("guard membership change: %w", err)
 		}
 		return e.Client.Leave(ctx, database, endpoint, change.Member.ServerID)
 	case membership.OperationKick:
@@ -96,6 +103,9 @@ func (e Executor) Execute(ctx context.Context, endpoint string, change membershi
 		}
 		if err := validateRemoval(snapshot, change.Member.ServerID); err != nil {
 			return err
+		}
+		if err := lease.Check(ctx, lease.Central); err != nil {
+			return fmt.Errorf("guard membership change: %w", err)
 		}
 		return e.Client.Kick(ctx, database, endpoint, change.Member.ServerID)
 	default:

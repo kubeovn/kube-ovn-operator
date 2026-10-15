@@ -48,7 +48,31 @@ if kubectl get deployment/runtime-smoke -n kube-ovn-operator-system >/dev/null 2
   echo 'Digest mismatch unexpectedly created a workload' >&2
   exit 1
 fi
+installation_uid=$(kubectl get koi/runtime-smoke -n kube-ovn-operator-system -o jsonpath='{.metadata.uid}')
+kubectl apply -f - <<YAML
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: kube-ovn-operator-installation-runtime-smoke
+  namespace: kube-ovn-operator-system
+  ownerReferences:
+    - apiVersion: operator.kubeovn.io/v1alpha1
+      kind: KubeOVNInstallation
+      name: runtime-smoke
+      uid: ${installation_uid}
+      controller: true
+spec:
+  holderIdentity: runtime-smoke-competitor
+  leaseDurationSeconds: 120
+YAML
 kubectl patch koi/runtime-smoke -n kube-ovn-operator-system --type=merge -p "{\"spec\":{\"chart\":{\"digest\":\"${digest}\"}}}"
+kubectl wait -n kube-ovn-operator-system koi/runtime-smoke --for=jsonpath='{.status.upgrade.step}'=AcquireLease --timeout=90s
+if kubectl get deployment/runtime-smoke -n kube-ovn-operator-system >/dev/null 2>&1; then
+  echo 'Competing holder did not block workload mutation' >&2
+  exit 1
+fi
+kubectl patch lease/kube-ovn-operator-installation-runtime-smoke -n kube-ovn-operator-system --type=merge -p '{"spec":{"holderIdentity":""}}'
+
 if ! kubectl wait -n kube-ovn-operator-system koi/runtime-smoke --for=condition=WorkloadsReady --timeout=180s; then
   kubectl get koi/runtime-smoke -n kube-ovn-operator-system -o yaml
   cat "${test_dir}/operator.log"

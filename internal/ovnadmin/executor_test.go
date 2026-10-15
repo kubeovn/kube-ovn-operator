@@ -4,7 +4,12 @@ import (
 	"context"
 	"testing"
 
+	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 type fakeClient struct {
@@ -33,7 +38,7 @@ func (f *fakeClient) Kick(_ context.Context, _, _, serverID string) error {
 
 func TestExecutorRejectsMissingQuorum(t *testing.T) {
 	client := &fakeClient{snapshot: Snapshot{ClusterID: "cluster-a", LeaderServerID: "a", Database: "northbound", CommitIndex: 10, AppliedIndex: 10, Members: []membership.Member{{ServerID: "a", Healthy: true}, {ServerID: "b", Healthy: false}, {ServerID: "c", Healthy: false}}}}
-	err := (Executor{Client: client}).Execute(context.Background(), "nb.example", membership.Change{Operation: membership.OperationKick, Member: membership.Member{ServerID: "b"}, Reason: "permanent loss"})
+	err := (Executor{Client: client}).Execute(t.Context(), "nb.example", membership.Change{Operation: membership.OperationKick, Member: membership.Member{ServerID: "b"}, Reason: "permanent loss"})
 	if err == nil {
 		t.Fatal("expected quorum gate")
 	}
@@ -44,7 +49,9 @@ func TestExecutorRejectsMissingQuorum(t *testing.T) {
 
 func TestExecutorExecutesAuditedKickAfterChecks(t *testing.T) {
 	client := &fakeClient{snapshot: Snapshot{ClusterID: "cluster-a", LeaderServerID: "a", Database: "northbound", CommitIndex: 10, AppliedIndex: 9, Members: []membership.Member{{ServerID: "a", Healthy: true}, {ServerID: "b", Healthy: false}, {ServerID: "c", Healthy: true}}}}
-	err := (Executor{Client: client}).Execute(context.Background(), "nb.example", membership.Change{Operation: membership.OperationKick, Member: membership.Member{ServerID: "b"}, Reason: "node permanently lost; approved recovery request"})
+	err := withCentralLease(t, func(ctx context.Context) error {
+		return (Executor{Client: client}).Execute(ctx, "nb.example", membership.Change{Operation: membership.OperationKick, Member: membership.Member{ServerID: "b"}, Reason: "node permanently lost; approved recovery request"})
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +62,7 @@ func TestExecutorExecutesAuditedKickAfterChecks(t *testing.T) {
 
 func TestExecutorRefusesRemovalThatLeavesNoQuorum(t *testing.T) {
 	client := &fakeClient{snapshot: Snapshot{ClusterID: "cluster-a", LeaderServerID: "a", Database: "northbound", CommitIndex: 1, AppliedIndex: 1, Members: []membership.Member{{ServerID: "a", Address: "a", Healthy: true}}}}
-	err := (Executor{Client: client}).Execute(context.Background(), "nb.example", membership.Change{Operation: membership.OperationLeave, Member: membership.Member{ServerID: "a"}})
+	err := (Executor{Client: client}).Execute(t.Context(), "nb.example", membership.Change{Operation: membership.OperationLeave, Member: membership.Member{ServerID: "a"}})
 	if err == nil {
 		t.Fatal("expected last-member removal gate")
 	}
@@ -66,11 +73,32 @@ func TestExecutorRefusesRemovalThatLeavesNoQuorum(t *testing.T) {
 
 func TestExecutorRefusesDuplicateJoin(t *testing.T) {
 	client := &fakeClient{snapshot: Snapshot{ClusterID: "cluster-a", LeaderServerID: "a", Database: "northbound", CommitIndex: 1, AppliedIndex: 1, Members: []membership.Member{{ServerID: "a", Address: "a", Healthy: true}, {ServerID: "b", Address: "b", Healthy: true}, {ServerID: "c", Address: "c", Healthy: true}}}}
-	err := (Executor{Client: client}).Execute(context.Background(), "nb.example", membership.Change{Operation: membership.OperationJoin, Member: membership.Member{ServerID: "a", Address: "new"}})
+	err := (Executor{Client: client}).Execute(t.Context(), "nb.example", membership.Change{Operation: membership.OperationJoin, Member: membership.Member{ServerID: "a", Address: "new"}})
 	if err == nil {
 		t.Fatal("expected duplicate identity gate")
 	}
 	if client.operation != "" {
 		t.Fatal("unsafe join was executed")
+	}
+}
+
+func withCentralLease(t *testing.T, operation func(context.Context) error) error {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	manager := lease.New(fake.NewClientBuilder().WithScheme(scheme).Build())
+	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "ovn", Namespace: "default", UID: "installation-uid"}
+	return manager.With(t.Context(), installation, lease.Installation, func(ctx context.Context) error {
+		return manager.With(ctx, installation, lease.Central, operation)
+	})
+}
+
+func TestExecutorRefusesMembershipWriteWithoutLease(t *testing.T) {
+	client := &fakeClient{snapshot: Snapshot{ClusterID: "cluster-a", LeaderServerID: "a", CommitIndex: 10, AppliedIndex: 10, Members: []membership.Member{{ServerID: "a", Healthy: true}, {ServerID: "b", Healthy: true}, {ServerID: "c", Healthy: true}}}}
+	err := (Executor{Client: client}).Execute(t.Context(), "nb.example", membership.Change{Operation: membership.OperationJoin, Member: membership.Member{ServerID: "d", Address: "192.0.2.4"}})
+	if err == nil || client.operation != "" {
+		t.Fatalf("membership mutation bypassed lease: %v %s", err, client.operation)
 	}
 }

@@ -28,6 +28,8 @@ jobs:
           KUBE_OVN_CHART_ARCHIVE=/tmp/kube-ovn-v1.16.13.tgz go test ./internal/chart -run TestReleasedKubeOVNChart -count=1
       - name: Test
         run: make test
+      - name: Race-check operation coordination
+        run: go test -race ./internal/lease ./internal/apply ./internal/controller ./internal/ovnadmin
       - name: Vet
         run: make vet
       - uses: golangci/golangci-lint-action@v7
