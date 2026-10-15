@@ -67,7 +67,9 @@ func NetworkProbeObjects(installation *operatorv1alpha1.KubeOVNInstallation, obj
 			}},
 		}
 		for _, field := range []struct{ name, path string }{{"POD_NAME", "metadata.name"}, {"POD_UID", "metadata.uid"}, {"NODE_NAME", "spec.nodeName"}} {
-			pod.Containers[0].Env = append(pod.Containers[0].Env, corev1.EnvVar{Name: field.name, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: field.path}}})
+			// fieldRef is atomic for SSA. Match the server's default so a
+			// repeated apply agrees with the value recorded during create.
+			pod.Containers[0].Env = append(pod.Containers[0].Env, corev1.EnvVar{Name: field.name, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: field.path}}})
 		}
 		resources = append(resources, &appsv1.DaemonSet{TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "DaemonSet"}, Name: name + "-" + role.name, Namespace: installation.Namespace,
 			Spec: appsv1.DaemonSetSpec{Selector: &metav1.LabelSelector{MatchLabels: labels(role.app)}, Template: corev1.PodTemplateSpec{Labels: labels(role.app), Spec: pod}},
