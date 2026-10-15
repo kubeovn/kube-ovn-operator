@@ -189,6 +189,29 @@ and runs as UID/GID 65532. Kubernetes workload/storage wiring, runtime image
 publication/selection and lifecycle authorization are still required. See
 [launch request and supervision](docs/member-launch.md).
 
+## Member workloads
+
+`internal/workload.Provisioner` creates a preparation Job and, only after an
+explicit `Start` call with its durably recorded native result, a one-member
+StatefulSet using `/member-run`. Immutable records bind the installation UID and
+generation, operation, Node UID, PVC/PV UIDs, runtime image digest and workload
+identities. A resourceVersion-guarded PVC reservation excludes another member.
+Retries recover an accepted create response without regenerating database IDs;
+recorded objects that disappear, change identity or change spec are rejected.
+
+The caller supplies a previously provisioned, Bound filesystem PVC with a private
+mount root owned by UID 65532. Preparation does not start a server. The workload
+uses host networking on the pinned Node, unprivileged high ports, dropped Linux
+capabilities and no service-account token. Records and storage reservations are
+retained; this adapter has no delete, resize or automatic retirement path.
+
+The default controller is not yet connected to this adapter. A persistent joint
+NB/SB executor must authorize `Start` from fresh quorum/backup evidence, observe
+both new members catching up and only then remove an old member. Runtime image
+publication, automatic storage provisioning, TLS Secret identity management and
+Kubernetes node replacement remain separate work. Pod readiness alone does not
+prove database health. See [member workload contract](docs/member-workloads.md).
+
 ## Permanent-loss approvals
 
 `KubeOVNMemberRemovalApproval` records an explicit decision to remove one lost

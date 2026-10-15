@@ -37,6 +37,25 @@ type TLSFiles struct {
 }
 
 func (r Request) validate() error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	if r.TLS != nil {
+		for _, path := range []string{r.TLS.PrivateKey, r.TLS.Certificate, r.TLS.CA} {
+			// Projected Kubernetes Secret mounts use symlinks. Only inspect file
+			// metadata here; native OVN consumes the existing credentials.
+			info, err := os.Stat(path)
+			if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+				return errors.New("TLS files must already exist as nonempty regular files")
+			}
+		}
+	}
+	return nil
+}
+
+// Validate checks the portable launch contract. File existence and native
+// identity checks take place inside the member immediately before startup.
+func (r Request) Validate() error {
 	if r.FormatVersion != 1 || len(r.Preparation.Databases) != 2 {
 		return errors.New("launch requires format version 1 and both prepared databases")
 	}
@@ -82,12 +101,6 @@ func (r Request) validate() error {
 		for _, path := range []string{r.TLS.PrivateKey, r.TLS.Certificate, r.TLS.CA} {
 			if !filepath.IsAbs(path) {
 				return errors.New("TLS files must use absolute mounted paths")
-			}
-			// Projected Kubernetes Secret mounts use symlinks. Only inspect file
-			// metadata here; native OVN consumes the existing credentials.
-			info, err := os.Stat(path)
-			if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-				return errors.New("TLS files must already exist as nonempty regular files")
 			}
 		}
 	}
