@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/json"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -43,6 +44,7 @@ type KubeOVNInstallationReconciler struct {
 	Leases          lease.Runner
 	OVN             health.OVNProvider
 	Runtime         health.RuntimeProvider
+	Network         health.NetworkProvider
 	WorkloadFactory func(apply.InstallationIdentity) apply.ApplyClient
 }
 
@@ -69,7 +71,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	}
 	plan := planner.Build(installation.Spec, installation.Status.ObservedVersion)
 	if plan.Blocking != "" {
-		if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil); err != nil {
+		if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil); err != nil {
 			return reconcile.Result{}, err
 		}
 		logger.Info("installation plan is blocked", "reason", plan.Blocking)
@@ -83,11 +85,16 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		renderer = chart.ValuesRenderer{}
 	}
 	rendered, err := renderer.Render(ctx, installation.Spec)
+	if err == nil && len(rendered.Objects) > 0 {
+		var probes []*unstructured.Unstructured
+		probes, err = chart.NetworkProbeObjects(installation, rendered.Objects)
+		rendered.Objects = append(rendered.Objects, probes...)
+	}
 	if err != nil {
 		plan.Phase = operatorv1alpha1.PhaseDegraded
 		plan.Step = "Render"
 		plan.Blocking = err.Error()
-		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil); statusErr != nil {
+		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil); statusErr != nil {
 			return reconcile.Result{}, statusErr
 		}
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
@@ -165,7 +172,11 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	if err == nil && observation != nil && observation.Ready && r.Runtime != nil {
 		runtimeReport = new(r.Runtime.Observe(ctx, installation))
 	}
-	if err := r.updateStatus(ctx, installation, plan, now(), observation, ovnReport, runtimeReport); err != nil {
+	var networkReport *health.NetworkReport
+	if ovnReport != nil && ovnReport.Ready && runtimeReport != nil && runtimeReport.Northd.Status == metav1.ConditionTrue && runtimeReport.DataPlane.Status == metav1.ConditionTrue && r.Network != nil {
+		networkReport = new(r.Network.Observe(ctx, installation, runtimeReport.Nodes))
+	}
+	if err := r.updateStatus(ctx, installation, plan, now(), observation, ovnReport, runtimeReport, networkReport); err != nil {
 		return reconcile.Result{}, err
 	}
 	if errors.Is(err, lease.ErrHeld) {
@@ -214,7 +225,7 @@ func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context,
 	return nil
 }
 
-func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time, observation *apply.Observation, ovnReport *health.OVNReport, runtimeReport *health.RuntimeReport) error {
+func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time, observation *apply.Observation, ovnReport *health.OVNReport, runtimeReport *health.RuntimeReport, networkReport *health.NetworkReport) error {
 	status := installation.Status.DeepCopy()
 	if status.ApplyCheckpoint == nil {
 		status.ObservedVersion = ""
@@ -227,6 +238,7 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 	status.Topology.Databases = nil
 	status.Topology.NorthdProcesses = nil
 	status.Topology.Nodes = nil
+	status.Network = nil
 	status.HCP = operatorv1alpha1.HCPStatus{}
 	status.Upgrade.Step = plan.Step
 	status.Upgrade.CanRollback = false
@@ -239,6 +251,8 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 	ovnStatus, ovnReason, ovnMessage := metav1.ConditionUnknown, "NotObserved", "OVN health has not been observed for this rollout"
 	northd := metav1.Condition{Type: "NorthdReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Northd has not been observed for this rollout"}
 	dataPlane := metav1.Condition{Type: "DataPlaneReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Data-plane connections have not been observed for this rollout"}
+	network := metav1.Condition{Type: "NetworkReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Network probes await healthy workloads, databases and runtime"}
+	readyStatus := metav1.ConditionFalse
 	if observation != nil {
 		status.Topology.ReadyCentralReplicas = observation.ReadyCentralReplicas
 		workloadStatus = metav1.ConditionFalse
@@ -296,13 +310,31 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		workloadMessage = message
 		degraded, degradedReason = metav1.ConditionTrue, "SafetyGateBlocked"
 	}
+	if networkReport != nil {
+		network = networkReport.Condition
+		if network.Status == metav1.ConditionFalse {
+			status.Phase = operatorv1alpha1.PhaseDegraded
+			degraded, degradedReason, message = metav1.ConditionTrue, network.Reason, network.Message
+		}
+		if network.Status == metav1.ConditionTrue && networkReport.Evidence != nil {
+			status.Network = new(*networkReport.Evidence)
+			status.Network.AddressFamilies = slices.Clone(networkReport.Evidence.AddressFamilies)
+			status.Network.LastObserved = metav1.NewTime(now)
+		}
+	}
+	networkVerified := network.Status == metav1.ConditionTrue && (installation.Spec.Mode == operatorv1alpha1.InstallationModeControlPlaneOnly && network.Reason == "NotRequired" || status.Network != nil && status.Network.ObservedNodes > 0 && status.Network.SuccessfulProbes > 0 && len(status.Network.AddressFamilies) > 0)
+	if plan.Blocking == "" && workloadStatus == metav1.ConditionTrue && ovnStatus == metav1.ConditionTrue && northd.Status == metav1.ConditionTrue && dataPlane.Status == metav1.ConditionTrue && networkVerified {
+		readyStatus, readyReason, message = metav1.ConditionTrue, "VerificationComplete", "Workloads, OVN databases, runtime and configured network probes passed verification"
+		status.Phase = operatorv1alpha1.PhaseReady
+		status.Upgrade.Step = "Verified"
+	}
 	for _, condition := range []metav1.Condition{
-		{Type: "Ready", Status: metav1.ConditionFalse, Reason: readyReason, Message: message},
+		{Type: "Ready", Status: readyStatus, Reason: readyReason, Message: message},
 		{Type: "Degraded", Status: degraded, Reason: degradedReason, Message: message},
 		{Type: "WorkloadsReady", Status: workloadStatus, Reason: workloadReason, Message: workloadMessage},
 		{Type: "OVNDBReady", Status: ovnStatus, Reason: ovnReason, Message: ovnMessage},
 		northd, dataPlane,
-		{Type: "NetworkReady", Status: metav1.ConditionUnknown, Reason: "ProviderUnavailable", Message: "Network probe verification is not configured"},
+		network,
 	} {
 		condition.ObservedGeneration = installation.Generation
 		condition.LastTransitionTime = metav1.NewTime(now)

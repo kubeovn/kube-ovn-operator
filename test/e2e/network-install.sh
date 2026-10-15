@@ -22,6 +22,7 @@ trap cleanup EXIT
 # uses the job's existing kubeconfig; production ServiceAccount RBAC is a
 # separate deployment concern.
 kubectl config use-context "kind-${cluster_name}"
+bash test/e2e/probe-image.sh "${cluster_name}"
 for image in docker.io/kubeovn/kube-ovn:v1.16.13 registry.k8s.io/e2e-test-images/agnhost:2.53 docker.io/library/busybox:1.37.0; do
   docker pull "${image}"
   kind load docker-image --name "${cluster_name}" "${image}"
@@ -52,11 +53,15 @@ spec:
     replicas: 3
   dataPlane:
     ovsUpdateStrategy: RollingUpdate
+  networkProbe:
+    image: kube-ovn-operator-probe:e2e
 YAML
 kubectl -n kube-system wait koi/network --for=condition=WorkloadsReady --timeout=900s
 kubectl -n kube-system wait koi/network --for=condition=OVNDBReady --timeout=180s
 kubectl -n kube-system wait koi/network --for=condition=NorthdReady --timeout=180s
 kubectl -n kube-system wait koi/network --for=condition=DataPlaneReady --timeout=180s
+kubectl -n kube-system wait koi/network --for=condition=NetworkReady --timeout=180s
+kubectl -n kube-system wait koi/network --for=condition=Ready --timeout=180s
 kubectl wait nodes --all --for=condition=Ready --timeout=180s
 kubectl -n kube-system rollout status deployment/coredns --timeout=180s
 
@@ -117,6 +122,5 @@ server_ip=$(kubectl -n default get pod/operator-network-server -o jsonpath='{.st
 for destination in "${server_ip}" operator-network-server.default.svc.cluster.local; do
   kubectl -n default exec operator-network-client -- wget -T 15 -q -O - "http://${destination}:8080/hostname" | tee -a "${log_dir}/connectivity.txt" | grep -qx operator-network-server
 done
-# Workload and independent network probes are evidence for this CI run; the
-# controller's Ready condition remains false until its network provider is wired.
-kubectl -n kube-system get koi/network -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' | grep -qx VerificationPending
+# Independent probes supplement the controller's network verification.
+kubectl -n kube-system get koi/network -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' | grep -qx VerificationComplete

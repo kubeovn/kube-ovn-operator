@@ -41,14 +41,21 @@ const (
 )
 
 type KubeOVNInstallationSpec struct {
-	Version   string           `json:"version"`
-	Chart     ChartSpec        `json:"chart"`
-	Mode      InstallationMode `json:"mode"`
-	Central   CentralSpec      `json:"central"`
-	DataPlane DataPlaneSpec    `json:"dataPlane,omitempty"`
-	HCP       HCPConfig        `json:"hcp,omitempty"`
-	Upgrade   UpgradeSpec      `json:"upgrade,omitempty"`
-	Adoption  AdoptionSpec     `json:"adoption,omitempty"`
+	Version      string            `json:"version"`
+	Chart        ChartSpec         `json:"chart"`
+	Mode         InstallationMode  `json:"mode"`
+	Central      CentralSpec       `json:"central"`
+	DataPlane    DataPlaneSpec     `json:"dataPlane,omitempty"`
+	HCP          HCPConfig         `json:"hcp,omitempty"`
+	Upgrade      UpgradeSpec       `json:"upgrade,omitempty"`
+	Adoption     AdoptionSpec      `json:"adoption,omitempty"`
+	NetworkProbe *NetworkProbeSpec `json:"networkProbe,omitempty"`
+}
+
+// NetworkProbeSpec enables ordinary pod-network canaries using this operator's
+// network-probe binary. Use an immutable image digest in production.
+type NetworkProbeSpec struct {
+	Image string `json:"image"`
 }
 
 type ChartSpec struct {
@@ -136,6 +143,14 @@ type KubeOVNInstallationStatus struct {
 	HCP                HCPStatus              `json:"hcp,omitempty"`
 	LastBackup         *BackupStatus          `json:"lastBackup,omitempty"`
 	ObservedGeneration int64                  `json:"observedGeneration,omitempty"`
+	Network            *NetworkStatus         `json:"network,omitempty"`
+}
+
+type NetworkStatus struct {
+	ObservedNodes    int32       `json:"observedNodes"`
+	AddressFamilies  []string    `json:"addressFamilies"`
+	SuccessfulProbes int32       `json:"successfulProbes"`
+	LastObserved     metav1.Time `json:"lastObserved"`
 }
 
 type TopologyStatus struct {

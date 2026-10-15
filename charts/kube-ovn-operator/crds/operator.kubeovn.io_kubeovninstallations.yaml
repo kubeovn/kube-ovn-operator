@@ -98,6 +98,11 @@ spec:
                   properties:
                     enabled: {type: boolean}
                     selector: {type: object, additionalProperties: {type: string}}
+                networkProbe:
+                  type: object
+                  required: [image]
+                  properties:
+                    image: {type: string, minLength: 1, maxLength: 512}
             status:
               type: object
               properties:
@@ -118,3 +123,4 @@ spec:
                 upgrade: {type: object, x-kubernetes-preserve-unknown-fields: true}
                 hcp: {type: object, x-kubernetes-preserve-unknown-fields: true}
                 lastBackup: {type: object, x-kubernetes-preserve-unknown-fields: true}
+                network: {type: object, x-kubernetes-preserve-unknown-fields: true}

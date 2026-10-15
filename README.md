@@ -76,18 +76,36 @@ DaemonSet generation after sampling. Failed observations clear the affected
 runtime evidence. Control-plane-only and data-plane-only installations skip
 the component they do not manage.
 
-These runtime checks do not prove end-to-end packet delivery. Network probes
-remain required and `NetworkReady` stays Unknown. Observation requires pod list,
+These runtime checks do not prove end-to-end packet delivery. Enable network
+verification before the first apply checkpoint with `spec.networkProbe.image`,
+using an operator image containing `/network-probe` (prefer an immutable image
+digest). Without this configuration, `NetworkReady` stays Unknown for an
+installation with a data plane. Observation requires pod list,
 Node/ReplicaSet/Deployment/StatefulSet/DaemonSet read and `pods/exec` create permissions; the
 limited shipped RBAC still requires environment-specific review and expansion.
 
-`Ready` remains false until complete OVN and network verification is implemented. A
-successful rollout reports `VerificationPending`; a valid plan alone reports
-`PlanOnly`. Neither is evidence of network availability. Installation and RAFT
+`Ready=True/VerificationComplete` requires workload, database, northd,
+data-plane and network conditions to pass in the same reconciliation. Failed
+or unavailable checks clear old network evidence and readiness. A rollout
+awaiting checks reports `VerificationPending`; a valid plan alone reports
+`PlanOnly`. Control-plane-only installations do not schedule data-plane probes.
+External/HCP databases still require a peer provider. Installation and RAFT
 central operations acquire separate Leases with unique
 operation identities. The pure
 membership/upgrade planners and injected OVN admin interface are not yet a
 complete lifecycle execution state machine.
+
+Network verification adds client and server DaemonSets using the OVS scheduling
+constraints, plus a ClusterIP Service. These are unprivileged ordinary pods
+without service-account tokens or host mounts. For every node and observed
+IPv4/IPv6 family, the client checks a server on the same node, the next node
+in a ring when multiple nodes exist, the Service IP, and its DNS name. DNS
+must resolve to the observed Service address. Each HTTP response must echo a
+fresh nonce and the expected Pod UID/node identity. The observer rechecks pod
+restarts, addresses, nodes, DaemonSets and Service configuration after sampling.
+`status.network` records node/family coverage, successful checks and observation
+time. The checks cover sampled HTTP paths and Service DNS; they do not replace
+all-pairs, UDP application, NetworkPolicy or full network conformance tests.
 
 For plan inspection without fetching charts or changing workloads, run the
 operator with `--plan-only`. This writes the plan ConfigMap without acquiring
@@ -121,9 +139,11 @@ make e2e
 ```
 
 The kind smoke test exercises plan status and the Kubernetes apply adapter.
+It also sends actual probe traffic using kind's existing CNI, rejects a healthy
+server that returns an incorrect Pod identity, and verifies recovery.
 The release-chart integration test renders a checksum-pinned v1.16.13 archive
-in all three installation modes. These tests do not yet install Kube-OVN or
-verify a working network. The CI job also starts isolated OVSDB processes to
+in all three installation modes. These tests do not install Kube-OVN or prove
+its network works. The CI job also starts isolated OVSDB processes to
 check standalone/clustered metadata, leader failover and a minority follower
 after quorum loss, plus real northd active/standby/pause and SB disconnect
 behavior. Isolated ovs-vswitchd and ovn-controller processes verify `br-int`
@@ -140,6 +160,6 @@ v1.16.13 chart through the operator, waits for workload and OVN runtime health, 
 NB/SB cluster status and probes Pod IP and Service DNS traffic between two nodes.
 It uses the job's existing admin kubeconfig and creates the upstream chart's
 ServiceAccounts and RBAC; it is separate from the default smoke workflow.
-Production ServiceAccount permissions and complete network/OVN verification
-remain separate acceptance items. See [docs/design.md](docs/design.md) for the remaining
+Production ServiceAccount permissions and complete Kube-OVN installation and
+transition verification remain separate acceptance items. See [docs/design.md](docs/design.md) for the remaining
 execution boundaries and safety contract.

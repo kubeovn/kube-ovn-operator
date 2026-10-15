@@ -17,6 +17,8 @@ lint:
 	golangci-lint run ./...
 
 manifests:
+	@cmp config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml charts/kube-ovn-operator/crds/operator.kubeovn.io_kubeovninstallations.yaml
+	@cmp config/crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml charts/kube-ovn-operator/crds/operator.kubeovn.io_kubeovnrecoveryrequests.yaml
 	@test -s config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml
 	@test -s config/crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml
 	@test -s config/manager/manager.yaml

@@ -108,6 +108,9 @@ func (in *KubeOVNInstallationSpec) DeepCopyInto(out *KubeOVNInstallationSpec) {
 	in.HCP.DeepCopyInto(&out.HCP)
 	in.Upgrade.DeepCopyInto(&out.Upgrade)
 	in.Adoption.DeepCopyInto(&out.Adoption)
+	if in.NetworkProbe != nil {
+		out.NetworkProbe = new(*in.NetworkProbe)
+	}
 }
 func (in *KubeOVNInstallationSpec) DeepCopy() *KubeOVNInstallationSpec {
 	if in == nil {
@@ -180,6 +183,10 @@ func (in *KubeOVNInstallationStatus) DeepCopyInto(out *KubeOVNInstallationStatus
 	if in.LastBackup != nil {
 		out.LastBackup = new(BackupStatus)
 		*out.LastBackup = *in.LastBackup
+	}
+	if in.Network != nil {
+		out.Network = new(*in.Network)
+		out.Network.AddressFamilies = append([]string(nil), in.Network.AddressFamilies...)
 	}
 }
 func (in *KubeOVNInstallationStatus) DeepCopy() *KubeOVNInstallationStatus {
