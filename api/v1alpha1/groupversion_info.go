@@ -20,6 +20,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&KubeOVNInstallationList{},
 		&KubeOVNRecoveryRequest{},
 		&KubeOVNRecoveryRequestList{},
+		&KubeOVNMemberRemovalApproval{},
+		&KubeOVNMemberRemovalApprovalList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

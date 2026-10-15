@@ -150,9 +150,38 @@ replacement, wait for it to catch up, remove the old member, then permit workloa
 scaling. The command transport cannot prepare a database or start a joining
 server. Joining still needs a workload provisioner and `ovsdb-tool join-cluster`.
 A backup capture and verification adapter is available as described below.
-Durable approval verification, the persistent NB/SB lifecycle state machine
-and strict in-flight fencing remain required before wiring automatic membership
-changes into the default reconciler.
+The durable approval adapter is described below. Its production wiring, the
+persistent NB/SB lifecycle state machine and strict in-flight fencing remain
+required before enabling automatic membership changes in the default reconciler.
+
+## Permanent-loss approvals
+
+`KubeOVNMemberRemovalApproval` records an explicit decision to remove one lost
+member from each of one or both OVN databases. It binds the installation name
+and UID, operation UUID, database/cluster/server UUIDs, literal-IP RAFT addresses,
+reason and expiry. The caller pins the approval name and UID. Creation permission
+is the approval authority; a self-reported `approvedBy` field is not authority.
+The existing recovery request's `approvedBy` value cannot authorize a kick.
+
+`internal/approval.Provider` reserves the immutable decision in status before
+dispatch, permits retries for the same operation, and records completion only
+when all approved databases have quorum and no longer contain the old server.
+Completed audit status is immutable and cannot authorize another dispatch.
+Revocation is irreversible. Revocation and expiry block new dispatches while
+still allowing an already converged operation to record completion. Provider
+operations require uncached API reads and both installation-bound Leases.
+
+The admin executor re-reads the approval after backup verification and again
+after the final database observation. The approval expiry bounds the dispatch
+context. Cancellation cannot retract a command already accepted by OVSDB;
+uncertain results require fresh observation before retrying. This approval
+reservation is not the persistent NB/SB node-lifecycle state machine.
+
+The CRD ships with the operator. Approval roles are optional, unbound manifests
+and are not installed by default. Production deployment must separate human
+approval creation from the operator's status-only writes and retain Kubernetes
+API audit records. The default operator account cannot create approvals and is
+not yet wired to this adapter. See [approval permissions and operation flow](docs/member-removal-approvals.md).
 
 ## Database backups
 
@@ -213,7 +242,7 @@ after quorum loss, plus real northd active/standby/pause and SB disconnect
 behavior. Isolated ovs-vswitchd and ovn-controller processes verify `br-int`
 with a dummy datapath and detect loss of SB connectivity.
 The membership integration test uses real OVSDB processes and the persistent
-backup provider to check healthy leave, explicit replacement provisioning, approved kick,
+backup and approval providers to check healthy leave, explicit replacement provisioning, approved kick,
 quorum-loss refusal and preservation of committed data. This tests admin
 operations and 3-to-2-to-3 convergence; it does not exercise Kubernetes node or
 workload replacement.

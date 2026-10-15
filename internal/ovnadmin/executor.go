@@ -27,7 +27,12 @@ type Snapshot struct {
 // Transport implementations revalidate the snapshot immediately before dispatch.
 type Client interface {
 	Status(context.Context, string, string) (Snapshot, error)
-	mutate(context.Context, string, Snapshot, membership.Change, func(context.Context, Snapshot) error) error
+	mutate(context.Context, string, Snapshot, membership.Change, func(context.Context, Snapshot) (authorization, error)) error
+}
+
+type authorization struct {
+	validUntil time.Time
+	recheck    func(context.Context, Snapshot) error
 }
 
 // BackupVerifier must read and verify an actual backup for the observed database
@@ -37,9 +42,10 @@ type BackupVerifier interface {
 }
 
 // LossVerifier checks a durable, explicit approval bound to this exact cluster,
-// member UUID and address. An arbitrary reason or unhealthy Pod is not approval.
+// member UUID and address, returning its expiry for the dispatch deadline.
+// An arbitrary reason or unhealthy Pod is not approval.
 type LossVerifier interface {
-	VerifyPermanentLoss(context.Context, Snapshot, membership.Change) error
+	VerifyPermanentLoss(context.Context, Snapshot, membership.Change) (time.Time, error)
 }
 
 type Executor struct {
@@ -75,36 +81,67 @@ func (e Executor) Execute(ctx context.Context, endpoint string, change membershi
 	if err := validateChange(snapshot, change); err != nil {
 		return err
 	}
-	return e.Client.mutate(ctx, endpoint, snapshot, change, func(ctx context.Context, current Snapshot) error {
+	return e.Client.mutate(ctx, endpoint, snapshot, change, func(ctx context.Context, current Snapshot) (authorization, error) {
+		grant := authorization{}
 		// Verify providers against the transport's final observation, not the
 		// earlier planning fence, which may have advanced while collecting peers.
 		if err := validateChange(current, change); err != nil {
-			return err
+			return grant, err
 		}
 		if e.Backups == nil || strings.TrimSpace(change.BackupRef) == "" {
-			return fmt.Errorf("membership change requires a verified backup")
+			return grant, fmt.Errorf("membership change requires a verified backup")
 		}
 		if err := e.Backups.Verify(ctx, current, change.BackupRef); err != nil {
-			return fmt.Errorf("verify membership backup: %w", err)
+			return grant, fmt.Errorf("verify membership backup: %w", err)
 		}
 		if change.Operation == membership.OperationKick {
 			if e.PermanentLoss == nil {
-				return fmt.Errorf("kick requires a permanent-loss approval verifier")
+				return grant, fmt.Errorf("kick requires a permanent-loss approval verifier")
 			}
-			if err := e.PermanentLoss.VerifyPermanentLoss(ctx, current, change); err != nil {
-				return fmt.Errorf("verify permanent loss: %w", err)
+			validUntil, err := e.PermanentLoss.VerifyPermanentLoss(ctx, current, change)
+			if err != nil {
+				return grant, fmt.Errorf("verify permanent loss: %w", err)
+			}
+			if !time.Now().Before(validUntil) {
+				return grant, fmt.Errorf("permanent-loss approval has no future expiry")
+			}
+			grant.validUntil = validUntil
+			grant.recheck = func(ctx context.Context, final Snapshot) error {
+				currentExpiry, err := e.PermanentLoss.VerifyPermanentLoss(ctx, final, change)
+				if err != nil {
+					return err
+				}
+				if !currentExpiry.Equal(validUntil) || !time.Now().Before(currentExpiry) {
+					return fmt.Errorf("approval expiry changed or passed before dispatch")
+				}
+				return nil
 			}
 		}
 		if err := lease.Check(ctx, lease.Central); err != nil {
-			return fmt.Errorf("guard membership change: %w", err)
+			return grant, fmt.Errorf("guard membership change: %w", err)
 		}
-		return nil
+		return grant, nil
 	})
 }
 
 func validateChange(snapshot Snapshot, change membership.Change) error {
-	if !membership.ValidID(snapshot.ClusterID) || snapshot.ClusterID != change.ClusterID {
+	if err := snapshot.Validate(); err != nil {
+		return err
+	}
+	if snapshot.ClusterID != change.ClusterID {
 		return fmt.Errorf("membership change is not bound to the observed cluster UUID")
+	}
+	return validateTarget(snapshot, change)
+}
+
+// Validate checks an observed RAFT database identity, committed fence and quorum.
+// It does not authorize a mutation or make a sampled observation atomic.
+func (snapshot Snapshot) Validate() error {
+	if _, err := clusterCommand(snapshot.Database, "cluster/status"); err != nil {
+		return err
+	}
+	if !membership.ValidID(snapshot.ClusterID) {
+		return fmt.Errorf("a full cluster UUID is required")
 	}
 	if err := membership.ValidateMembers(snapshot.Members); err != nil {
 		return err
@@ -127,6 +164,10 @@ func validateChange(snapshot Snapshot, change membership.Change) error {
 	if leaders != 1 || healthy < len(snapshot.Members)/2+1 {
 		return fmt.Errorf("membership change requires a healthy leader and quorum")
 	}
+	return nil
+}
+
+func validateTarget(snapshot Snapshot, change membership.Change) error {
 	if err := membership.ValidateMembers([]membership.Member{change.Member}); err != nil {
 		return fmt.Errorf("change target: %w", err)
 	}
@@ -161,6 +202,12 @@ func validateChange(snapshot Snapshot, change membership.Change) error {
 		return fmt.Errorf("kick requires an unhealthy member and explicit permanent-loss approval")
 	}
 	remaining := len(snapshot.Members) - 1
+	healthy := 0
+	for _, member := range snapshot.Members {
+		if member.Healthy {
+			healthy++
+		}
+	}
 	if target.Healthy {
 		healthy--
 	}

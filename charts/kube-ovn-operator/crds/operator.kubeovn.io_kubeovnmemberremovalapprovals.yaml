@@ -1,0 +1,132 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kubeovnmemberremovalapprovals.operator.kubeovn.io
+spec:
+  group: operator.kubeovn.io
+  scope: Namespaced
+  names:
+    plural: kubeovnmemberremovalapprovals
+    singular: kubeovnmemberremovalapproval
+    kind: KubeOVNMemberRemovalApproval
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      additionalPrinterColumns:
+        - {name: Phase, type: string, jsonPath: .status.phase}
+        - {name: Revoked, type: boolean, jsonPath: .spec.revoked}
+        - {name: Expires, type: date, jsonPath: .spec.decision.expiresAt}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          x-kubernetes-validations:
+            - rule: "!has(self.status) || self.status.phase != 'Completed' || (has(oldSelf.status) && oldSelf.status.phase in ['Reserved', 'Completed'])"
+              message: Completion requires a previously recorded reservation.
+            - rule: '!has(oldSelf.status) || !has(oldSelf.status.phase) || has(self.status)'
+              message: A recorded reservation cannot be cleared.
+            - rule: '!has(self.status) || self.status.operationID == self.spec.decision.operationID'
+              message: Status must identify the approved operation.
+            - rule: '!has(self.status) || self.status.reservedAt < self.spec.decision.expiresAt'
+              message: Reservation must precede approval expiry.
+            - rule: "!has(self.status) || self.status.phase != 'Completed' || (self.status.observations.size() == self.spec.decision.targets.size() && self.status.observations.all(o, self.spec.decision.targets.exists(t, t.database == o.database && t.clusterID == o.clusterID)))"
+              message: Completion must record every approved database identity.
+          properties:
+            spec:
+              type: object
+              required: [decision, revoked]
+              x-kubernetes-validations:
+                - rule: '!oldSelf.revoked || self.revoked'
+                  message: Revocation cannot be reversed.
+              properties:
+                revoked: {type: boolean, default: false}
+                decision:
+                  type: object
+                  required: [installationRef, operationID, targets, reason, expiresAt]
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: The approval decision is immutable.
+                  properties:
+                    installationRef:
+                      type: object
+                      required: [name, uid]
+                      properties:
+                        name: {type: string, minLength: 1, maxLength: 253}
+                        uid: {type: string, minLength: 1, maxLength: 128}
+                    operationID:
+                      type: string
+                      maxLength: 36
+                      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    reason: {type: string, minLength: 1, maxLength: 2048, pattern: '\S'}
+                    expiresAt: {type: string, format: date-time}
+                    targets:
+                      type: array
+                      minItems: 1
+                      maxItems: 2
+                      x-kubernetes-list-type: map
+                      x-kubernetes-list-map-keys: [database]
+                      items:
+                        type: object
+                        required: [database, clusterID, serverID, address]
+                        properties:
+                          database: {type: string, maxLength: 14, enum: [OVN_Northbound, OVN_Southbound]}
+                          clusterID:
+                            type: string
+                            maxLength: 36
+                            pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                          serverID:
+                            type: string
+                            maxLength: 36
+                            pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                          address:
+                            type: string
+                            maxLength: 80
+                            pattern: '^(tcp|ssl):([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|\[[0-9a-f:]+\]):[0-9]+$'
+            status:
+              type: object
+              required: [phase, operationID, decisionDigest, reservedAt]
+              x-kubernetes-validations:
+                - rule: "oldSelf.phase != 'Completed' || self == oldSelf"
+                  message: Completed audit evidence is immutable.
+                - rule: "self.phase == oldSelf.phase || (oldSelf.phase == 'Reserved' && self.phase == 'Completed')"
+                  message: An approval can only progress from Reserved to Completed.
+                - rule: self.operationID == oldSelf.operationID && self.decisionDigest == oldSelf.decisionDigest && self.reservedAt == oldSelf.reservedAt
+                  message: The reservation identity and timestamp are immutable.
+                - rule: "self.phase == 'Completed' ? (has(self.completedAt) && has(self.observations)) : (!has(self.completedAt) && !has(self.observations))"
+                  message: Only completed approvals may have completion evidence.
+                - rule: '!has(self.completedAt) || self.completedAt >= self.reservedAt'
+                  message: Completion must follow reservation.
+                - rule: '!has(self.observations) || self.observations.all(o, o.observedAt == self.completedAt)'
+                  message: Evidence must belong to the completion observation.
+              properties:
+                phase: {type: string, maxLength: 9, enum: [Reserved, Completed]}
+                operationID:
+                  type: string
+                  maxLength: 36
+                  pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                decisionDigest:
+                  type: string
+                  maxLength: 71
+                  pattern: '^sha256:[0-9a-f]{64}$'
+                reservedAt: {type: string, format: date-time}
+                completedAt: {type: string, format: date-time}
+                observations:
+                  type: array
+                  minItems: 1
+                  maxItems: 2
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [database]
+                  items:
+                    type: object
+                    required: [database, clusterID, term, commitIndex, observedAt]
+                    properties:
+                      database: {type: string, maxLength: 14, enum: [OVN_Northbound, OVN_Southbound]}
+                      clusterID:
+                        type: string
+                        maxLength: 36
+                        pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      term: {type: integer, format: int64, minimum: 1}
+                      commitIndex: {type: integer, format: int64, minimum: 1}
+                      observedAt: {type: string, format: date-time}

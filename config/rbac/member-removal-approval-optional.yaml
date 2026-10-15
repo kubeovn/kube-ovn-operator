@@ -1,0 +1,24 @@
+# Optional namespace-scoped roles. No bindings are supplied or installed by the
+# default Kustomize/Helm path. Bind each role to its reviewed principal separately.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-ovn-member-removal-approver
+  namespace: kube-ovn-operator-system
+rules:
+  - apiGroups: [operator.kubeovn.io]
+    resources: [kubeovnmemberremovalapprovals]
+    verbs: [create, get, list, watch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-ovn-member-removal-recorder
+  namespace: kube-ovn-operator-system
+rules:
+  - apiGroups: [operator.kubeovn.io]
+    resources: [kubeovnmemberremovalapprovals]
+    verbs: [get, list, watch]
+  - apiGroups: [operator.kubeovn.io]
+    resources: [kubeovnmemberremovalapprovals/status]
+    verbs: [get, update, patch]

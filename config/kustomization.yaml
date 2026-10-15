@@ -4,6 +4,7 @@ resources:
   - namespace.yaml
   - crd/bases/operator.kubeovn.io_kubeovninstallations.yaml
   - crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml
+  - crd/bases/operator.kubeovn.io_kubeovnmemberremovalapprovals.yaml
   - rbac/role.yaml
   - rbac/service_account.yaml
   - manager/manager.yaml
