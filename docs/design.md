@@ -179,7 +179,9 @@ installations skip them; external/HCP verification still awaits peer evidence.
    initial renderer verifies archive SHA-256, chart appVersion and kubeVersion,
    maps upstream values, and separates lifecycle hooks from normal resources.
 2. Connect the persistent joint lifecycle executor to default-controller operation
-   selection, durable topology inventory and generation/apply-checkpoint changes.
+   selection, lifecycle-authorized topology transitions and generation/apply-checkpoint changes.
+   The default controller now retains and verifies the initial complete local RAFT
+   identity inventory; see [central topology](central-topology.md).
    Migrate ordinary Chart Deployments to independently controlled members.
    Validate node replacement and every intermediate quorum state before enabling
    automatic changes.

@@ -15,6 +15,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/planner"
+	"github.com/kubeovn/kube-ovn-operator/internal/topology"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,6 +46,7 @@ type KubeOVNInstallationReconciler struct {
 	OVN             health.OVNProvider
 	Runtime         health.RuntimeProvider
 	Network         health.NetworkProvider
+	Topology        topology.Provider
 	WorkloadFactory func(apply.InstallationIdentity) apply.ApplyClient
 }
 
@@ -71,7 +73,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	}
 	plan := planner.Build(installation.Spec, installation.Status.ObservedVersion)
 	if plan.Blocking != "" {
-		if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil); err != nil {
+		if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); err != nil {
 			return reconcile.Result{}, err
 		}
 		logger.Info("installation plan is blocked", "reason", plan.Blocking)
@@ -94,7 +96,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		plan.Phase = operatorv1alpha1.PhaseDegraded
 		plan.Step = "Render"
 		plan.Blocking = err.Error()
-		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil); statusErr != nil {
+		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
 			return reconcile.Result{}, statusErr
 		}
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
@@ -104,6 +106,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		workload = r.WorkloadFactory(apply.InstallationIdentity{Namespace: installation.Namespace, Name: installation.Name, UID: installation.UID})
 	}
 	var observation *apply.Observation
+	var topologyCondition *metav1.Condition
 	if workload == nil || len(rendered.Objects) == 0 {
 		if err := r.ensurePlanConfigMap(ctx, installation, plan, rendered); err != nil {
 			return reconcile.Result{}, err
@@ -124,6 +127,13 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			if err := r.ensureApplyCheckpoint(operationCtx, installation, rendered); err != nil {
 				return err
 			}
+			if localRaft(installation) && r.Topology != nil {
+				plan.Step = "VerifyRetainedTopology"
+				if err := r.ensureTopology(operationCtx, installation, false); err != nil {
+					topologyCondition = &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionFalse, Reason: "TopologyUnverified", Message: err.Error()}
+					return err
+				}
+			}
 			plan.Step = "Apply"
 			if err := lease.CheckAll(operationCtx); err != nil {
 				return err
@@ -138,6 +148,14 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 					return err
 				}
 				observation = &observed
+			}
+			if observation != nil && observation.Ready && localRaft(installation) && r.Topology != nil {
+				plan.Step = "RecordTopology"
+				condition := metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionTrue, Reason: "IdentityVerified", Message: "Live central identities match the retained topology"}
+				if err := r.ensureTopology(operationCtx, installation, true); err != nil {
+					condition.Status, condition.Reason, condition.Message = metav1.ConditionFalse, "TopologyUnverified", err.Error()
+				}
+				topologyCondition = &condition
 			}
 			return nil
 		}
@@ -176,7 +194,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	if ovnReport != nil && ovnReport.Ready && runtimeReport != nil && runtimeReport.Northd.Status == metav1.ConditionTrue && runtimeReport.DataPlane.Status == metav1.ConditionTrue && r.Network != nil {
 		networkReport = new(r.Network.Observe(ctx, installation, runtimeReport.Nodes))
 	}
-	if err := r.updateStatus(ctx, installation, plan, now(), observation, ovnReport, runtimeReport, networkReport); err != nil {
+	if err := r.updateStatus(ctx, installation, plan, now(), observation, ovnReport, runtimeReport, networkReport, topologyCondition); err != nil {
 		return reconcile.Result{}, err
 	}
 	if errors.Is(err, lease.ErrHeld) {
@@ -225,7 +243,7 @@ func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context,
 	return nil
 }
 
-func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time, observation *apply.Observation, ovnReport *health.OVNReport, runtimeReport *health.RuntimeReport, networkReport *health.NetworkReport) error {
+func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time, observation *apply.Observation, ovnReport *health.OVNReport, runtimeReport *health.RuntimeReport, networkReport *health.NetworkReport, topologyCondition *metav1.Condition) error {
 	status := installation.Status.DeepCopy()
 	if status.ApplyCheckpoint == nil {
 		status.ObservedVersion = ""
@@ -252,6 +270,12 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 	northd := metav1.Condition{Type: "NorthdReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Northd has not been observed for this rollout"}
 	dataPlane := metav1.Condition{Type: "DataPlaneReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Data-plane connections have not been observed for this rollout"}
 	network := metav1.Condition{Type: "NetworkReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Network probes await healthy workloads, databases and runtime"}
+	topologyState := metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Complete central identity inventory has not been verified for this rollout"}
+	if !localRaft(installation) {
+		topologyState.Status, topologyState.Reason, topologyState.Message = metav1.ConditionTrue, "NotRequired", "Local RAFT topology inventory does not apply to this installation"
+	} else if topologyCondition != nil {
+		topologyState = *topologyCondition
+	}
 	readyStatus := metav1.ConditionFalse
 	if observation != nil {
 		status.Topology.ReadyCentralReplicas = observation.ReadyCentralReplicas
@@ -322,8 +346,12 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 			status.Network.LastObserved = metav1.NewTime(now)
 		}
 	}
+	if topologyState.Status == metav1.ConditionFalse {
+		status.Phase = operatorv1alpha1.PhaseDegraded
+		degraded, degradedReason, readyReason, message = metav1.ConditionTrue, "TopologyUnverified", "TopologyUnverified", topologyState.Message
+	}
 	networkVerified := network.Status == metav1.ConditionTrue && (installation.Spec.Mode == operatorv1alpha1.InstallationModeControlPlaneOnly && network.Reason == "NotRequired" || status.Network != nil && status.Network.ObservedNodes > 0 && status.Network.SuccessfulProbes > 0 && len(status.Network.AddressFamilies) > 0)
-	if plan.Blocking == "" && workloadStatus == metav1.ConditionTrue && ovnStatus == metav1.ConditionTrue && northd.Status == metav1.ConditionTrue && dataPlane.Status == metav1.ConditionTrue && networkVerified {
+	if topologyState.Status == metav1.ConditionTrue && plan.Blocking == "" && workloadStatus == metav1.ConditionTrue && ovnStatus == metav1.ConditionTrue && northd.Status == metav1.ConditionTrue && dataPlane.Status == metav1.ConditionTrue && networkVerified {
 		readyStatus, readyReason, message = metav1.ConditionTrue, "VerificationComplete", "Workloads, OVN databases, runtime and configured network probes passed verification"
 		status.Phase = operatorv1alpha1.PhaseReady
 		status.Upgrade.Step = "Verified"
@@ -334,13 +362,54 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		{Type: "WorkloadsReady", Status: workloadStatus, Reason: workloadReason, Message: workloadMessage},
 		{Type: "OVNDBReady", Status: ovnStatus, Reason: ovnReason, Message: ovnMessage},
 		northd, dataPlane,
-		network,
+		network, topologyState,
 	} {
 		condition.ObservedGeneration = installation.Generation
 		condition.LastTransitionTime = metav1.NewTime(now)
 		setCondition(&status.Conditions, condition)
 	}
 	return r.Status().Update(ctx, installationWithStatus(installation, *status))
+}
+
+func localRaft(installation *operatorv1alpha1.KubeOVNInstallation) bool {
+	return installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly && !installation.Spec.HCP.Enabled
+}
+
+func (r *KubeOVNInstallationReconciler) ensureTopology(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, initialize bool) error {
+	var ref *operatorv1alpha1.CentralTopologyReference
+	var observationErr error
+	if initialize {
+		ref, observationErr = r.Topology.Ensure(ctx, installation)
+	} else {
+		ref, observationErr = r.Topology.VerifyRetained(ctx, installation)
+	}
+	if ref == nil {
+		if observationErr != nil {
+			return observationErr
+		}
+		if !initialize && installation.Status.Topology.Inventory == nil {
+			return nil
+		}
+		return errors.New("topology provider returned no retained identity reference")
+	}
+	if ref.Name == "" || ref.UID == "" || ref.Digest == "" {
+		return errors.New("topology provider returned an incomplete reference")
+	}
+	if existing := installation.Status.Topology.Inventory; existing != nil {
+		if *existing != *ref {
+			return errors.New("retained topology reference changed without lifecycle authorization")
+		}
+		return observationErr
+	}
+	if err := lease.CheckFor(ctx, lease.Central, installation.UID); err != nil {
+		return err
+	}
+	installation.Status.Topology.Inventory = ref
+	if err := r.Status().Update(ctx, installation); err != nil {
+		installation.Status.Topology.Inventory = nil
+		return fmt.Errorf("persist central topology reference: %w", err)
+	}
+	return observationErr
 }
 
 func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, rendered chart.Rendered) error {

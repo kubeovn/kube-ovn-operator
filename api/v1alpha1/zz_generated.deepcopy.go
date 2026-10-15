@@ -199,6 +199,9 @@ func (in *KubeOVNInstallationStatus) DeepCopy() *KubeOVNInstallationStatus {
 }
 func (in *TopologyStatus) DeepCopyInto(out *TopologyStatus) {
 	*out = *in
+	if in.Inventory != nil {
+		out.Inventory = new(*in.Inventory)
+	}
 	if in.Members != nil {
 		out.Members = make([]CentralMemberStatus, len(in.Members))
 		copy(out.Members, in.Members)

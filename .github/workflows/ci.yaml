@@ -59,7 +59,7 @@ jobs:
           go test ./internal/health -run 'TestLive(OVSDB|OVN)' -count=1 -v
           go test ./internal/prepare ./cmd/member-prepare ./internal/central ./cmd/member-run -run 'TestLiveOVN' -count=1 -v
       - name: Race-check operation coordination
-        run: go test -race ./internal/lease ./internal/apply ./internal/controller ./internal/ovnadmin ./internal/health ./internal/probe ./internal/backup ./internal/approval ./internal/prepare ./internal/central ./internal/workload ./internal/lifecycle
+        run: go test -race ./internal/lease ./internal/apply ./internal/controller ./internal/ovnadmin ./internal/health ./internal/probe ./internal/backup ./internal/approval ./internal/prepare ./internal/central ./internal/workload ./internal/lifecycle ./internal/topology
       - name: Vet
         run: make vet
       - uses: golangci/golangci-lint-action@v7

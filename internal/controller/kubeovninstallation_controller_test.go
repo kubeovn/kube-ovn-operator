@@ -89,7 +89,7 @@ func TestReconcileBlocksInvalidSpecBeforeWritingChildren(t *testing.T) {
 	if err := client.Get(t.Context(), types.NamespacedName{Name: "invalid", Namespace: "default"}, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || len(got.Status.Conditions) != 7 {
+	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || len(got.Status.Conditions) != 8 {
 		t.Fatalf("unexpected invalid status: %#v", got.Status)
 	}
 }

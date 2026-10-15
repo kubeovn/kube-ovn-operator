@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
@@ -22,7 +23,7 @@ func (f networkProviderFunc) Observe(ctx context.Context, installation *operator
 }
 
 func TestNetworkVerificationGatesReadyAndClearsOldEvidence(t *testing.T) {
-	for _, failure := range []string{"network", "database", "runtime", "rollout", "missing evidence", "missing provider"} {
+	for _, failure := range []string{"network", "database", "runtime", "rollout", "missing evidence", "missing provider", "topology", "missing topology provider"} {
 		t.Run(failure, func(t *testing.T) {
 			scheme := controllerScheme(t)
 			installation := &operatorv1alpha1.KubeOVNInstallation{Name: "network", Namespace: "default", UID: "installation", Generation: 1, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}}
@@ -32,7 +33,7 @@ func TestNetworkVerificationGatesReadyAndClearsOldEvidence(t *testing.T) {
 			runtime := health.RuntimeReport{Northd: metav1.Condition{Type: "NorthdReady", Status: metav1.ConditionTrue, Reason: "NorthdHealthy"}, DataPlane: metav1.Condition{Type: "DataPlaneReady", Status: metav1.ConditionTrue, Reason: "DataPlaneConnected"}, Nodes: []operatorv1alpha1.DataPlaneNodeStatus{{Node: "node", NodeUID: "node-uid"}}}
 			network := health.NetworkReport{Condition: metav1.Condition{Type: "NetworkReady", Status: metav1.ConditionTrue, Reason: "NetworkProbesPassed"}, Evidence: &operatorv1alpha1.NetworkStatus{ObservedNodes: 1, AddressFamilies: []string{"IPv4"}, SuccessfulProbes: 3}}
 			calls := 0
-			reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Leases: lease.New(kube), Renderer: objectRenderer{}, Workload: workload,
+			reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Leases: lease.New(kube), Renderer: objectRenderer{}, Workload: workload, Topology: topologyProviderFunc(verifiedTopology),
 				OVN: ovnProviderFunc(func(context.Context, *operatorv1alpha1.KubeOVNInstallation) (health.OVNReport, error) {
 					return ovn, nil
 				}),
@@ -77,13 +78,19 @@ func TestNetworkVerificationGatesReadyAndClearsOldEvidence(t *testing.T) {
 				network.Evidence = nil
 			case "missing provider":
 				reconciler.Network = nil
+			case "topology":
+				reconciler.Topology = topologyProviderFunc(func(context.Context, *operatorv1alpha1.KubeOVNInstallation) (*operatorv1alpha1.CentralTopologyReference, error) {
+					return nil, fmt.Errorf("database identity drift")
+				})
+			case "missing topology provider":
+				reconciler.Topology = nil
 			}
 			got = run()
-			if meta.IsStatusConditionTrue(got.Status.Conditions, "Ready") || got.Status.Network != nil {
+			if meta.IsStatusConditionTrue(got.Status.Conditions, "Ready") || got.Status.Network != nil && failure != "topology" && failure != "missing topology provider" {
 				t.Fatalf("stale network proof retained: %+v", got.Status)
 			}
 			expected := 1
-			if failure == "network" || failure == "missing evidence" {
+			if failure == "network" || failure == "missing evidence" || failure == "missing topology provider" {
 				expected = 2
 			}
 			if calls != expected {

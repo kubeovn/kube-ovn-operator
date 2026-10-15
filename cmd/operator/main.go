@@ -11,6 +11,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/controller"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
+	"github.com/kubeovn/kube-ovn-operator/internal/topology"
 	"helm.sh/helm/v3/pkg/chartutil"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -68,6 +69,7 @@ func main() {
 			ctrl.Log.Error(err, "create OVN health executor")
 			os.Exit(1)
 		}
+		reconciler.Topology = &topology.Kubernetes{Client: directClient, Runner: podExecutor}
 		reconciler.OVN = &health.OVNObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
 		reconciler.Runtime = &health.RuntimeObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
 		reconciler.Network = &health.NetworkObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}

@@ -21,6 +21,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
 	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 	"github.com/kubeovn/kube-ovn-operator/internal/prepare"
+	"github.com/kubeovn/kube-ovn-operator/internal/topology"
 	"github.com/kubeovn/kube-ovn-operator/internal/workload"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -317,6 +318,73 @@ func run() error {
 	if set.UID != running.UID {
 		return errors.New("workload UID changed")
 	}
+	// The replacement is complete. Record the actual one-member final topology
+	// through the production provider, including real Node/PVC/PV identities.
+	if err := kube.Get(ctx, client.ObjectKeyFromObject(installation), installation); err != nil {
+		return err
+	}
+	installation.Spec.Central.Replicas = 1
+	if err := kube.Update(ctx, installation); err != nil {
+		return err
+	}
+	var inventory *api.CentralTopologyReference
+	var topologyErr error
+	if err := wait(ctx, func() (bool, error) {
+		err := guarded(func(ctx context.Context) error {
+			var err error
+			inventory, err = (&topology.Kubernetes{Client: kube, Runner: exec}).Ensure(ctx, installation)
+			return err
+		})
+		topologyErr = err
+		return err == nil, nil
+	}); err != nil {
+		return fmt.Errorf("record native central topology: %w: %v", err, topologyErr)
+	}
+	installation.Status.Topology.Inventory = inventory
+	if err := kube.Status().Update(ctx, installation); err != nil {
+		return err
+	}
+	if err := kube.Get(ctx, client.ObjectKeyFromObject(installation), installation); err != nil {
+		return err
+	}
+	if installation.Status.Topology.Inventory == nil || *installation.Status.Topology.Inventory != *inventory {
+		return errors.New("CRD did not retain the topology reference")
+	}
+	if err := guarded(func(ctx context.Context) error {
+		again, err := (&topology.Kubernetes{Client: kube, Runner: exec}).Ensure(ctx, installation)
+		if err != nil {
+			return err
+		}
+		if again == nil || *again != *inventory {
+			return errors.New("topology identity changed after provider reconstruction")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	retained := new(corev1.ConfigMap)
+	if err := kube.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: inventory.Name}, retained); err != nil {
+		return err
+	}
+	var identityRecord struct {
+		Topology health.CentralTopology `json:"topology"`
+	}
+	if err := json.Unmarshal([]byte(retained.Data["topology.json"]), &identityRecord); err != nil {
+		return err
+	}
+	if len(identityRecord.Topology.Members) != 1 || len(retained.OwnerReferences) != 0 || retained.Immutable == nil || !*retained.Immutable {
+		return errors.New("missing retained immutable member inventory")
+	}
+	identity := identityRecord.Topology.Members[0]
+	if identity.Node.UID != node.UID || identity.Workload.UID != set.UID || identity.Storage[0].Claim.UID != claim.UID || identity.Storage[0].Volume.UID != volume.UID {
+		return errors.New("retained topology did not bind real node/workload/storage")
+	}
+	for i, db := range identity.Databases {
+		if db.ServerID != state.Final[i].Members[0].ServerID || db.ClusterID != state.Final[i].ClusterID || db.Address == db.ClientAddress {
+			return errors.New("retained native database identity or client address is incorrect")
+		}
+	}
+	fmt.Printf("Verified retained central topology %s with actual NB/SB listeners and Node/workload/PVC/PV identities\n", inventory.Name)
 	fmt.Printf("Verified member record %s, Job-produced NB/SB identities, StatefulSet %s and retained row UUID %s\n", prepared.Record.Name, running.Name, original)
 	return nil
 }
