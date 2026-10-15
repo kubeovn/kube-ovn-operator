@@ -12,6 +12,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -63,7 +64,7 @@ func TestReconcileWritesPlanAndSafetyLeases(t *testing.T) {
 	if err := client.Get(t.Context(), types.NamespacedName{Name: "demo", Namespace: "default"}, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase != operatorv1alpha1.PhaseInstalling || got.Status.ObservedVersion != "v1.17.0" {
+	if got.Status.Phase != operatorv1alpha1.PhaseInstalling || got.Status.ObservedVersion != "" {
 		t.Fatalf("unexpected status: %#v", got.Status)
 	}
 }
@@ -86,7 +87,7 @@ func TestReconcileBlocksInvalidSpecBeforeWritingChildren(t *testing.T) {
 	if err := client.Get(t.Context(), types.NamespacedName{Name: "invalid", Namespace: "default"}, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || len(got.Status.Conditions) != 2 {
+	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || len(got.Status.Conditions) != 3 {
 		t.Fatalf("unexpected invalid status: %#v", got.Status)
 	}
 }
@@ -218,4 +219,65 @@ func controllerScheme(t *testing.T) *runtime.Scheme {
 		t.Fatal(err)
 	}
 	return scheme
+}
+
+type observedWorkload struct {
+	recordingWorkload
+	observation apply.Observation
+}
+
+func (w *observedWorkload) Observe(context.Context, []*unstructured.Unstructured) (apply.Observation, error) {
+	return w.observation, nil
+}
+
+func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
+	scheme := controllerScheme(t)
+	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "checkpoint", Namespace: "default", UID: "installation-uid", Generation: 1,
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+	workload := &observedWorkload{observation: apply.Observation{Ready: true, ReadyCentralReplicas: 3, Message: "Rollout completed"}}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: installation.Name, Namespace: installation.Namespace}}
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Renderer: objectRenderer{}, Workload: workload}
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	got := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), req.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.ApplyCheckpoint == nil || got.Status.ObservedVersion != "v1.17.0" || got.Status.Topology.ReadyCentralReplicas != 3 {
+		t.Fatalf("missing observed evidence: %+v", got.Status)
+	}
+	if meta.IsStatusConditionTrue(got.Status.Conditions, "Ready") || !meta.IsStatusConditionTrue(got.Status.Conditions, "WorkloadsReady") {
+		t.Fatalf("rollout confused with network readiness: %+v", got.Status.Conditions)
+	}
+	// A new reconciler must recover the checkpoint from Kubernetes, including
+	// when no process-local state survives.
+	reconciler = &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Renderer: objectRenderer{}, Workload: workload}
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if workload.applyCalls != 2 {
+		t.Fatal("same inputs were not reconciled after restart")
+	}
+	if err := kube.Get(t.Context(), req.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	got.Spec.Central.Replicas = 5
+	if err := kube.Update(t.Context(), got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if workload.applyCalls != 2 {
+		t.Fatal("topology change bypassed checkpoint")
+	}
+	if err := kube.Get(t.Context(), req.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Upgrade.Step != "ApplyCheckpoint" || !meta.IsStatusConditionTrue(got.Status.Conditions, "Degraded") {
+		t.Fatalf("checkpoint rejection not reported: %+v", got.Status)
+	}
 }

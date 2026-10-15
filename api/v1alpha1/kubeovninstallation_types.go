@@ -118,15 +118,24 @@ type AdoptionSpec struct {
 	Selector map[string]string `json:"selector,omitempty"`
 }
 
+// ApplyCheckpointStatus pins the inputs before the first workload write.
+// A lifecycle executor must authorize changes after this checkpoint exists.
+type ApplyCheckpointStatus struct {
+	SpecHash     string `json:"specHash"`
+	ManifestHash string `json:"manifestHash"`
+	Version      string `json:"version"`
+}
+
 type KubeOVNInstallationStatus struct {
-	ObservedVersion    string             `json:"observedVersion,omitempty"`
-	Phase              Phase              `json:"phase,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
-	Topology           TopologyStatus     `json:"topology,omitempty"`
-	Upgrade            UpgradeStatus      `json:"upgrade,omitempty"`
-	HCP                HCPStatus          `json:"hcp,omitempty"`
-	LastBackup         *BackupStatus      `json:"lastBackup,omitempty"`
-	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	ApplyCheckpoint    *ApplyCheckpointStatus `json:"applyCheckpoint,omitempty"`
+	ObservedVersion    string                 `json:"observedVersion,omitempty"`
+	Phase              Phase                  `json:"phase,omitempty"`
+	Conditions         []metav1.Condition     `json:"conditions,omitempty"`
+	Topology           TopologyStatus         `json:"topology,omitempty"`
+	Upgrade            UpgradeStatus          `json:"upgrade,omitempty"`
+	HCP                HCPStatus              `json:"hcp,omitempty"`
+	LastBackup         *BackupStatus          `json:"lastBackup,omitempty"`
+	ObservedGeneration int64                  `json:"observedGeneration,omitempty"`
 }
 
 type TopologyStatus struct {

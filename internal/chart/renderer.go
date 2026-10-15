@@ -1,5 +1,4 @@
-// Package chart translates the public installation API into the values
-// contract consumed by the Kube-OVN Helm chart.
+// Package chart renders the existing Kube-OVN Helm chart.
 package chart
 
 import (
@@ -13,124 +12,67 @@ import (
 )
 
 type Renderer interface {
-	Render(ctx context.Context, spec operatorv1alpha1.KubeOVNInstallationSpec) (Rendered, error)
+	Render(context.Context, operatorv1alpha1.KubeOVNInstallationSpec) (Rendered, error)
 }
 
+// ValuesRenderer produces a plan without fetching or rendering a chart.
 type ValuesRenderer struct{}
 
 type Rendered struct {
 	Source     string
 	Digest     string
 	ValuesYAML []byte
-	// Objects are optional typed workload manifests. ValuesRenderer leaves this
-	// empty so the default reconciler remains plan-only until a workload
-	// renderer is explicitly injected.
-	Objects []*unstructured.Unstructured
-}
-
-type Values struct {
-	InstallMode        string          `json:"installMode"`
-	Image              ImageValues     `json:"image"`
-	Central            CentralValues   `json:"ovn-central"`
-	ExternalOVNCentral *ExternalValues `json:"externalOvnCentral,omitempty"`
-	HCP                *HCPValues      `json:"hcp,omitempty"`
-	Upgrade            UpgradeValues   `json:"upgrade"`
-}
-
-type ImageValues struct {
-	Tag string `json:"tag"`
-}
-
-type CentralValues struct {
-	Mode              string            `json:"mode"`
-	Replicas          int32             `json:"replicas"`
-	NodeSelector      map[string]string `json:"nodeSelector,omitempty"`
-	TopologyKey       string            `json:"topologyKey,omitempty"`
-	StorageClassName  string            `json:"storageClassName,omitempty"`
-	StorageSize       string            `json:"storageSize,omitempty"`
-	DynamicMembership bool              `json:"dynamicMembership"`
-}
-
-type ExternalValues struct {
-	NBEndpoint string `json:"nbEndpoint"`
-	SBEndpoint string `json:"sbEndpoint"`
-	NBPort     int32  `json:"nbPort,omitempty"`
-	SBPort     int32  `json:"sbPort,omitempty"`
-}
-
-type HCPValues struct {
-	Enabled          bool   `json:"enabled"`
-	Role             string `json:"role"`
-	PairRef          string `json:"pairRef"`
-	CentralNamespace string `json:"centralNamespace,omitempty"`
-	NBEndpoint       string `json:"nbEndpoint"`
-	SBEndpoint       string `json:"sbEndpoint"`
-	TLSSecretName    string `json:"tlsSecretName,omitempty"`
-}
-
-type UpgradeValues struct {
-	Strategy          string `json:"strategy,omitempty"`
-	PauseOnDegraded   bool   `json:"pauseOnDegraded"`
-	AllowRollback     bool   `json:"allowRollback"`
-	BackupRequired    bool   `json:"backupRequired"`
-	BackupDestination string `json:"backupDestination,omitempty"`
+	Objects    []*unstructured.Unstructured
 }
 
 func (ValuesRenderer) Render(ctx context.Context, spec operatorv1alpha1.KubeOVNInstallationSpec) (Rendered, error) {
 	if err := ctx.Err(); err != nil {
 		return Rendered{}, err
 	}
-	if errs := validation.ValidateInstallationSpec(spec); len(errs) != 0 {
-		return Rendered{}, fmt.Errorf("render chart values: %s", validation.JoinErrors(errs))
-	}
-	values := Values{
-		InstallMode: string(spec.Mode),
-		Image:       ImageValues{Tag: spec.Version},
-		Central: CentralValues{
-			Mode:              string(spec.Central.Mode),
-			Replicas:          spec.Central.Replicas,
-			NodeSelector:      spec.Central.Placement.NodeSelector,
-			TopologyKey:       spec.Central.Placement.TopologyKey,
-			StorageClassName:  spec.Central.Storage.ClassName,
-			StorageSize:       spec.Central.Storage.Size,
-			DynamicMembership: spec.Central.DynamicMembership,
-		},
-		Upgrade: UpgradeValues{
-			Strategy:          spec.Upgrade.Strategy,
-			PauseOnDegraded:   spec.Upgrade.PauseOnDegraded,
-			AllowRollback:     spec.Upgrade.AllowRollback,
-			BackupRequired:    spec.Upgrade.Backup.Required,
-			BackupDestination: spec.Upgrade.Backup.Destination,
-		},
-	}
-	if spec.DataPlane.ExternalOVNCentral.NBEndpoint != "" || spec.DataPlane.ExternalOVNCentral.SBEndpoint != "" {
-		values.ExternalOVNCentral = &ExternalValues{
-			NBEndpoint: spec.DataPlane.ExternalOVNCentral.NBEndpoint,
-			SBEndpoint: spec.DataPlane.ExternalOVNCentral.SBEndpoint,
-			NBPort:     spec.DataPlane.ExternalOVNCentral.NBPort,
-			SBPort:     spec.DataPlane.ExternalOVNCentral.SBPort,
-		}
-	}
-	if spec.HCP.Enabled {
-		tlsSecretName := ""
-		if spec.HCP.TLSSecretRef != nil {
-			tlsSecretName = spec.HCP.TLSSecretRef.Name
-		}
-		values.HCP = &HCPValues{
-			Enabled:          true,
-			Role:             string(spec.HCP.Role),
-			PairRef:          spec.HCP.PairRef,
-			CentralNamespace: spec.HCP.CentralNamespace,
-			NBEndpoint:       spec.HCP.NBEndpoint,
-			SBEndpoint:       spec.HCP.SBEndpoint,
-			TLSSecretName:    tlsSecretName,
-		}
-	}
-	valuesYAML, err := yaml.Marshal(values)
+	values, err := installationValues(spec)
 	if err != nil {
 		return Rendered{}, err
 	}
-	return Rendered{Source: spec.Chart.Source, Digest: spec.Chart.Digest, ValuesYAML: valuesYAML}, nil
+	data, err := yaml.Marshal(values)
+	return Rendered{Source: spec.Chart.Source, Digest: spec.Chart.Digest, ValuesYAML: data}, err
 }
 
-var _ Renderer = ValuesRenderer{}
+// Operator policy (backup, rollback and membership) belongs to the reconciler,
+// not invented chart values that upstream templates would silently ignore.
+func installationValues(spec operatorv1alpha1.KubeOVNInstallationSpec) (map[string]any, error) {
+	if errs := validation.ValidateInstallationSpec(spec); len(errs) != 0 {
+		return nil, fmt.Errorf("render chart values: %s", validation.JoinErrors(errs))
+	}
+	mode := "cluster"
+	if spec.Central.Mode == operatorv1alpha1.CentralModeSingle {
+		mode = "single"
+	}
+	central := map[string]any{
+		"storage": map[string]any{"size": spec.Central.Storage.Size, "storageClassName": spec.Central.Storage.ClassName},
+	}
+	if len(spec.Central.Placement.NodeSelector) != 0 {
+		central["nodeSelector"] = spec.Central.Placement.NodeSelector
+	}
+	values := map[string]any{
+		"installMode": string(spec.Mode), "OVN_CENTRAL_MODE": mode,
+		"global": map[string]any{"images": map[string]any{
+			"kubeovn": map[string]any{"tag": spec.Version}, "natgateway": map[string]any{"tag": spec.Version},
+		}},
+		"ovn-central": central,
+	}
+	if spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
+		endpoint := spec.DataPlane.ExternalOVNCentral
+		external := map[string]any{"nbEndpoint": endpoint.NBEndpoint, "sbEndpoint": endpoint.SBEndpoint}
+		if endpoint.NBPort != 0 {
+			external["nbPort"] = endpoint.NBPort
+		}
+		if endpoint.SBPort != 0 {
+			external["sbPort"] = endpoint.SBPort
+		}
+		values["externalOvnCentral"] = external
+	}
+	if spec.DataPlane.OVSUpdateStrategy != "" {
+		values["ovs-ovn"] = map[string]any{"updateStrategy": map[string]any{"type": spec.DataPlane.OVSUpdateStrategy}}
+	}
+	return values, nil
+}

@@ -3,6 +3,8 @@ name: E2E
 on:
   pull_request:
     paths:
+      - 'go.mod'
+      - 'go.sum'
       - 'api/**'
       - 'cmd/**'
       - 'internal/**'
@@ -28,3 +30,5 @@ jobs:
           cluster_name: kube-ovn-operator-e2e
       - name: Run operator smoke test
         run: make e2e
+      - name: Run render, apply and observe integration
+        run: bash test/e2e/runtime-smoke.sh

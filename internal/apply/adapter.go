@@ -183,7 +183,7 @@ func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, obj
 		}
 		seen[key] = true
 		copy := object.DeepCopy()
-		if err := checkOwnership(copy, identity, false, namespaced); err != nil {
+		if err := checkOwnership(copy, identity, false, namespaced && !retainResource(copy)); err != nil {
 			return nil, err
 		}
 		labels := copy.GetLabels()
@@ -194,7 +194,7 @@ func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, obj
 			labels[label] = value
 		}
 		copy.SetLabels(labels)
-		if namespaced {
+		if namespaced && !retainResource(copy) {
 			copy.SetOwnerReferences([]metav1.OwnerReference{{
 				APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation",
 				Name: identity.Name, UID: identity.UID, Controller: new(true),
@@ -210,7 +210,7 @@ func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, obj
 			if existing.GetName() != copy.GetName() || existing.GetNamespace() != copy.GetNamespace() {
 				return nil, ownershipConflict(copy, "live resource identity differs from requested identity")
 			}
-			if err := checkOwnership(existing, identity, true, namespaced); err != nil {
+			if err := checkOwnership(existing, identity, true, namespaced && !retainResource(copy)); err != nil {
 				return nil, err
 			}
 			if existing.GetDeletionTimestamp() != nil || existing.GetUID() == "" || existing.GetResourceVersion() == "" {

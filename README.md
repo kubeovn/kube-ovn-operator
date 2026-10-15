@@ -1,62 +1,80 @@
 # Kube-OVN Operator
 
-The Kube-OVN Operator manages a declarative `KubeOVNInstallation` and turns a
-versioned installation contract into an observable, serialized reconciliation
-plan. It is designed for full, control-plane-only, data-plane-only and hosted
-control-plane (HCP) topologies.
+The Kube-OVN Operator reconciles a declarative `KubeOVNInstallation`. The
+current implementation supports rendering checksum-pinned upstream Helm
+charts, applying an initial resource set, and observing Kubernetes rollout.
+The complete lifecycle requested in [Issue #7682](https://github.com/kubeovn/kube-ovn/issues/7682)
+is still under development.
 
-The first release deliberately makes the safety boundary explicit: the
-operator never infers live OVNDB membership from `NODE_IPS`, never wipes a
-database after a snapshot, and never changes a central replica count until a
-membership plan has passed its quorum and backup gates. A rendered plan is
-stored in a ConfigMap and guarded by an installation Lease and a dedicated
-central-membership Lease. Chart rendering and the central admin adapter can be
-added behind these stable boundaries without changing the API.
+## Initial installation
 
-The chart values renderer under `internal/chart` serializes the installation
-API into the existing Kube-OVN chart contract and stores the exact values in
-the plan ConfigMap. The pure membership and upgrade planners under
-`internal/membership` and `internal/upgrade` are the adapter contract: they
-return an ordered operation only when quorum, committed data, backup, CRD, and
-central-mode invariants are proven. `internal/ovnadmin.Executor` performs the
-last safety check immediately before an injected OVNDB transport calls
-join/leave/kick. The Kubernetes reconciler serializes the plan and exposes the
-gate reason in status.
+The operator defaults to workload management. Set `spec.chart.source` to an
+HTTPS `.tgz` URL and `spec.chart.digest` to the SHA-256 of the downloaded archive
+(`sha256:<64 hex characters>`). The archive must contain the `kube-ovn` chart
+with an `appVersion` matching `spec.version`. OCI sources are not supported yet.
+HTTP is accepted only for literal loopback addresses in local integration tests.
 
-The `internal/apply` adapter is the workload boundary for rendered Kubernetes
-objects. It performs uncached ownership checks, server-side dry-run, and then
-server-side apply (or create for a new object) with an installation name,
-namespace, UID, and controller owner reference. It never uses force ownership:
-objects managed by another controller or installation return an explicit
-`ErrOwnershipConflict`. The reconciler accepts an `ApplyClient` or an
-identity-aware `WorkloadFactory`; both are unset by default, so the default
-controller continues to serialize plans without changing workload resources.
+The Helm SDK renders the original chart templates with the installation name
+and namespace. It maps version, mode, external NB/SB endpoints, central storage
+and the OVS update strategy to upstream values. Classic central placement uses
+one label selector (default: `node-role.kubernetes.io/control-plane=`) and Node
+InternalIPs. RAFT bootstrap requires exactly the requested number of addresses.
+Those addresses are bootstrap input, never evidence of live RAFT membership.
+The chart's remaining values use upstream defaults, including network CIDRs.
 
-## Quick start
+Rendering is offline: Helm `lookup` does not access the cluster. The operator
+validates the target Kubernetes version, filters upgrade/delete/test hooks,
+and rejects install hooks. It does not execute Helm lifecycle hooks or create
+Helm release records. The requested resources must fit the operator's Kubernetes
+permissions; the shipped RBAC is still the limited adapter baseline and does
+not grant permission to install the upstream chart's cluster roles or CRDs.
+Do not deploy a full network installation until the required RBAC and cluster
+configuration have been reviewed for that environment.
+
+Before the first workload write, status records a spec and manifest digest.
+Repeated reconciliation can repair the same resource set. A changed spec or
+rendered topology is blocked until a lifecycle executor can authorize it.
+This checkpoint also survives an operator restart or a partially applied batch.
+HCP, adoption and dynamic membership currently require those future executors.
+
+`internal/apply` checks ownership with uncached reads, dry-runs the complete
+batch, then creates new resources or uses server-side apply without force for
+existing resources. It cannot adopt foreign resources. PVCs and resources
+annotated `helm.sh/resource-policy: keep` receive installation labels but no
+owner reference, so deletion of the installation does not garbage-collect them.
+Cluster-scoped resources also use labels rather than an invalid namespaced owner.
+
+## Status and verification
+
+`WorkloadsReady` reports actual Deployment, StatefulSet and DaemonSet rollout.
+It requires a current observed generation, positive desired replica/node counts,
+updated and ready replicas, and matching StatefulSet revisions. Jobs, PVCs and
+CRDs must also reach their relevant completion/binding/establishment states.
+`observedVersion` is populated only after rollout completes.
+
+`Ready` remains false until OVN and network verification is implemented. A
+successful rollout reports `VerificationPending`; a valid plan alone reports
+`PlanOnly`. Neither is evidence of network availability. Lease resources exist,
+but per-operation lease acquisition and fencing are still pending. The pure
+membership/upgrade planners and injected OVN admin interface are not yet a
+complete lifecycle execution state machine.
+
+For plan inspection without fetching charts or changing workloads, run the
+operator with `--plan-only`. This writes the plan ConfigMap and Lease resources
+and keeps `Ready=False`.
+
+## Development
 
 ```bash
 make test
 make manifests
-make docker-build IMG=ghcr.io/kubeovn/kube-ovn-operator:dev
-kubectl apply -f config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml
-kubectl apply -f config/samples/operator_v1alpha1_kubeovninstallation.yaml
+make chart-lint
+make build
+make e2e
 ```
 
-The sample produces a plan ConfigMap and status Conditions. A production
-deployment should set a chart source and digest, backup destination, and HCP
-TLS references before enabling workload management.
-
-## API safety rules
-
-* `mode` is `full`, `controlPlaneOnly`, or `dataPlaneOnly`.
-* RAFT central replicas are odd and limited to 3 or 5; single mode is exactly
-  one replica and cannot be changed in place to RAFT.
-* `dataPlaneOnly` requires both external NB and SB endpoints.
-* Version changes enter an observable upgrade plan. A required backup and a
-  healthy quorum are gates for central membership changes.
-* Loss of quorum, ownership conflicts, incompatible versions, and missing HCP
-  endpoints pause reconciliation in `Degraded` or `Recovering`.
-
-See [Issue #7682](https://github.com/kubeovn/kube-ovn/issues/7682) for the
-feature request and [docs/design.md](docs/design.md) for the implementation
-contract.
+The kind smoke test exercises plan status and the Kubernetes apply adapter.
+The release-chart integration test renders a checksum-pinned v1.16.13 archive
+in all three installation modes. These tests do not yet install Kube-OVN or
+verify a working network. See [docs/design.md](docs/design.md) for the remaining
+execution boundaries and safety contract.

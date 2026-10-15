@@ -101,6 +101,13 @@ spec:
             status:
               type: object
               properties:
+                applyCheckpoint:
+                  type: object
+                  required: [specHash, manifestHash, version]
+                  properties:
+                    specHash: {type: string}
+                    manifestHash: {type: string}
+                    version: {type: string}
                 observedVersion: {type: string}
                 phase: {type: string}
                 observedGeneration: {type: integer, format: int64}

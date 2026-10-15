@@ -3,11 +3,17 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/apply"
+	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	"github.com/kubeovn/kube-ovn-operator/internal/controller"
+	"helm.sh/helm/v3/pkg/chartutil"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -26,13 +32,17 @@ func main() {
 	var metricsAddr string
 	var probeAddr string
 	var enableLeaderElection bool
+	var planOnly bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true, "Enable leader election for controller manager.")
+	flag.BoolVar(&planOnly, "plan-only", false, "Only serialize installation plans; never apply workloads.")
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: false})))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	config := ctrl.GetConfigOrDie()
+	config.Timeout = 30 * time.Second
+	mgr, err := ctrl.NewManager(config, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
@@ -42,7 +52,33 @@ func main() {
 	if err != nil {
 		os.Exit(1)
 	}
-	if err := (&controller.KubeOVNInstallationReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
+	reconciler := &controller.KubeOVNInstallationReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}
+	if !planOnly {
+		dynamicClient, err := dynamic.NewForConfig(config)
+		if err != nil {
+			ctrl.Log.Error(err, "create workload client")
+			os.Exit(1)
+		}
+		discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+		if err != nil {
+			ctrl.Log.Error(err, "create discovery client")
+			os.Exit(1)
+		}
+		version, err := discoveryClient.ServerVersion()
+		if err != nil {
+			ctrl.Log.Error(err, "discover Kubernetes version")
+			os.Exit(1)
+		}
+		caps := chartutil.DefaultCapabilities.Copy()
+		caps.KubeVersion = chartutil.KubeVersion{Version: version.GitVersion, Major: version.Major, Minor: version.Minor}
+		reconciler.RendererFactory = func(installation *operatorv1alpha1.KubeOVNInstallation) chart.Renderer {
+			return &chart.HelmRenderer{Name: installation.Name, Namespace: installation.Namespace, Reader: mgr.GetAPIReader(), Mapper: mgr.GetRESTMapper(), Capabilities: caps}
+		}
+		reconciler.WorkloadFactory = func(identity apply.InstallationIdentity) apply.ApplyClient {
+			return &apply.Client{Dynamic: dynamicClient, Mapper: mgr.GetRESTMapper(), Identity: identity}
+		}
+	}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
 		os.Exit(1)
 	}
 	if err := (&controller.RecoveryRequestReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {

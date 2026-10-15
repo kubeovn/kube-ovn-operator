@@ -1,7 +1,6 @@
 package chart
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -9,7 +8,7 @@ import (
 )
 
 func TestValuesRendererIncludesModeCentralAndHCPWithoutCredentials(t *testing.T) {
-	rendered, err := (ValuesRenderer{}).Render(context.Background(), operatorv1alpha1.KubeOVNInstallationSpec{
+	rendered, err := (ValuesRenderer{}).Render(t.Context(), operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly,
 		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
 		DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example", SBEndpoint: "sb.example"}},
@@ -19,7 +18,7 @@ func TestValuesRendererIncludesModeCentralAndHCPWithoutCredentials(t *testing.T)
 		t.Fatal(err)
 	}
 	text := string(rendered.ValuesYAML)
-	for _, want := range []string{"installMode: dataPlaneOnly", "mode: raft", "replicas: 3", "nbEndpoint: nb.example", "pairRef: tenant-a", "tlsSecretName: ovn-tls"} {
+	for _, want := range []string{"installMode: dataPlaneOnly", "OVN_CENTRAL_MODE: cluster", "tag: v1.17.0", "nbEndpoint: nb.example"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("rendered values missing %q:\n%s", want, text)
 		}

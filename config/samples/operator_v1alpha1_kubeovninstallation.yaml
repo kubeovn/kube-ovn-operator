@@ -4,9 +4,10 @@ metadata:
   name: kube-ovn
   namespace: kube-ovn-operator-system
 spec:
-  version: v1.17.0
+  version: v1.16.13
   chart:
-    source: oci://ghcr.io/kubeovn/kube-ovn-chart
+    source: https://github.com/kubeovn/kube-ovn/releases/download/v1.16.13/kube-ovn-v1.16.13.tgz
+    digest: sha256:24df922c7aa78e4a21e77289a6eec9a19ac50cb00953df9ada9291b61a638475
   mode: full
   central:
     mode: raft
