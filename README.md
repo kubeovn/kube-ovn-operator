@@ -212,6 +212,23 @@ publication, automatic storage provisioning, TLS Secret identity management and
 Kubernetes node replacement remain separate work. Pod readiness alone does not
 prove database health. See [member workload contract](docs/member-workloads.md).
 
+## Retained central topology
+
+The default reconciler discovers and retains a complete local RAFT topology
+under both operation Leases after workload rollout. Full NB/SB cluster and
+server UUIDs, RAFT addresses and actual client listeners are checked against
+all peers. Node, workload and database storage identities are bound to the
+observation. The upstream Chart's `/etc/ovn` host path and the member runtime's
+`/var/lib/ovn-member` persistent claim are supported database roots.
+
+An immutable ConfigMap without an owner reference retains the initial identity
+inventory. `status.topology.inventory` pins its name, UID and digest; observation
+failures do not clear it. `TopologyRecorded` is a separate readiness gate and
+requires fresh discovery. Pod/container restarts can reuse the baseline only
+when database, node, workload and storage identities still match. Changed native
+identities or a missing/replaced record block verification, and commit-index
+advancement does not create new records. See [topology discovery and retention](docs/central-topology.md).
+
 ## Joint membership lifecycle
 
 `internal/lifecycle.Executor` persists an immutable operation request and a

@@ -24,49 +24,54 @@ func ownedPods(ctx context.Context, reader client.Reader, installation *operator
 	}
 	var pods []corev1.Pod
 	for _, pod := range list.Items {
-		owner := metav1.GetControllerOf(&pod)
-		if owner == nil || owner.APIVersion != "apps/v1" {
-			continue
-		}
-		if owner.Kind == "ReplicaSet" {
-			rs := new(appsv1.ReplicaSet)
-			if err := reader.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: owner.Name}, rs); err != nil {
-				if client.IgnoreNotFound(err) == nil {
-					continue
-				}
-				return nil, err
-			}
-			if rs.UID != owner.UID {
-				continue
-			}
-			owner = metav1.GetControllerOf(rs)
-		}
-		if owner == nil || owner.APIVersion != "apps/v1" {
-			continue
-		}
-		var workload client.Object
-		switch owner.Kind {
-		case "Deployment":
-			workload = new(appsv1.Deployment)
-		case "StatefulSet":
-			workload = new(appsv1.StatefulSet)
-		case "DaemonSet":
-			workload = new(appsv1.DaemonSet)
-		default:
-			continue
-		}
-		if err := reader.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: owner.Name}, workload); err != nil {
-			if client.IgnoreNotFound(err) == nil {
-				continue
-			}
+		workload, err := ownedPodWorkload(ctx, reader, installation, pod)
+		if err != nil {
 			return nil, err
 		}
-		if workload.GetUID() == owner.UID && ownedWorkload(workload, installation) {
+		if workload != nil {
 			pods = append(pods, pod)
 		}
 	}
 	slices.SortFunc(pods, func(a, b corev1.Pod) int { return strings.Compare(a.Name, b.Name) })
 	return pods, nil
+}
+
+func ownedPodWorkload(ctx context.Context, reader client.Reader, installation *operatorv1alpha1.KubeOVNInstallation, pod corev1.Pod) (client.Object, error) {
+	owner := metav1.GetControllerOf(&pod)
+	if owner == nil || owner.APIVersion != "apps/v1" {
+		return nil, nil
+	}
+	if owner.Kind == "ReplicaSet" {
+		rs := new(appsv1.ReplicaSet)
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: owner.Name}, rs); err != nil {
+			return nil, client.IgnoreNotFound(err)
+		}
+		if rs.UID != owner.UID || rs.DeletionTimestamp != nil {
+			return nil, nil
+		}
+		owner = metav1.GetControllerOf(rs)
+	}
+	if owner == nil || owner.APIVersion != "apps/v1" {
+		return nil, nil
+	}
+	var workload client.Object
+	switch owner.Kind {
+	case "Deployment":
+		workload = new(appsv1.Deployment)
+	case "StatefulSet":
+		workload = new(appsv1.StatefulSet)
+	case "DaemonSet":
+		workload = new(appsv1.DaemonSet)
+	default:
+		return nil, nil
+	}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: owner.Name}, workload); err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+	if workload.GetUID() != owner.UID || workload.GetDeletionTimestamp() != nil || !ownedWorkload(workload, installation) {
+		return nil, nil
+	}
+	return workload, nil
 }
 
 func podReady(pod corev1.Pod) bool {

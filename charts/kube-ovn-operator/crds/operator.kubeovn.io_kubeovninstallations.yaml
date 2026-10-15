@@ -119,7 +119,17 @@ spec:
                 conditions:
                   type: array
                   items: {type: object, x-kubernetes-preserve-unknown-fields: true}
-                topology: {type: object, x-kubernetes-preserve-unknown-fields: true}
+                topology:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  properties:
+                    inventory:
+                      type: object
+                      required: [name, uid, digest]
+                      properties:
+                        name: {type: string, minLength: 1}
+                        uid: {type: string, minLength: 1}
+                        digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
                 upgrade: {type: object, x-kubernetes-preserve-unknown-fields: true}
                 hcp: {type: object, x-kubernetes-preserve-unknown-fields: true}
                 lastBackup: {type: object, x-kubernetes-preserve-unknown-fields: true}

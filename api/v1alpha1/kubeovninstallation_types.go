@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 type InstallationMode string
@@ -153,13 +154,21 @@ type NetworkStatus struct {
 	LastObserved     metav1.Time `json:"lastObserved"`
 }
 
+// CentralTopologyReference pins retained identity evidence, not current health.
+type CentralTopologyReference struct {
+	Name   string    `json:"name"`
+	UID    types.UID `json:"uid"`
+	Digest string    `json:"digest"`
+}
+
 type TopologyStatus struct {
-	DesiredCentralReplicas int32                   `json:"desiredCentralReplicas,omitempty"`
-	ReadyCentralReplicas   int32                   `json:"readyCentralReplicas,omitempty"`
-	Members                []CentralMemberStatus   `json:"members,omitempty"`
-	Databases              []CentralDatabaseStatus `json:"databases,omitempty"`
-	NorthdProcesses        []NorthdProcessStatus   `json:"northdProcesses,omitempty"`
-	Nodes                  []DataPlaneNodeStatus   `json:"nodes,omitempty"`
+	Inventory              *CentralTopologyReference `json:"inventory,omitempty"`
+	DesiredCentralReplicas int32                     `json:"desiredCentralReplicas,omitempty"`
+	ReadyCentralReplicas   int32                     `json:"readyCentralReplicas,omitempty"`
+	Members                []CentralMemberStatus     `json:"members,omitempty"`
+	Databases              []CentralDatabaseStatus   `json:"databases,omitempty"`
+	NorthdProcesses        []NorthdProcessStatus     `json:"northdProcesses,omitempty"`
+	Nodes                  []DataPlaneNodeStatus     `json:"nodes,omitempty"`
 }
 
 type NorthdProcessStatus struct {

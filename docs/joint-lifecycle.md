@@ -72,7 +72,7 @@ An ordinary multi-replica Chart Deployment cannot guarantee which member a
 replica decrease removes. Migrating those workloads to independently managed
 members remains a prerequisite for their retirement through this executor.
 Runtime image publication/selection, automatic storage and TLS Secret lifecycle,
-node placement/changes, durable controller inventory and generation transitions,
+node placement/changes, lifecycle-authorized inventory transitions and generation transitions,
 installation apply-checkpoint authorization and post-transition network checks
 remain part of controller integration.
 
