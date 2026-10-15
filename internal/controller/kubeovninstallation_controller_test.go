@@ -10,6 +10,7 @@ import (
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
+	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -88,8 +89,63 @@ func TestReconcileBlocksInvalidSpecBeforeWritingChildren(t *testing.T) {
 	if err := client.Get(t.Context(), types.NamespacedName{Name: "invalid", Namespace: "default"}, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || len(got.Status.Conditions) != 3 {
+	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || len(got.Status.Conditions) != 5 {
 		t.Fatalf("unexpected invalid status: %#v", got.Status)
+	}
+}
+
+type ovnProviderFunc func(context.Context, *operatorv1alpha1.KubeOVNInstallation) (health.OVNReport, error)
+
+func (f ovnProviderFunc) Observe(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (health.OVNReport, error) {
+	return f(ctx, installation)
+}
+
+func TestReconcileOVNHealthDoesNotReplaceNetworkVerificationOrKeepStaleEvidence(t *testing.T) {
+	scheme := controllerScheme(t)
+	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "health", Namespace: "default", UID: "installation", Generation: 1,
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+	workload := &observedWorkload{observation: apply.Observation{Ready: true, ReadyCentralReplicas: 3}}
+	observations := 0
+	var providerErr error
+	provider := ovnProviderFunc(func(ctx context.Context, _ *operatorv1alpha1.KubeOVNInstallation) (health.OVNReport, error) {
+		observations++
+		if lease.Check(ctx, lease.Installation) == nil {
+			t.Fatal("health observation should run after releasing operation Leases")
+		}
+		return health.OVNReport{Ready: true, Reason: "OVNDatabasesHealthy", Members: []operatorv1alpha1.CentralMemberStatus{{Database: "OVN_Northbound", ServerID: "server-id", AppliedIndex: 19}}, Databases: []operatorv1alpha1.CentralDatabaseStatus{{Database: "OVN_Northbound", ClusterID: "cluster-id"}}}, providerErr
+	})
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Leases: lease.New(kube), Renderer: objectRenderer{}, Workload: workload, OVN: provider}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: installation.Name, Namespace: installation.Namespace}}
+	run := func() *operatorv1alpha1.KubeOVNInstallation {
+		t.Helper()
+		if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+			t.Fatal(err)
+		}
+		got := new(operatorv1alpha1.KubeOVNInstallation)
+		if err := kube.Get(t.Context(), req.NamespacedName, got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	got := run()
+	if !meta.IsStatusConditionTrue(got.Status.Conditions, "OVNDBReady") || meta.IsStatusConditionTrue(got.Status.Conditions, "Ready") || meta.IsStatusConditionTrue(got.Status.Conditions, "NetworkReady") {
+		t.Fatalf("OVN health was confused with network health: %+v", got.Status.Conditions)
+	}
+	if len(got.Status.Topology.Members) != 1 || got.Status.Topology.Members[0].AppliedIndex != 19 || got.Status.Topology.Members[0].LastObserved.IsZero() {
+		t.Fatalf("missing OVN evidence: %+v", got.Status.Topology)
+	}
+	providerErr = fmt.Errorf("OVN transport unavailable")
+	got = run()
+	if meta.IsStatusConditionTrue(got.Status.Conditions, "OVNDBReady") || !meta.IsStatusConditionTrue(got.Status.Conditions, "Degraded") || len(got.Status.Topology.Members) != 0 || len(got.Status.Topology.Databases) != 0 {
+		t.Fatalf("failed observation preserved healthy evidence: %+v", got.Status)
+	}
+	providerErr = nil
+	workload.observation.Ready = false
+	got = run()
+	if observations != 2 || meta.FindStatusCondition(got.Status.Conditions, "OVNDBReady").Status != metav1.ConditionUnknown {
+		t.Fatalf("incomplete rollout was verified: calls=%d, status=%+v", observations, got.Status)
 	}
 }
 

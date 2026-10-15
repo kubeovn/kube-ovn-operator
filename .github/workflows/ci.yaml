@@ -28,8 +28,25 @@ jobs:
           KUBE_OVN_CHART_ARCHIVE=/tmp/kube-ovn-v1.16.13.tgz go test ./internal/chart -run TestReleasedKubeOVNChart -count=1
       - name: Test
         run: make test
+      - name: Verify live OVSDB metadata and leader failover
+        env:
+          OVSDB_TEST_BIN: /tmp/operator-ovsdb/bin
+          LD_LIBRARY_PATH: /tmp/operator-ovsdb/root/usr/lib/x86_64-linux-gnu:/tmp/operator-ovsdb/root/lib/x86_64-linux-gnu
+          TMPDIR: /tmp
+        run: |
+          sudo apt-get update -qq
+          mkdir -p /tmp/operator-ovsdb/bin
+          (
+            cd /tmp/operator-ovsdb
+            apt-get download openvswitch-common openvswitch-switch libunbound8 libcap-ng0 libatomic1
+            for package in ./*.deb; do dpkg-deb --extract "$package" root; done
+            for name in ovsdb-client ovsdb-tool; do ln -s "/tmp/operator-ovsdb/root/usr/bin/$name" "bin/$name"; done
+            ln -s /tmp/operator-ovsdb/root/usr/sbin/ovsdb-server bin/ovsdb-server
+          )
+          "$OVSDB_TEST_BIN/ovsdb-server" --version
+          go test ./internal/health -run TestLiveOVSDB -count=1 -v
       - name: Race-check operation coordination
-        run: go test -race ./internal/lease ./internal/apply ./internal/controller ./internal/ovnadmin
+        run: go test -race ./internal/lease ./internal/apply ./internal/controller ./internal/ovnadmin ./internal/health
       - name: Vet
         run: make vet
       - uses: golangci/golangci-lint-action@v7
