@@ -64,9 +64,21 @@ Database identities and sampled member indexes are published in `status.topology
 These are sampled health observations; they do not prove an atomic RAFT
 membership snapshot or authorize membership changes. In particular, the
 server's `connected` signal can lag a failure while an election is in progress.
-Northd, data-plane connections and network probes still require verification.
-External/HCP databases await a peer provider. Observation requires pod list,
-ReplicaSet/Deployment/StatefulSet read and `pods/exec` create permissions; the
+External/HCP databases await a peer provider.
+
+`NorthdReady` requires exactly one active northd, standby peers and NB/SB
+connections on every managed central pod. `DataPlaneReady` requires a complete
+OVS DaemonSet rollout, a Ready node for each pod, unique chassis UUIDs, an SB
+connection from each ovn-controller and a live `br-int` in ovs-vswitchd. The
+operator uses read-only appctl/vsctl commands and limits node probes to four
+concurrent requests. It rechecks pod/container identities, node identities and
+DaemonSet generation after sampling. Failed observations clear the affected
+runtime evidence. Control-plane-only and data-plane-only installations skip
+the component they do not manage.
+
+These runtime checks do not prove end-to-end packet delivery. Network probes
+remain required and `NetworkReady` stays Unknown. Observation requires pod list,
+Node/ReplicaSet/Deployment/StatefulSet/DaemonSet read and `pods/exec` create permissions; the
 limited shipped RBAC still requires environment-specific review and expansion.
 
 `Ready` remains false until complete OVN and network verification is implemented. A
@@ -113,13 +125,18 @@ The release-chart integration test renders a checksum-pinned v1.16.13 archive
 in all three installation modes. These tests do not yet install Kube-OVN or
 verify a working network. The CI job also starts isolated OVSDB processes to
 check standalone/clustered metadata, leader failover and a minority follower
-after quorum loss. Set `OVSDB_TEST_BIN` to a directory containing `ovsdb-tool`,
+after quorum loss, plus real northd active/standby/pause and SB disconnect
+behavior. Isolated ovs-vswitchd and ovn-controller processes verify `br-int`
+with a dummy datapath and detect loss of SB connectivity.
+Set `OVSDB_TEST_BIN` to a directory containing `ovsdb-tool`,
 `ovsdb-server` and `ovsdb-client` to run those tests locally. The kind job checks live Lease contention,
 renewal past the initial expiry, release, and loss cancellation.
+The OVN runtime tests additionally use `OVN_TEST_BIN`, `OVN_TEST_SCHEMA_DIR`
+and `OVS_TEST_SCHEMA`; see the CI workflow for the extracted package layout.
 
 The manually dispatched `Kube-OVN installation` workflow provisions a separate
 three-control-plane kind cluster without a default CNI. It installs the pinned
-v1.16.13 chart through the operator, waits for workload rollout, records live
+v1.16.13 chart through the operator, waits for workload and OVN runtime health, records live
 NB/SB cluster status and probes Pod IP and Service DNS traffic between two nodes.
 It uses the job's existing admin kubeconfig and creates the upstream chart's
 ServiceAccounts and RBAC; it is separate from the default smoke workflow.

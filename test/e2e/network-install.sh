@@ -55,6 +55,8 @@ spec:
 YAML
 kubectl -n kube-system wait koi/network --for=condition=WorkloadsReady --timeout=900s
 kubectl -n kube-system wait koi/network --for=condition=OVNDBReady --timeout=180s
+kubectl -n kube-system wait koi/network --for=condition=NorthdReady --timeout=180s
+kubectl -n kube-system wait koi/network --for=condition=DataPlaneReady --timeout=180s
 kubectl wait nodes --all --for=condition=Ready --timeout=180s
 kubectl -n kube-system rollout status deployment/coredns --timeout=180s
 
@@ -116,5 +118,5 @@ for destination in "${server_ip}" operator-network-server.default.svc.cluster.lo
   kubectl -n default exec operator-network-client -- wget -T 15 -q -O - "http://${destination}:8080/hostname" | tee -a "${log_dir}/connectivity.txt" | grep -qx operator-network-server
 done
 # Workload and independent network probes are evidence for this CI run; the
-# controller's Ready condition remains false until its health provider is wired.
+# controller's Ready condition remains false until its network provider is wired.
 kubectl -n kube-system get koi/network -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' | grep -qx VerificationPending

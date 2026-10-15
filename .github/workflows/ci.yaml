@@ -28,9 +28,12 @@ jobs:
           KUBE_OVN_CHART_ARCHIVE=/tmp/kube-ovn-v1.16.13.tgz go test ./internal/chart -run TestReleasedKubeOVNChart -count=1
       - name: Test
         run: make test
-      - name: Verify live OVSDB metadata and leader failover
+      - name: Verify live OVSDB and OVN runtime health
         env:
           OVSDB_TEST_BIN: /tmp/operator-ovsdb/bin
+          OVN_TEST_BIN: /tmp/operator-ovsdb/bin
+          OVN_TEST_SCHEMA_DIR: /tmp/operator-ovsdb/root/usr/share/ovn
+          OVS_TEST_SCHEMA: /tmp/operator-ovsdb/root/usr/share/openvswitch/vswitch.ovsschema
           LD_LIBRARY_PATH: /tmp/operator-ovsdb/root/usr/lib/x86_64-linux-gnu:/tmp/operator-ovsdb/root/lib/x86_64-linux-gnu
           TMPDIR: /tmp
         run: |
@@ -38,13 +41,22 @@ jobs:
           mkdir -p /tmp/operator-ovsdb/bin
           (
             cd /tmp/operator-ovsdb
-            apt-get download openvswitch-common openvswitch-switch libunbound8 libcap-ng0 libatomic1 libevent-2.1-7t64
+            apt-get download openvswitch-common openvswitch-switch ovn-common ovn-central ovn-host libunbound8 libcap-ng0 libatomic1 libevent-2.1-7t64 libbpf1 libxdp1 libnuma1 libunwind8
             for package in ./*.deb; do dpkg-deb --extract "$package" root; done
-            for name in ovsdb-client ovsdb-tool; do ln -s "/tmp/operator-ovsdb/root/usr/bin/$name" "bin/$name"; done
+            for name in ovsdb-client ovsdb-tool ovs-vsctl ovs-appctl ovn-appctl ovn-controller ovn-northd; do
+              ln -s "/tmp/operator-ovsdb/root/usr/bin/$name" "bin/$name"
+            done
             ln -s /tmp/operator-ovsdb/root/usr/sbin/ovsdb-server bin/ovsdb-server
+            for location in usr/sbin usr/lib/openvswitch-switch; do
+              if test -x "root/$location/ovs-vswitchd"; then
+                ln -s "/tmp/operator-ovsdb/root/$location/ovs-vswitchd" bin/ovs-vswitchd
+                break
+              fi
+            done
           )
           "$OVSDB_TEST_BIN/ovsdb-server" --version
-          go test ./internal/health -run TestLiveOVSDB -count=1 -v
+          "$OVN_TEST_BIN/ovn-northd" --version
+          go test ./internal/health -run 'TestLive(OVSDB|OVN)' -count=1 -v
       - name: Race-check operation coordination
         run: go test -race ./internal/lease ./internal/apply ./internal/controller ./internal/ovnadmin ./internal/health
       - name: Vet

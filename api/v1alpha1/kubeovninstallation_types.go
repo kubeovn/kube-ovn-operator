@@ -143,6 +143,26 @@ type TopologyStatus struct {
 	ReadyCentralReplicas   int32                   `json:"readyCentralReplicas,omitempty"`
 	Members                []CentralMemberStatus   `json:"members,omitempty"`
 	Databases              []CentralDatabaseStatus `json:"databases,omitempty"`
+	NorthdProcesses        []NorthdProcessStatus   `json:"northdProcesses,omitempty"`
+	Nodes                  []DataPlaneNodeStatus   `json:"nodes,omitempty"`
+}
+
+type NorthdProcessStatus struct {
+	Pod          string      `json:"pod"`
+	State        string      `json:"state"`
+	NBConnected  bool        `json:"nbConnected,omitzero"`
+	SBConnected  bool        `json:"sbConnected,omitzero"`
+	LastObserved metav1.Time `json:"lastObserved,omitzero"`
+}
+
+type DataPlaneNodeStatus struct {
+	Node                   string      `json:"node"`
+	NodeUID                string      `json:"nodeUID"`
+	Pod                    string      `json:"pod"`
+	ChassisID              string      `json:"chassisID"`
+	SBConnected            bool        `json:"sbConnected,omitzero"`
+	IntegrationBridgeReady bool        `json:"integrationBridgeReady,omitzero"`
+	LastObserved           metav1.Time `json:"lastObserved,omitzero"`
 }
 
 type CentralMemberStatus struct {

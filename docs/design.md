@@ -75,8 +75,14 @@ data, storage connectivity and a single leader per database; standalone mode
 checks its own model. These sampled observations are separate from membership
 mutation preflight and from `NetworkReady`, which awaits a network provider.
 Failed observations and incomplete workload rollouts invalidate old evidence.
-Northd and data-plane connection verification are still required. Production
-pod read/exec permissions require the same deployment review as the full chart.
+`NorthdReady` samples active/standby state and both NB/SB connections.
+`DataPlaneReady` checks every scheduled OVS node for SB connectivity, a live
+integration bridge and a unique chassis ID. Pod/controller ownership, container
+restarts, Node identity/readiness and DaemonSet rollout are checked around the
+sample. These read-only queries do not invoke the upstream health script,
+which can reset SB connection state. They neither prove packet delivery nor
+authorize membership changes. Production read/exec permissions require the
+same deployment review as the full chart.
 
 1. Extend the Helm SDK archive renderer with OCI support, configurable network
    values, complete target RBAC and live installation/network acceptance. The
