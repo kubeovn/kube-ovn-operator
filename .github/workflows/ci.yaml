@@ -38,7 +38,7 @@ jobs:
           mkdir -p /tmp/operator-ovsdb/bin
           (
             cd /tmp/operator-ovsdb
-            apt-get download openvswitch-common openvswitch-switch libunbound8 libcap-ng0 libatomic1
+            apt-get download openvswitch-common openvswitch-switch libunbound8 libcap-ng0 libatomic1 libevent-2.1-7t64
             for package in ./*.deb; do dpkg-deb --extract "$package" root; done
             for name in ovsdb-client ovsdb-tool; do ln -s "/tmp/operator-ovsdb/root/usr/bin/$name" "bin/$name"; done
             ln -s /tmp/operator-ovsdb/root/usr/sbin/ovsdb-server bin/ovsdb-server
