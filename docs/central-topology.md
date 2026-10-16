@@ -49,14 +49,17 @@ writes and elections do not accumulate immutable ConfigMaps.
 `TopologyRecorded` is true only after fresh discovery and retained-record
 verification. It is an additional Ready gate, not a replacement for OVN, runtime
 or network checks. Complete discovery currently requires all desired members;
-loss of a member preserves the inventory and blocks verification. A future
-operation selector can use that retained identity to plan replacement, but must
-obtain fresh quorum, backup and approval evidence through the lifecycle executor.
+loss of a member preserves the inventory and blocks verification. A lifecycle
+operation uses that retained identity as its original inventory. The default
+controller resumes such an operation before Chart rendering, and only a
+validated immutable completion receipt plus fresh final discovery can create a
+successor baseline. A future operation selector still must obtain fresh quorum,
+backup and approval evidence through the lifecycle executor.
 
 Baseline transitions require explicit lifecycle completion evidence; this module
 does not absorb external topology changes automatically. Automatic operation
-selection, old Deployment handoff, generation/apply-checkpoint transitions and
-strict in-flight fencing remain open. Joint observations are samples, not an
+selection, old Deployment handoff, generation/apply-checkpoint authorization
+and strict in-flight fencing remain open. Joint observations are samples, not an
 atomic NB/SB snapshot. Retained metadata assumes trusted Kubernetes writers and
 cannot authenticate against an actor able to rewrite both records and status.
 

@@ -24,6 +24,15 @@ type Provider interface {
 	Ensure(context.Context, *api.KubeOVNInstallation) (*api.CentralTopologyReference, error)
 }
 
+// HandoffProvider admits a new immutable baseline only after the caller has
+// independently verified a completed lifecycle receipt and fresh final state.
+// It is optional on the Provider seam so plan-only and test adapters cannot
+// accidentally claim lifecycle authorization.
+type HandoffProvider interface {
+	Provider
+	Handoff(context.Context, *api.KubeOVNInstallation, *api.CentralTopologyReference) (*api.CentralTopologyReference, error)
+}
+
 // Kubernetes requires an uncached client and both installation-bound Leases.
 // Ensure returns a validated retained reference even when live discovery fails.
 // The caller persists that reference before publishing the observation failure.
@@ -49,6 +58,81 @@ func (p *Kubernetes) Ensure(ctx context.Context, installation *api.KubeOVNInstal
 	return p.ensure(ctx, installation, true)
 }
 
+// Handoff records a newly observed topology under a new immutable name. The
+// previous ConfigMap remains retained for audit and is never deleted or
+// mutated. The caller is responsible for proving the lifecycle receipt before
+// invoking this method.
+func (p *Kubernetes) Handoff(ctx context.Context, installation *api.KubeOVNInstallation, previous *api.CentralTopologyReference) (*api.CentralTopologyReference, error) {
+	if previous == nil || installation == nil || installation.Status.Topology.Inventory == nil || *installation.Status.Topology.Inventory != *previous {
+		return nil, errors.New("topology handoff requires the currently pinned baseline")
+	}
+	if p.Client == nil || p.Runner == nil {
+		return nil, errors.New("central topology handoff requires a direct client and Pod runner")
+	}
+	if err := p.guard(ctx, installation); err != nil {
+		return nil, err
+	}
+	observed, err := health.DiscoverCentralTopology(ctx, p.Client, p.Runner, installation)
+	if err != nil {
+		return nil, err
+	}
+	previousObject := new(corev1.ConfigMap)
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: previous.Name}, previousObject); err != nil {
+		return nil, err
+	}
+	previousRecord, _, err := readRecord(previousObject, installation)
+	if err != nil {
+		return nil, err
+	}
+	if previousRecord.Topology.SameIdentity(observed) {
+		return nil, errors.New("central topology handoff did not change the retained identity")
+	}
+	data, err := json.Marshal(record{FormatVersion: 1, InstallationUID: string(installation.UID), InstallationGeneration: installation.Generation, Topology: observed}, json.Deterministic(true))
+	if err != nil || len(data) > 64<<10 {
+		return nil, errors.New("invalid or oversized central topology handoff")
+	}
+	installationDigest := sha256.Sum256([]byte(installation.UID))
+	topologyDigest := sha256.Sum256(data)
+	name := fmt.Sprintf("ovn-topology-%x-%x", installationDigest[:8], topologyDigest[:16])
+	object := new(corev1.ConfigMap)
+	err = p.Client.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: name}, object)
+	if apierrors.IsNotFound(err) {
+		if err := p.guard(ctx, installation); err != nil {
+			return nil, err
+		}
+		object = &corev1.ConfigMap{Name: name, Namespace: installation.Namespace, Immutable: new(true), Labels: labels(installation), Data: map[string]string{"topology.json": string(data)}}
+		if err := p.Client.Create(ctx, object); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	expectedUID := object.UID
+	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+		return nil, err
+	}
+	if object.UID != expectedUID {
+		return nil, errors.New("central topology handoff record was replaced")
+	}
+	// The newly created record cannot match the still-pinned previous status;
+	// validate its immutable contents before the controller publishes the new
+	// status reference.
+	candidate := installation.DeepCopy()
+	candidate.Status.Topology.Inventory = nil
+	_, ref, err := readRecord(object, candidate)
+	if err != nil {
+		return nil, err
+	}
+	if !savedTopologyMatches(ref, data, object) {
+		return nil, errors.New("central topology handoff record changed")
+	}
+	return ref, p.guard(ctx, installation)
+}
+
+func savedTopologyMatches(ref *api.CentralTopologyReference, data []byte, object *corev1.ConfigMap) bool {
+	return ref != nil && object.UID != "" && object.Data["topology.json"] == string(data) && ref.Digest == fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+}
+
 func (p *Kubernetes) ensure(ctx context.Context, installation *api.KubeOVNInstallation, initialize bool) (*api.CentralTopologyReference, error) {
 	if p.Client == nil || p.Runner == nil || installation == nil || installation.UID == "" || installation.Generation < 1 {
 		return nil, errors.New("central topology requires an identified installation, direct client and Pod runner")
@@ -57,6 +141,9 @@ func (p *Kubernetes) ensure(ctx context.Context, installation *api.KubeOVNInstal
 		return nil, err
 	}
 	name := fmt.Sprintf("ovn-topology-%x", sha256.Sum256([]byte(installation.UID)))[:45]
+	if installation.Status.Topology.Inventory != nil {
+		name = installation.Status.Topology.Inventory.Name
+	}
 	object := new(corev1.ConfigMap)
 	err := p.Client.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: name}, object)
 	var saved record

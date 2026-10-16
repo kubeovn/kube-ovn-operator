@@ -14,6 +14,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
+	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
 	"github.com/kubeovn/kube-ovn-operator/internal/planner"
 	"github.com/kubeovn/kube-ovn-operator/internal/topology"
 	corev1 "k8s.io/api/core/v1"
@@ -47,6 +48,7 @@ type KubeOVNInstallationReconciler struct {
 	Runtime         health.RuntimeProvider
 	Network         health.NetworkProvider
 	Topology        topology.Provider
+	Lifecycle       *lifecycle.Manager
 	WorkloadFactory func(apply.InstallationIdentity) apply.ApplyClient
 }
 
@@ -78,6 +80,91 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		}
 		logger.Info("installation plan is blocked", "reason", plan.Blocking)
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	// Recover a durable membership operation before rendering the chart. Node
+	// changes can make bootstrap rendering fail, while the operation's pinned
+	// inventory remains the only safe path to convergence.
+	if localRaft(installation) && r.Lifecycle != nil {
+		if r.Leases == nil {
+			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "LifecycleLease", "lifecycle recovery requires operation leases"
+			if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); err != nil {
+				return reconcile.Result{}, err
+			}
+			return reconcile.Result{RequeueAfter: 15 * time.Second}, nil
+		}
+		var recovery *lifecycle.Recovery
+		recoveryErr := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+			return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
+				var err error
+				recovery, err = r.Lifecycle.Resume(centralCtx, installation, installation.Status.Topology.Operation)
+				return err
+			})
+		})
+		if recoveryErr != nil {
+			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "Lifecycle", recoveryErr.Error()
+			if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); err != nil {
+				return reconcile.Result{}, err
+			}
+			return reconcile.Result{RequeueAfter: 15 * time.Second}, nil
+		}
+		if recovery != nil {
+			if installation.Status.Topology.Operation == nil {
+				installation.Status.Topology.Operation = newOperationReference(recovery, installation.Status.Topology.Inventory)
+			}
+			if recovery.State.Phase != lifecycle.Complete {
+				plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "Lifecycle", fmt.Sprintf("durable central operation is %s", recovery.State.Phase)
+				condition := &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionFalse, Reason: "LifecycleInProgress", Message: plan.Blocking}
+				if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, condition); err != nil {
+					return reconcile.Result{}, err
+				}
+				return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+			if installation.Status.Topology.Operation.HandoffInventory != nil {
+				plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "WorkloadHandoff", "central lifecycle completed; old Chart workload handoff is still required"
+				condition := &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionTrue, Reason: "LifecycleComplete", Message: plan.Blocking}
+				if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, condition); err != nil {
+					return reconcile.Result{}, err
+				}
+				return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			if r.Topology == nil {
+				return reconcile.Result{}, errors.New("completed lifecycle requires a topology handoff provider")
+			}
+			handoff, ok := r.Topology.(topology.HandoffProvider)
+			if !ok || installation.Status.Topology.Inventory == nil {
+				return reconcile.Result{}, errors.New("completed lifecycle cannot hand off without the retained topology provider")
+			}
+			var next *operatorv1alpha1.CentralTopologyReference
+			handoffErr := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+				return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
+					var err error
+					next, err = handoff.Handoff(centralCtx, installation, installation.Status.Topology.Inventory)
+					return err
+				})
+			})
+			if handoffErr != nil {
+				plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "TopologyHandoff", handoffErr.Error()
+				if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); err != nil {
+					return reconcile.Result{}, err
+				}
+				return reconcile.Result{RequeueAfter: 15 * time.Second}, nil
+			}
+			if next == nil {
+				return reconcile.Result{}, errors.New("topology handoff returned no reference")
+			}
+			operation := installation.Status.Topology.Operation
+			operation.HandoffInventory = next
+			if recovery.Completion != nil {
+				operation.CompletionDigest = recovery.Completion.Digest
+			}
+			installation.Status.Topology.Inventory = next
+			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "WorkloadHandoff", "central topology handed off; old Chart workload remains fenced"
+			condition := &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionTrue, Reason: "LifecycleComplete", Message: plan.Blocking}
+			if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, condition); err != nil {
+				return reconcile.Result{}, err
+			}
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
 	}
 	renderer := r.Renderer
 	if r.RendererFactory != nil {
@@ -410,6 +497,19 @@ func (r *KubeOVNInstallationReconciler) ensureTopology(ctx context.Context, inst
 		return fmt.Errorf("persist central topology reference: %w", err)
 	}
 	return observationErr
+}
+
+func newOperationReference(recovery *lifecycle.Recovery, inventory *operatorv1alpha1.CentralTopologyReference) *operatorv1alpha1.CentralOperationReference {
+	result := &operatorv1alpha1.CentralOperationReference{
+		JournalName: recovery.Reference.Journal.Name,
+		JournalUID:  recovery.Reference.Journal.UID,
+		RequestName: recovery.Reference.Request.Name,
+		RequestUID:  recovery.Reference.Request.UID,
+	}
+	if inventory != nil {
+		result.Inventory = *inventory
+	}
+	return result
 }
 
 func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, rendered chart.Rendered) error {

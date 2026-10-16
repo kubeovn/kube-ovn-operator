@@ -95,6 +95,11 @@ func (e *Executor) Begin(ctx context.Context, request Request) (Reference, error
 		if old.State.Phase != Complete {
 			return Reference{}, errors.New("another joint operation still owns the installation journal")
 		}
+		if _, oldRequest, validated, err := e.load(ctx, ref, false); err != nil {
+			return Reference{}, err
+		} else if _, err := e.completion(ctx, oldRequest, validated); err != nil {
+			return Reference{}, err
+		}
 		previous = active
 	} else if !apierrors.IsNotFound(err) {
 		return Reference{}, err
@@ -157,7 +162,8 @@ func (e *Executor) Step(ctx context.Context, ref Reference) (State, error) {
 	}
 	state := &saved.State
 	if state.Phase == Complete {
-		return *state, nil
+		_, err := e.completion(ctx, request, saved)
+		return *state, err
 	}
 	if request.Add != nil && e.dependencies.Members == nil {
 		return *state, errors.New("persisted operation requires its member provider")

@@ -206,6 +206,57 @@ func TestDurableTopologySurvivesRestartAndRefusesIdentityChanges(t *testing.T) {
 	}
 }
 
+func TestHandoffCreatesNewImmutableBaselineAfterIdentityChange(t *testing.T) {
+	f := newFixture(t)
+	old, err := f.ensure(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.installation.Status.Topology.Inventory = old
+	if err := f.kube.Status().Update(t.Context(), f.installation); err != nil {
+		t.Fatal(err)
+	}
+	f.serverID = "aaaa1111-1111-2222-3333-444444444444"
+	var next *api.CentralTopologyReference
+	leases := lease.New(f.kube)
+	err = leases.With(t.Context(), f.installation, lease.Installation, func(ctx context.Context) error {
+		return leases.With(ctx, f.installation, lease.Central, func(ctx context.Context) error {
+			var err error
+			next, err = f.provider.Handoff(ctx, f.installation, old)
+			return err
+		})
+	})
+	if err != nil || next == nil {
+		t.Fatalf("handoff failed: %+v %v", next, err)
+	}
+	if *next == *old {
+		t.Fatal("handoff reused the old immutable baseline")
+	}
+	f.installation.Status.Topology.Inventory = next
+	if err := f.kube.Status().Update(t.Context(), f.installation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.provider.VerifyRetained(t.Context(), f.installation); err == nil {
+		t.Fatal("verification unexpectedly ran without the central lease")
+	}
+	err = leases.With(t.Context(), f.installation, lease.Installation, func(ctx context.Context) error {
+		return leases.With(ctx, f.installation, lease.Central, func(ctx context.Context) error {
+			got, err := f.provider.VerifyRetained(ctx, f.installation)
+			if err != nil || got == nil || *got != *next {
+				return fmt.Errorf("new baseline was not retained: %+v %w", got, err)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := new(corev1.ConfigMapList)
+	if err := f.kube.List(t.Context(), records); err != nil || len(records.Items) != 2 {
+		t.Fatalf("handoff did not retain both immutable records: %d %v", len(records.Items), err)
+	}
+}
+
 func TestTopologyRecoversAcceptedCreateAndRequiresLeases(t *testing.T) {
 	f := newFixture(t)
 	if _, err := f.provider.Ensure(t.Context(), f.installation); err == nil {

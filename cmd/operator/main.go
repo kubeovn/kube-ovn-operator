@@ -7,10 +7,12 @@ import (
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
+	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	"github.com/kubeovn/kube-ovn-operator/internal/controller"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
+	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
 	"github.com/kubeovn/kube-ovn-operator/internal/topology"
 	"helm.sh/helm/v3/pkg/chartutil"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
@@ -37,10 +39,16 @@ func main() {
 	var probeAddr string
 	var enableLeaderElection bool
 	var planOnly bool
+	var backupDir string
+	var backupMaxAge time.Duration
+	var backupMaxBytes int64
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true, "Enable leader election for controller manager.")
 	flag.BoolVar(&planOnly, "plan-only", false, "Only serialize installation plans; never apply workloads.")
+	flag.StringVar(&backupDir, "backup-dir", "", "Existing operator-owned directory for lifecycle backups; empty disables lifecycle execution.")
+	flag.DurationVar(&backupMaxAge, "backup-max-age", 24*time.Hour, "Maximum age accepted for lifecycle backups.")
+	flag.Int64Var(&backupMaxBytes, "backup-max-bytes", 1<<30, "Maximum size accepted for one lifecycle backup.")
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zap.Options{Development: false})))
 
@@ -70,6 +78,12 @@ func main() {
 			os.Exit(1)
 		}
 		reconciler.Topology = &topology.Kubernetes{Client: directClient, Runner: podExecutor}
+		reconciler.Lifecycle = &lifecycle.Manager{Client: directClient, Runner: podExecutor, MaxAge: backupMaxAge, MaxBytes: backupMaxBytes}
+		if backupDir != "" {
+			reconciler.Lifecycle.StoreFactory = func(_ *operatorv1alpha1.KubeOVNInstallation) (backup.Store, error) {
+				return backup.OpenFileStore(backupDir)
+			}
+		}
 		reconciler.OVN = &health.OVNObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
 		reconciler.Runtime = &health.RuntimeObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
 		reconciler.Network = &health.NetworkObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
