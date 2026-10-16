@@ -13,6 +13,7 @@ import (
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
+	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
@@ -53,6 +54,10 @@ type KubeOVNInstallationReconciler struct {
 	Topology        topology.Provider
 	Lifecycle       *lifecycle.Manager
 	WorkloadFactory func(apply.InstallationIdentity) apply.ApplyClient
+	// ScheduledBackup is an injectable checkpoint seam. Production uses the
+	// lifecycle manager; tests can provide a verified pair capture without
+	// constructing Pod and object-store adapters.
+	ScheduledBackup func(context.Context, *operatorv1alpha1.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding) (*operatorv1alpha1.BackupStatus, error)
 }
 
 func (r *KubeOVNInstallationReconciler) SetupWithManager(mgr manager.Manager) error {
@@ -193,6 +198,22 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			}
 			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 		}
+	}
+	if outcome, scheduleErr := r.ensureScheduledBackup(ctx, installation, now()); outcome.Due {
+		installation.Status.Upgrade.Step = "BackupSchedule"
+		if scheduleErr != nil {
+			installation.Status.Phase = operatorv1alpha1.PhaseDegraded
+			setCondition(&installation.Status.Conditions, metav1.Condition{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "BackupScheduleFailed", Message: scheduleErr.Error(), ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now())})
+			setCondition(&installation.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "BackupScheduleFailed", Message: scheduleErr.Error(), ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now())})
+			if statusErr := r.Status().Update(ctx, installation); statusErr != nil {
+				return reconcile.Result{}, statusErr
+			}
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if err := r.Status().Update(ctx, installation); err != nil {
+			return reconcile.Result{}, fmt.Errorf("persist scheduled backup checkpoint: %w", err)
+		}
+		return reconcile.Result{RequeueAfter: outcome.RequeueAfter}, nil
 	}
 	if localRaft(installation) && r.Lifecycle != nil && (installation.Status.Topology.Operation == nil || installation.Status.Topology.Operation.HandoffApplied) && installation.Status.Topology.Inventory != nil && installation.Status.ApplyCheckpoint != nil {
 		started, selectionErr := r.beginAutomaticLifecycle(ctx, installation, plan, now)
@@ -677,6 +698,92 @@ func recordLifecycleBackupStatus(installation *operatorv1alpha1.KubeOVNInstallat
 		backup.TopologyDigest = installation.Status.Topology.Inventory.Digest
 	}
 	installation.Status.LastBackup = backup
+}
+
+type scheduledBackupOutcome struct {
+	Due          bool
+	RequeueAfter time.Duration
+}
+
+// ensureScheduledBackup captures one verified NB/SB pair only when the
+// configured interval has elapsed. Unsupported installation shapes are left
+// to their normal reconciliation path; an actually due capture is a safety
+// gate and therefore reports adapter or lease failures to status.
+func (r *KubeOVNInstallationReconciler) ensureScheduledBackup(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, now time.Time) (scheduledBackupOutcome, error) {
+	interval, err := backup.ParseSchedule(installation.Spec.Upgrade.Backup.Schedule)
+	if err != nil {
+		return scheduledBackupOutcome{Due: true}, err
+	}
+	if interval == 0 || !localRaft(installation) || installation.Status.ApplyCheckpoint == nil || installation.Status.ObservedVersion == "" || installation.Status.ObservedVersion != installation.Spec.Version || installation.Status.Topology.Inventory == nil {
+		return scheduledBackupOutcome{}, nil
+	}
+	if operation := installation.Status.Topology.Operation; operation != nil && !operation.HandoffApplied {
+		return scheduledBackupOutcome{}, nil
+	}
+	last := installation.Status.LastBackup
+	if last != nil && !last.CompletedAt.IsZero() {
+		if remaining := last.CompletedAt.Time.Add(interval).Sub(now); remaining > 0 && last.Version == installation.Status.ObservedVersion && last.TopologyDigest == installation.Status.Topology.Inventory.Digest && strings.TrimSpace(last.Destination) == backupDestination(installation) {
+			return scheduledBackupOutcome{RequeueAfter: remaining}, nil
+		}
+	}
+	provider, ok := r.Topology.(topology.InventoryProvider)
+	if !ok {
+		return scheduledBackupOutcome{Due: true}, errors.New("scheduled backup requires a retained topology provider")
+	}
+	if r.Leases == nil {
+		return scheduledBackupOutcome{Due: true}, errors.New("scheduled backup requires operation leases")
+	}
+	ref := installation.Status.Topology.Inventory
+	if ref.Name == "" || ref.UID == "" || ref.Digest == "" {
+		return scheduledBackupOutcome{Due: true}, errors.New("scheduled backup requires a complete retained topology reference")
+	}
+	binding := lifecycle.BackupBinding{Destination: backupDestination(installation), Version: installation.Status.ObservedVersion, TopologyDigest: ref.Digest}
+	capture := r.ScheduledBackup
+	if capture == nil {
+		if r.Lifecycle == nil {
+			return scheduledBackupOutcome{Due: true}, errors.New("scheduled backup requires a lifecycle backup manager")
+		}
+		capture = r.Lifecycle.CaptureBackupPair
+	}
+	var captured *operatorv1alpha1.BackupStatus
+	err = r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
+			retained, err := provider.Retained(centralCtx, installation)
+			if err != nil {
+				return fmt.Errorf("read retained topology for scheduled backup: %w", err)
+			}
+			if err := retained.Validate(); err != nil {
+				return fmt.Errorf("validate retained topology for scheduled backup: %w", err)
+			}
+			captured, err = capture(centralCtx, installation, retained, binding)
+			if err != nil {
+				return fmt.Errorf("capture scheduled backup pair: %w", err)
+			}
+			if err := validateScheduledBackup(captured, binding); err != nil {
+				return err
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return scheduledBackupOutcome{Due: true}, err
+	}
+	installation.Status.LastBackup = captured
+	return scheduledBackupOutcome{Due: true, RequeueAfter: interval}, nil
+}
+
+func validateScheduledBackup(status *operatorv1alpha1.BackupStatus, binding lifecycle.BackupBinding) error {
+	if status == nil || status.ID == "" || len(status.DatabaseRefs) != 2 || status.DatabaseRefs["OVN_Northbound"] == "" || status.DatabaseRefs["OVN_Southbound"] == "" || status.CompletedAt.IsZero() {
+		return errors.New("scheduled backup returned an incomplete verified pair")
+	}
+	refs, err := stdjson.Marshal(status.DatabaseRefs, stdjson.Deterministic(true))
+	if err != nil || status.ID != fmt.Sprintf("sha256:%x", sha256.Sum256(refs)) {
+		return errors.New("scheduled backup pair ID does not match its database references")
+	}
+	if strings.TrimSpace(status.Destination) != binding.Destination || status.Version != binding.Version || status.TopologyDigest != binding.TopologyDigest {
+		return errors.New("scheduled backup pair does not match the destination, observed version and retained topology")
+	}
+	return nil
 }
 
 func (r *KubeOVNInstallationReconciler) ensureUpgradeBackup(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (bool, error) {

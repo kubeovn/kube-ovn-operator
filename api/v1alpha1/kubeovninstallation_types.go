@@ -119,6 +119,10 @@ type UpgradeSpec struct {
 type BackupSpec struct {
 	Required    bool   `json:"required,omitempty"`
 	Destination string `json:"destination,omitempty"`
+	// Schedule is an interval duration such as "6h" or "24h". A scheduled
+	// capture only records a verified NB/SB pair and never authorizes Chart
+	// writes.
+	Schedule string `json:"schedule,omitempty"`
 }
 
 type AdoptionSpec struct {
