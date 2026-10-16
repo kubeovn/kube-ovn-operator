@@ -54,8 +54,11 @@ fence an already submitted command after Lease loss. The default reconciler now
 resumes an already persisted operation before Chart rendering and creates a
 successor topology baseline only after the immutable completion receipt and fresh
 final observation pass. `internal/lifecycle` connects the backup, approval and
-member providers with persistent joint NB/SB operation state. Automatic operation
-selection, ordinary Chart handoff and apply-checkpoint authorization remain open.
+member providers with persistent joint NB/SB operation state. The default
+controller admits one safe one-step reduction and consumes a single
+lifecycle-authorized apply checkpoint after the successor baseline is pinned.
+Ordinary Chart handoff, additions, multi-step changes and broader generation
+transitions remain open.
 There is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
 a new database before its process starts, and a departed server cannot rejoin.
 

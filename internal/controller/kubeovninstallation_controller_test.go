@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	stdjson "encoding/json/v2"
 	"fmt"
 	"strings"
 	"testing"
@@ -19,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -367,6 +370,15 @@ func (w *observedWorkload) Observe(context.Context, []*unstructured.Unstructured
 	return w.observation, nil
 }
 
+type failingObserveWorkload struct {
+	recordingWorkload
+	observeErr error
+}
+
+func (w *failingObserveWorkload) Observe(context.Context, []*unstructured.Unstructured) (apply.Observation, error) {
+	return apply.Observation{Ready: true}, w.observeErr
+}
+
 func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 	scheme := controllerScheme(t)
 	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "checkpoint", Namespace: "default", UID: "installation-uid", Generation: 1,
@@ -417,4 +429,99 @@ func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 	if got.Status.Upgrade.Step != "ApplyCheckpoint" || !meta.IsStatusConditionTrue(got.Status.Conditions, "Degraded") {
 		t.Fatalf("checkpoint rejection not reported: %+v", got.Status)
 	}
+}
+
+func TestLifecycleHandoffAuthorizesOnlyTheNextApplyCheckpoint(t *testing.T) {
+	scheme := controllerScheme(t)
+	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "handoff", Namespace: "default", UID: "installation-uid", Generation: 2}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5}}}
+	previous := installation.Spec
+	previous.Central.Replicas = 3
+	previousJSON, err := stdjson.Marshal(previous, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := &operatorv1alpha1.CentralTopologyReference{Name: "topology", UID: types.UID("topology-uid"), Digest: "sha256:" + strings.Repeat("a", 64)}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(previousJSON)), ManifestHash: "old-manifest", Version: previous.Version}
+	installation.Status.Topology.Inventory = ref
+	installation.Status.Topology.Operation = &operatorv1alpha1.CentralOperationReference{JournalName: "journal", JournalUID: types.UID("journal-uid"), RequestName: "request", RequestUID: types.UID("request-uid"), Inventory: *ref, HandoffInventory: ref, CompletionDigest: "sha256:" + strings.Repeat("b", 64)}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme}
+	rendered := chart.Rendered{Objects: []*unstructured.Unstructured{{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "next", "namespace": "default"}}}}}
+	if err := reconciler.ensureApplyCheckpoint(t.Context(), installation, rendered); err != nil {
+		t.Fatal(err)
+	}
+	if installation.Status.ApplyCheckpoint.SpecHash == fmt.Sprintf("%x", sha256.Sum256(previousJSON)) {
+		t.Fatal("lifecycle handoff did not replace the old checkpoint")
+	}
+	got := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), clientKey(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.ApplyCheckpoint == nil || got.Status.ApplyCheckpoint.SpecHash != installation.Status.ApplyCheckpoint.SpecHash {
+		t.Fatalf("checkpoint replacement was not persisted: %+v", got.Status.ApplyCheckpoint)
+	}
+	installation.Status.Topology.Operation = nil
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: "old", ManifestHash: "old", Version: previous.Version}
+	if err := reconciler.ensureApplyCheckpoint(t.Context(), installation, rendered); err == nil {
+		t.Fatal("checkpoint changed without a lifecycle handoff")
+	}
+	installation.Status.Topology.Operation = &operatorv1alpha1.CentralOperationReference{HandoffInventory: ref, CompletionDigest: "sha256:" + strings.Repeat("b", 64), HandoffApplied: true}
+	if err := reconciler.ensureApplyCheckpoint(t.Context(), installation, rendered); err == nil {
+		t.Fatal("checkpoint changed after the lifecycle handoff was already applied")
+	}
+}
+
+func TestLifecycleHandoffIsConsumedAfterApplyBeforeObservation(t *testing.T) {
+	scheme := controllerScheme(t)
+	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "handoff-observe", Namespace: "default", UID: types.UID("installation-uid"), Generation: 2}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5}}}
+	previous := installation.Spec
+	previous.Central.Replicas = 3
+	previousJSON, err := stdjson.Marshal(previous, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := &operatorv1alpha1.CentralTopologyReference{Name: "topology", UID: types.UID("topology-uid"), Digest: "sha256:" + strings.Repeat("a", 64)}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(previousJSON)), ManifestHash: "old-manifest", Version: previous.Version}
+	installation.Status.Topology.Inventory = ref
+	installation.Status.Topology.Operation = &operatorv1alpha1.CentralOperationReference{Inventory: *ref, HandoffInventory: ref, CompletionDigest: "sha256:" + strings.Repeat("b", 64)}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+	workload := &failingObserveWorkload{observeErr: fmt.Errorf("observation failed")}
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Leases: lease.New(kube), Renderer: objectRenderer{}, Workload: workload}
+	if _, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: clientKey(installation)}); err != nil {
+		t.Fatal(err)
+	}
+	if workload.applyCalls != 1 {
+		t.Fatalf("expected one accepted Chart apply, got %d", workload.applyCalls)
+	}
+	got := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), clientKey(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Topology.Operation == nil || !got.Status.Topology.Operation.HandoffApplied {
+		t.Fatalf("successful apply did not consume handoff authorization: %+v", got.Status.Topology.Operation)
+	}
+}
+
+func TestReplicaOnlySpecChangePinsTheRetainedMemberCount(t *testing.T) {
+	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5}}}
+	previous := installation.Spec
+	previous.Central.Replicas = 3
+	data, err := stdjson.Marshal(previous, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(data))}
+	ok, err := replicaOnlySpecChange(installation, 3)
+	if err != nil || !ok {
+		t.Fatalf("replica-only transition was rejected: %v", err)
+	}
+	installation.Spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+	ok, err = replicaOnlySpecChange(installation, 3)
+	if err != nil || ok {
+		t.Fatalf("unrelated spec change was admitted: ok=%v err=%v", ok, err)
+	}
+}
+
+func clientKey(object client.Object) client.ObjectKey {
+	return client.ObjectKeyFromObject(object)
 }

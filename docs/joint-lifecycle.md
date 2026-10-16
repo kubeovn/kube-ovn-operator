@@ -85,8 +85,10 @@ runtime image and native preparation result, and is therefore not synthesized
 from Chart values.
 Runtime image publication/selection, automatic storage and TLS Secret lifecycle,
 node placement/changes, lifecycle-authorized inventory transitions and generation transitions,
-installation apply-checkpoint authorization and post-transition network checks
-remain part of controller integration.
+broader Chart workload handoff and post-transition network checks remain part of
+controller integration. The selected one-step reduction path authorizes and
+records its next apply checkpoint after the immutable completion receipt and
+successor topology are pinned.
 
 Backup pairs are conservative sampled fences, not atomic cross-database snapshots
 or an application write barrier. Continuous writes can prevent a matching pair
