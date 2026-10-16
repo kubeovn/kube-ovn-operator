@@ -80,6 +80,7 @@ if [[ "${#control_plane_ips[@]}" -ne 3 ]]; then
 fi
 master_nodes=$(IFS=,; printf '%s' "${control_plane_ips[*]}")
 docker run --rm --network=none \
+  --user 0:0 \
   --env "MASTER_NODES=${master_nodes}" \
   --volume "${seed_dir}:/controller-seed" \
   --entrypoint /bin/sh kube-ovn-central-fixture:e2e -ec '
