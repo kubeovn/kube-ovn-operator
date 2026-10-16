@@ -156,6 +156,19 @@ digests. Reconciliation rejects changed inputs until a lifecycle executor can
 authorize the transition. PVCs and resources with Helm keep policy have no
 owner reference and survive installation deletion.
 
+When `spec.adoption.enabled` is true, the controller uses the same workload
+adapter's adoption seam before the regular apply. A non-empty, validated label
+selector is required. All chart resources in the adoption set must already
+exist, match the selector, and have stable UIDs/resource versions. Deleting
+objects, foreign controller owners, multiple owners, and installation labels
+belonging to another installation are rejected. The adapter dry-runs every
+metadata patch before any write, checks the installation and central Leases
+before each write, and claims only operator labels and the installation
+controller owner; workload fields remain owned by their existing managers.
+Generated network-probe objects are intentionally outside this set because they
+are created by the following regular apply. An adoption request therefore
+cannot silently create a replacement or force ownership of an existing field.
+
 ## Next adapter boundaries
 
 The initial read-only OVN health provider queries each owned central pod's

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
 // ValidateInstallationSpec enforces invariants that must hold before a plan
@@ -41,6 +42,19 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 	}
 	if spec.Upgrade.Backup.Required && strings.TrimSpace(spec.Upgrade.Backup.Destination) == "" {
 		errs = append(errs, fmt.Errorf("spec.upgrade.backup.destination is required when backup.required is true"))
+	}
+	if spec.Adoption.Enabled {
+		if len(spec.Adoption.Selector) == 0 {
+			errs = append(errs, fmt.Errorf("spec.adoption.selector must contain at least one label when adoption is enabled"))
+		}
+		for key, value := range spec.Adoption.Selector {
+			if messages := kvalidation.IsQualifiedName(key); len(messages) != 0 {
+				errs = append(errs, fmt.Errorf("spec.adoption.selector key %q is invalid: %s", key, messages[0]))
+			}
+			if messages := kvalidation.IsValidLabelValue(value); len(messages) != 0 {
+				errs = append(errs, fmt.Errorf("spec.adoption.selector value for %q is invalid: %s", key, messages[0]))
+			}
+		}
 	}
 	if spec.NetworkProbe != nil {
 		image := spec.NetworkProbe.Image

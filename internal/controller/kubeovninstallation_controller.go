@@ -215,6 +215,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		renderer = chart.ValuesRenderer{}
 	}
 	rendered, err := renderer.Render(ctx, installation.Spec)
+	adoptionObjects := rendered.Objects
 	if err == nil && len(rendered.Objects) > 0 {
 		var probes []*unstructured.Unstructured
 		probes, err = chart.NetworkProbeObjects(installation, rendered.Objects)
@@ -259,6 +260,19 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				plan.Step = "VerifyRetainedTopology"
 				if err := r.ensureTopology(operationCtx, installation, false); err != nil {
 					topologyCondition = &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionFalse, Reason: "TopologyUnverified", Message: err.Error()}
+					return err
+				}
+			}
+			if installation.Spec.Adoption.Enabled {
+				adopter, ok := workload.(apply.Adopter)
+				if !ok {
+					return errors.New("adoption requires a workload adopter")
+				}
+				plan.Step = "Adopt"
+				if err := lease.CheckAll(operationCtx); err != nil {
+					return err
+				}
+				if err := adopter.Adopt(operationCtx, adoptionObjects, installation.Spec.Adoption.Selector); err != nil {
 					return err
 				}
 			}

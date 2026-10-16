@@ -51,10 +51,11 @@ func (r *HelmRenderer) Render(ctx context.Context, spec operatorv1alpha1.KubeOVN
 	if r.Name == "" || r.Namespace == "" || r.Mapper == nil {
 		return Rendered{}, errors.New("chart release identity and REST mapper are required")
 	}
-	// These contracts need execution and observation across lifecycle steps.
-	// Rejecting them prevents an initial apply from bypassing those steps.
-	if spec.HCP.Enabled || spec.Adoption.Enabled || spec.Central.DynamicMembership {
-		return Rendered{}, errors.New("HCP, adoption and dynamic membership require lifecycle executors")
+	// HCP and dynamic membership need execution and observation across lifecycle
+	// steps. Adoption is handled by the controller after rendering and before
+	// the regular workload apply.
+	if spec.HCP.Enabled || spec.Central.DynamicMembership {
+		return Rendered{}, errors.New("HCP and dynamic membership require lifecycle executors")
 	}
 	if spec.Central.Placement.TopologyKey != "" && spec.Central.Placement.TopologyKey != "kubernetes.io/hostname" {
 		return Rendered{}, errors.New("the upstream chart supports central anti-affinity by kubernetes.io/hostname only")

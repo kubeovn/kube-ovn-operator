@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -23,6 +24,7 @@ const (
 	InstallationNamespaceLabel = "operator.kubeovn.io/installation-namespace"
 	InstallationUIDLabel       = "operator.kubeovn.io/installation-uid"
 	DefaultFieldManager        = "kube-ovn-operator"
+	AdoptionFieldManager       = "kube-ovn-operator-adoption"
 )
 
 // ErrOwnershipConflict means a resource cannot be adopted by this adapter.
@@ -41,6 +43,12 @@ type ApplyClient interface {
 	Apply(context.Context, []*unstructured.Unstructured) error
 }
 
+// Adopter claims ownership metadata on an existing, explicitly selected
+// resource set. It never creates or changes workload fields.
+type Adopter interface {
+	Adopt(context.Context, []*unstructured.Unstructured, map[string]string) error
+}
+
 // Client uses uncached reads and server-side apply without force ownership.
 // New objects use create-only semantics after dry-run to prevent an SSA upsert
 // from overwriting a resource created concurrently by another actor.
@@ -53,12 +61,18 @@ type Client struct {
 }
 
 var _ ApplyClient = (*Client)(nil)
+var _ Adopter = (*Client)(nil)
 
 type preparedObject struct {
 	object                  *unstructured.Unstructured
 	resource                dynamic.ResourceInterface
 	exists                  bool
 	expectedResourceVersion string
+}
+
+type preparedAdoption struct {
+	object   *unstructured.Unstructured
+	resource dynamic.ResourceInterface
 }
 
 func (c *Client) DryRun(ctx context.Context, objects []*unstructured.Unstructured) error {
@@ -101,6 +115,33 @@ func (c *Client) Apply(ctx context.Context, objects []*unstructured.Unstructured
 		}
 		if err != nil {
 			return fmt.Errorf("apply %s: %w", objectKey(item.object), err)
+		}
+	}
+	return nil
+}
+
+// Adopt validates the complete target set before writing any ownership
+// metadata. Every object must already exist and match selector. Existing
+// workload fields are preserved; server-side apply only claims labels and the
+// installation controller owner reference.
+func (c *Client) Adopt(ctx context.Context, objects []*unstructured.Unstructured, selector map[string]string) error {
+	prepared, err := c.prepareAdoption(ctx, c.Identity, objects, selector)
+	if err != nil {
+		return err
+	}
+	for _, item := range prepared {
+		if _, err := adoptionPatch(ctx, item, true); err != nil {
+			return fmt.Errorf("server-side adoption dry-run %s: %w", objectKey(item.object), err)
+		}
+	}
+	for _, item := range prepared {
+		if c.BeforeWrite != nil {
+			if err := c.BeforeWrite(ctx); err != nil {
+				return fmt.Errorf("guard adoption write: %w", err)
+			}
+		}
+		if _, err := adoptionPatch(ctx, item, false); err != nil {
+			return fmt.Errorf("adopt %s: %w", objectKey(item.object), err)
 		}
 	}
 	return nil
@@ -229,6 +270,187 @@ func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, obj
 		prepared = append(prepared, item)
 	}
 	return prepared, nil
+}
+
+func (c *Client) prepareAdoption(ctx context.Context, identity InstallationIdentity, objects []*unstructured.Unstructured, selector map[string]string) ([]preparedAdoption, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.Dynamic == nil || c.Mapper == nil {
+		return nil, errors.New("dynamic Kubernetes client and REST mapper are required")
+	}
+	if identity.Namespace == "" || identity.Name == "" || identity.UID == "" {
+		return nil, errors.New("installation namespace, name and UID are required")
+	}
+	if len(selector) == 0 {
+		return nil, errors.New("adoption selector must contain at least one label")
+	}
+	for key, value := range selector {
+		if errs := kvalidation.IsQualifiedName(key); len(errs) != 0 {
+			return nil, fmt.Errorf("adoption selector key %q is invalid: %s", key, errs[0])
+		}
+		if errs := kvalidation.IsValidLabelValue(value); len(errs) != 0 {
+			return nil, fmt.Errorf("adoption selector value for %q is invalid: %s", key, errs[0])
+		}
+	}
+	prepared := make([]preparedAdoption, 0, len(objects))
+	seen := make(map[string]bool, len(objects))
+	for _, object := range objects {
+		if err := validateRenderedObject(object); err != nil {
+			return nil, err
+		}
+		gvk := object.GroupVersionKind()
+		mapping, err := c.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+		if err != nil {
+			return nil, fmt.Errorf("map %s: %w", gvk, err)
+		}
+		namespaced := mapping.Scope.Name() == meta.RESTScopeNameNamespace
+		var resource dynamic.ResourceInterface
+		if namespaced {
+			if object.GetNamespace() != identity.Namespace {
+				return nil, fmt.Errorf("%s must be in installation namespace %q", objectKey(object), identity.Namespace)
+			}
+			resource = c.Dynamic.Resource(mapping.Resource).Namespace(object.GetNamespace())
+		} else {
+			if object.GetNamespace() != "" {
+				return nil, fmt.Errorf("cluster-scoped %s cannot have a namespace", objectKey(object))
+			}
+			resource = c.Dynamic.Resource(mapping.Resource)
+		}
+		key := mapping.Resource.GroupResource().String() + "/" + object.GetNamespace() + "/" + object.GetName()
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate adoption object %s", key)
+		}
+		seen[key] = true
+		existing, err := resource.Get(ctx, object.GetName(), metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("adoption requires existing resource %s", objectKey(object))
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read %s for adoption: %w", objectKey(object), err)
+		}
+		if existing.GetDeletionTimestamp() != nil || existing.GetUID() == "" || existing.GetResourceVersion() == "" {
+			return nil, fmt.Errorf("%s is deleting or has no UID/resourceVersion", objectKey(object))
+		}
+		if !labelsMatch(existing.GetLabels(), selector) {
+			return nil, ownershipConflict(object, "existing resource does not match the adoption selector")
+		}
+		if err := checkAdoptionLabels(existing, identity); err != nil {
+			return nil, err
+		}
+		ownerReferences, err := adoptionOwners(existing, identity, namespaced && !retainResource(object))
+		if err != nil {
+			return nil, err
+		}
+		labels := identity.labels()
+		patchObject := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": gvk.GroupVersion().String(),
+			"kind":       gvk.Kind,
+			"metadata": map[string]any{
+				"name":            existing.GetName(),
+				"resourceVersion": existing.GetResourceVersion(),
+			},
+		}}
+		metadata := patchObject.Object["metadata"].(map[string]any)
+		if namespaced {
+			metadata["namespace"] = existing.GetNamespace()
+		}
+		if err := unstructured.SetNestedStringMap(patchObject.Object, labels, "metadata", "labels"); err != nil {
+			return nil, fmt.Errorf("prepare adoption labels for %s: %w", objectKey(object), err)
+		}
+		if len(ownerReferences) != 0 {
+			owners, err := ownerReferencesValue(ownerReferences)
+			if err != nil {
+				return nil, fmt.Errorf("prepare adoption owners for %s: %w", objectKey(object), err)
+			}
+			if err := unstructured.SetNestedSlice(patchObject.Object, owners, "metadata", "ownerReferences"); err != nil {
+				return nil, fmt.Errorf("prepare adoption owners for %s: %w", objectKey(object), err)
+			}
+		}
+		prepared = append(prepared, preparedAdoption{object: patchObject, resource: resource})
+	}
+	return prepared, nil
+}
+
+func validateRenderedObject(object *unstructured.Unstructured) error {
+	if object == nil {
+		return errors.New("rendered workload contains a nil object")
+	}
+	gvk := object.GroupVersionKind()
+	if gvk.Version == "" || gvk.Kind == "" || object.GetName() == "" || object.GetGenerateName() != "" {
+		return errors.New("rendered objects require apiVersion, kind and a fixed name")
+	}
+	if object.GetUID() != "" || object.GetResourceVersion() != "" || len(object.GetManagedFields()) != 0 || object.GetDeletionTimestamp() != nil {
+		return fmt.Errorf("%s contains server-owned metadata", objectKey(object))
+	}
+	if _, hasStatus := object.Object["status"]; hasStatus {
+		return fmt.Errorf("%s contains status", objectKey(object))
+	}
+	return nil
+}
+
+func labelsMatch(labels, selector map[string]string) bool {
+	for key, value := range selector {
+		if labels[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func checkAdoptionLabels(object *unstructured.Unstructured, identity InstallationIdentity) error {
+	labels := object.GetLabels()
+	for _, label := range []string{InstallationLabel, InstallationNamespaceLabel, InstallationUIDLabel} {
+		if actual, present := labels[label]; present && actual != identity.labels()[label] {
+			return ownershipConflict(object, fmt.Sprintf("label %q belongs to another installation", label))
+		}
+	}
+	return nil
+}
+
+func adoptionOwners(object *unstructured.Unstructured, identity InstallationIdentity, requireOwner bool) ([]metav1.OwnerReference, error) {
+	owners := object.GetOwnerReferences()
+	if len(owners) > 1 {
+		return nil, ownershipConflict(object, "multiple owner references are not supported")
+	}
+	if len(owners) == 1 {
+		owner := owners[0]
+		if owner.APIVersion != operatorv1alpha1.GroupVersion.String() || owner.Kind != "KubeOVNInstallation" || owner.Name != identity.Name || owner.UID != identity.UID || owner.Controller == nil || !*owner.Controller {
+			return nil, ownershipConflict(object, "owner reference belongs to another controller")
+		}
+		return owners, nil
+	}
+	if !requireOwner {
+		return nil, nil
+	}
+	return []metav1.OwnerReference{{
+		APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation",
+		Name: identity.Name, UID: identity.UID, Controller: new(true),
+	}}, nil
+}
+
+func ownerReferencesValue(owners []metav1.OwnerReference) ([]any, error) {
+	data, err := json.Marshal(owners)
+	if err != nil {
+		return nil, err
+	}
+	var values []any
+	if err := json.Unmarshal(data, &values); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func adoptionPatch(ctx context.Context, item preparedAdoption, dryRun bool) (*unstructured.Unstructured, error) {
+	payload, err := json.Marshal(item.object.Object)
+	if err != nil {
+		return nil, err
+	}
+	options := metav1.PatchOptions{FieldManager: AdoptionFieldManager, FieldValidation: metav1.FieldValidationStrict}
+	if dryRun {
+		options.DryRun = []string{metav1.DryRunAll}
+	}
+	return item.resource.Patch(ctx, item.object.GetName(), types.ApplyPatchType, payload, options)
 }
 
 func (i InstallationIdentity) labels() map[string]string {
