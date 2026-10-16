@@ -321,14 +321,19 @@ deletes them. File digests prove integrity, not human approval or authenticity
 against an actor who can rewrite both the store and trusted references.
 
 The persistent lifecycle executor now records a verified NB/SB backup pair in
-`status.lastBackup`, including the two immutable references, a pair ID and the
-latest capture time. It is not yet wired to `spec.upgrade.backup.destination`.
-S3, retention, backup scheduling, cross-database upgrade checkpoints, recovery
-execution and product RPO/RTO policy remain to be implemented. The provider
-checks the native file structure and provenance, not all OVSDB schema semantics;
-tests load the stored files into fresh OVSDB processes and verify recovered data
-and row UUIDs for both OVN schemas. It does not restore over a live database or
-authorize a lost-quorum recovery.
+`status.lastBackup`, including the two immutable references, a pair ID, the
+observed version, retained topology digest and latest capture time. Before a
+version-only upgrade, the controller re-verifies a matching pair or captures a
+new one, then authorizes one apply checkpoint for the requested target version.
+The authorization is consumed when the Chart write is accepted and cannot be
+reused after a target or topology change. It is not yet wired to
+`spec.upgrade.backup.destination`. S3, retention, backup scheduling,
+cross-database upgrade checkpoints, recovery execution and product RPO/RTO
+policy remain to be implemented. The provider checks the native file structure
+and provenance, not all OVSDB schema semantics; tests load the stored files into
+fresh OVSDB processes and verify recovered data and row UUIDs for both OVN
+schemas. It does not restore over a live database or authorize a lost-quorum
+recovery.
 
 ## Development
 

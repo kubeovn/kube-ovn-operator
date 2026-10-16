@@ -174,6 +174,23 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			}
 		}
 	}
+	if installation.Status.ObservedVersion != "" && installation.Status.ObservedVersion != installation.Spec.Version {
+		upgradeReady, upgradeErr := r.ensureUpgradeBackup(ctx, installation)
+		if upgradeErr != nil {
+			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseUpgrading, "Backup", upgradeErr.Error()
+			if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
+				return reconcile.Result{}, statusErr
+			}
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if !upgradeReady {
+			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseUpgrading, "Backup", "verified upgrade backup pair is persisted; waiting for the next reconciliation before Chart apply"
+			if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
+				return reconcile.Result{}, statusErr
+			}
+			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+	}
 	if localRaft(installation) && r.Lifecycle != nil && (installation.Status.Topology.Operation == nil || installation.Status.Topology.Operation.HandoffApplied) && installation.Status.Topology.Inventory != nil && installation.Status.ApplyCheckpoint != nil {
 		started, selectionErr := r.beginAutomaticLifecycle(ctx, installation, plan, now)
 		if selectionErr != nil {
@@ -251,10 +268,17 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			if err := workload.Apply(operationCtx, rendered.Objects); err != nil {
 				return err
 			}
+			upgradeAuthorized := upgradeAuthorizesApply(installation)
 			if lifecycleHandoffAuthorizesApply(installation) && installation.Status.Topology.Operation != nil {
 				// Consume the lifecycle authorization when the Chart write is
 				// accepted. Later observation failures must not make it reusable.
 				installation.Status.Topology.Operation.HandoffApplied = true
+			}
+			if upgradeAuthorized {
+				// Consume the upgrade authorization as soon as the Chart write is
+				// accepted. A later observation failure must not replay the same
+				// version checkpoint on the next reconciliation.
+				installation.Status.Upgrade.CheckpointAuthorized = false
 			}
 			plan.Step = "Observe"
 			if observer, ok := workload.(apply.Observer); ok {
@@ -631,11 +655,82 @@ func recordLifecycleBackupStatus(installation *operatorv1alpha1.KubeOVNInstallat
 	if err != nil {
 		return
 	}
-	installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{
-		ID:           fmt.Sprintf("sha256:%x", sha256.Sum256(data)),
-		DatabaseRefs: refs,
-		CompletedAt:  metav1.NewTime(latest),
+	backup := &operatorv1alpha1.BackupStatus{ID: fmt.Sprintf("sha256:%x", sha256.Sum256(data)), DatabaseRefs: refs, Version: installation.Status.ObservedVersion, CompletedAt: metav1.NewTime(latest)}
+	if installation.Status.Topology.Inventory != nil {
+		backup.TopologyDigest = installation.Status.Topology.Inventory.Digest
 	}
+	installation.Status.LastBackup = backup
+}
+
+func (r *KubeOVNInstallationReconciler) ensureUpgradeBackup(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (bool, error) {
+	if !upgradeOnlySpecChange(installation) {
+		return false, errors.New("upgrade backup authorization only covers a version-only change; separate member or workload changes require their lifecycle handoff")
+	}
+	if r.Lifecycle == nil {
+		return false, errors.New("upgrade requires a lifecycle backup manager")
+	}
+	provider, ok := r.Topology.(topology.InventoryProvider)
+	if !ok {
+		return false, errors.New("upgrade requires a retained topology provider")
+	}
+	if r.Leases == nil {
+		return false, errors.New("upgrade backup verification requires operation leases")
+	}
+	ref := installation.Status.Topology.Inventory
+	if ref == nil || ref.Name == "" || ref.UID == "" || ref.Digest == "" {
+		return false, errors.New("upgrade requires a complete retained topology reference")
+	}
+	binding := lifecycle.BackupBinding{Version: installation.Status.ObservedVersion, TopologyDigest: ref.Digest}
+	var retained health.CentralTopology
+	var captured *operatorv1alpha1.BackupStatus
+	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
+			var err error
+			retained, err = provider.Retained(centralCtx, installation)
+			if err != nil {
+				return fmt.Errorf("verify retained topology before upgrade backup: %w", err)
+			}
+			current := installation.Status.LastBackup
+			if current != nil && current.Version == binding.Version && current.TopologyDigest == binding.TopologyDigest {
+				if err := r.Lifecycle.VerifyBackupPair(centralCtx, installation, retained, binding, current); err != nil {
+					installation.Status.Upgrade.CheckpointAuthorized = false
+					return fmt.Errorf("verify retained upgrade backup pair: %w", err)
+				}
+				captured = new(operatorv1alpha1.BackupStatus)
+				current.DeepCopyInto(captured)
+				return nil
+			}
+			captured, err = r.Lifecycle.CaptureBackupPair(centralCtx, installation, retained, binding)
+			if err != nil {
+				return fmt.Errorf("capture upgrade backup pair: %w", err)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return false, err
+	}
+	if captured == nil {
+		return false, errors.New("upgrade backup manager returned no pair")
+	}
+	installation.Status.LastBackup = captured
+	if installation.Status.Upgrade.TargetVersion != installation.Spec.Version || installation.Status.Upgrade.BackupID != captured.ID || !installation.Status.Upgrade.CheckpointAuthorized {
+		installation.Status.Upgrade.BackupID = captured.ID
+		installation.Status.Upgrade.TargetVersion = installation.Spec.Version
+		installation.Status.Upgrade.CheckpointAuthorized = true
+		return false, nil
+	}
+	return true, nil
+}
+
+func upgradeOnlySpecChange(installation *operatorv1alpha1.KubeOVNInstallation) bool {
+	if installation == nil || installation.Status.ApplyCheckpoint == nil || installation.Status.ObservedVersion == "" || installation.Status.ObservedVersion == installation.Spec.Version {
+		return false
+	}
+	spec := installation.Spec
+	spec.Version = installation.Status.ObservedVersion
+	data, err := stdjson.Marshal(spec, stdjson.Deterministic(true))
+	return err == nil && fmt.Sprintf("%x", sha256.Sum256(data)) == installation.Status.ApplyCheckpoint.SpecHash
 }
 
 func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, rendered chart.Rendered) error {
@@ -654,7 +749,7 @@ func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Contex
 	}
 	if existing := installation.Status.ApplyCheckpoint; existing != nil {
 		if *existing != checkpoint {
-			if !lifecycleHandoffAuthorizesApply(installation) {
+			if !lifecycleHandoffAuthorizesApply(installation) && !upgradeAuthorizesApply(installation) {
 				return fmt.Errorf("installation inputs changed after the first apply checkpoint; a lifecycle executor is required")
 			}
 			previous := *existing
@@ -682,6 +777,15 @@ func lifecycleHandoffAuthorizesApply(installation *operatorv1alpha1.KubeOVNInsta
 		return false
 	}
 	return *installation.Status.Topology.Operation.HandoffInventory == *installation.Status.Topology.Inventory
+}
+
+func upgradeAuthorizesApply(installation *operatorv1alpha1.KubeOVNInstallation) bool {
+	if installation == nil || installation.Status.ApplyCheckpoint == nil || installation.Status.ObservedVersion == "" || installation.Status.ObservedVersion == installation.Spec.Version || !upgradeOnlySpecChange(installation) {
+		return false
+	}
+	backup := installation.Status.LastBackup
+	ref := installation.Status.Topology.Inventory
+	return installation.Status.Upgrade.CheckpointAuthorized && installation.Status.Upgrade.TargetVersion == installation.Spec.Version && installation.Status.Upgrade.BackupID != "" && backup != nil && backup.ID == installation.Status.Upgrade.BackupID && backup.Version == installation.Status.ObservedVersion && ref != nil && backup.TopologyDigest == ref.Digest && installation.Status.ApplyCheckpoint.Version == installation.Status.ObservedVersion
 }
 
 func installationWithStatus(in *operatorv1alpha1.KubeOVNInstallation, status operatorv1alpha1.KubeOVNInstallationStatus) *operatorv1alpha1.KubeOVNInstallation {
