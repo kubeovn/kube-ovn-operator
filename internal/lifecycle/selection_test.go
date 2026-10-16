@@ -67,6 +67,25 @@ func TestSelectRemovalReturnsNoRequestWhenTopologyAlreadyMatches(t *testing.T) {
 	}
 }
 
+func TestSelectRemovalBuildsExplicitChartDeploymentScaleIn(t *testing.T) {
+	installation, topology, objects := selectionFixture(t, 3)
+	installation.Spec.Central.Replicas = int32(len(topology.Members) - 1)
+	installation.Spec.Central.DynamicMembership = true
+	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{{Name: "retire-chart", RetireEndpoint: "chart-3-0"}}
+	objects = append(objects, chartDeploymentObjects(installation, "chart-3", "chart-3-0", "pod-3", "chart-rs", "chart-rs-uid")...)
+
+	request, err := SelectRemoval(t.Context(), selectionClient(t, objects), installation, topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request == nil || request.Add != nil || request.RemoveEndpoint != "chart-3-0" || request.Retirement == nil || request.Retirement.Kind != deploymentRetirementKind {
+		t.Fatalf("unexpected Chart Deployment scale-in request: %+v", request)
+	}
+	if _, _, err := canonical(*request); err != nil {
+		t.Fatalf("Chart Deployment scale-in request is not canonical: %v", err)
+	}
+}
+
 func TestSelectAdditionRequiresPinnedMemberObjectsAndBuildsBothDatabasePlan(t *testing.T) {
 	installation, topology, objects := selectionFixture(t, 1)
 	installation.Spec.Central.Replicas = 5
@@ -123,17 +142,23 @@ func TestSelectAdditionBuildsSameSizeReplacementForPinnedStatefulSet(t *testing.
 	}
 }
 
-func TestSelectAdditionRejectsReplacementOfChartDeployment(t *testing.T) {
-	installation, topology, objects := selectionFixture(t, 1)
+func TestSelectAdditionBuildsSameSizeReplacementForChartDeployment(t *testing.T) {
+	installation, topology, objects := selectionFixture(t, 3)
 	installation.Spec.Central.Replicas = int32(len(topology.Members))
 	installation.Spec.Central.DynamicMembership = true
 	member := memberRequest("member-replacement", "node-new", "claim-new", "volume-new", "192.0.2.99")
-	member.ReplaceEndpoint = "chart-1-0"
+	member.ReplaceEndpoint = "chart-3-0"
 	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{member}
 	objects = append(objects, memberObjects(installation, "node-new", "claim-new", "volume-new", "192.0.2.99")...)
+	objects = append(objects, chartDeploymentObjects(installation, "chart-3", "chart-3-0", "pod-3", "chart-rs", "chart-rs-uid")...)
 
-	if _, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology); err == nil || !strings.Contains(err.Error(), "independently managed") {
-		t.Fatalf("Chart Deployment replacement was accepted: %v", err)
+	topology.Members[3].Pod = health.ObjectIdentity{Name: "chart-3-0", UID: types.UID("pod-3")}
+	request, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request == nil || request.Retirement == nil || request.Retirement.Kind != deploymentRetirementKind || request.Retirement.Endpoint.Name != "chart-3-0" || request.Retirement.ReplicaSet.Name != "chart-rs" {
+		t.Fatalf("unexpected Chart Deployment replacement request: %+v", request)
 	}
 }
 
@@ -144,6 +169,25 @@ func TestSelectAdditionRejectsUnpinnedSlots(t *testing.T) {
 	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{{Name: "first"}}
 	if _, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology); err == nil || !strings.Contains(err.Error(), "requires node") {
 		t.Fatalf("expected incomplete member request to be rejected, got %v", err)
+	}
+}
+
+func TestSelectAdditionSkipsRetirementOnlySlots(t *testing.T) {
+	installation, topology, objects := selectionFixture(t, 1)
+	installation.Spec.Central.Replicas = 5
+	installation.Spec.Central.DynamicMembership = true
+	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{
+		{Name: "retire-chart", RetireEndpoint: "chart-0-0"},
+		memberRequest("member-new", "node-new", "claim-new", "volume-new", "192.0.2.99"),
+	}
+	objects = append(objects, memberObjects(installation, "node-new", "claim-new", "volume-new", "192.0.2.99")...)
+
+	request, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request == nil || request.Add == nil || request.Add.Workload.Preparation.MemberName != "member-new" {
+		t.Fatalf("retirement-only slot was selected as an addition: %+v", request)
 	}
 }
 
@@ -182,6 +226,34 @@ func memberObjects(installation *api.KubeOVNInstallation, nodeName, claimName, v
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, UID: types.UID(nodeName + "-uid")}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}, Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: address}}}},
 		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: installation.Namespace, UID: types.UID(claimName + "-uid")}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: volumeName}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
 		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: volumeName, UID: types.UID(volumeName + "-uid")}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Name: claimName, Namespace: installation.Namespace, UID: types.UID(claimName + "-uid")}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}},
+	}
+}
+
+func chartDeploymentObjects(installation *api.KubeOVNInstallation, deploymentName, targetName string, targetUID, replicaSetName, replicaSetUID string) []client.Object {
+	controller := true
+	labels := map[string]string{"app": "ovn-central"}
+	owner := metav1.OwnerReference{APIVersion: api.GroupVersion.String(), Kind: "KubeOVNInstallation", Name: installation.Name, UID: installation.UID, Controller: &controller}
+	deploymentOwner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "Deployment", Name: deploymentName, UID: types.UID("workload-3"), Controller: &controller}
+	image := "example/central@sha256:" + strings.Repeat("a", 64)
+	return []client.Object{
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: installation.Namespace, UID: types.UID("workload-3"), Labels: map[string]string{apply.ManagedByLabel: apply.ManagedByValue, apply.InstallationLabel: installation.Name, apply.InstallationNamespaceLabel: installation.Namespace, apply.InstallationUIDLabel: string(installation.UID)}, OwnerReferences: []metav1.OwnerReference{owner}},
+			Spec:       appsv1.DeploymentSpec{Replicas: new(int32(2)), Selector: &metav1.LabelSelector{MatchLabels: labels}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}, Spec: corev1.PodSpec{HostNetwork: true, Containers: []corev1.Container{{Name: "ovn-central", Image: image}}}}},
+		},
+		&appsv1.ReplicaSet{
+			ObjectMeta: metav1.ObjectMeta{Name: replicaSetName, Namespace: installation.Namespace, UID: types.UID(replicaSetUID), OwnerReferences: []metav1.OwnerReference{deploymentOwner}},
+			Spec:       appsv1.ReplicaSetSpec{Replicas: new(int32(2)), Selector: &metav1.LabelSelector{MatchLabels: labels}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}, Spec: corev1.PodSpec{HostNetwork: true, Containers: []corev1.Container{{Name: "ovn-central", Image: image}}}}},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: targetName, Namespace: installation.Namespace, UID: types.UID(targetUID), Labels: labels, OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: replicaSetName, UID: types.UID(replicaSetUID), Controller: &controller}}},
+			Spec:       corev1.PodSpec{NodeName: "node-3", HostNetwork: true, Containers: []corev1.Container{{Name: "ovn-central", Image: image}}},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: deploymentName + "-1", Namespace: installation.Namespace, UID: types.UID("pod-3-survivor"), Labels: labels, OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: replicaSetName, UID: types.UID(replicaSetUID), Controller: &controller}}},
+			Spec:       corev1.PodSpec{NodeName: "node-4", HostNetwork: true, Containers: []corev1.Container{{Name: "ovn-central", Image: image}}},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+		},
 	}
 }
 

@@ -46,6 +46,19 @@ func SelectRemoval(ctx context.Context, kube client.Reader, installation *api.Ku
 	case current-desired != 1:
 		return nil, fmt.Errorf("automatic central membership removal supports one member per transition; current=%d desired=%d", current, desired)
 	}
+	retireEndpoint := ""
+	for _, member := range installation.Spec.Central.MemberRequests {
+		if member.RetireEndpoint == "" {
+			continue
+		}
+		if retireEndpoint != "" && retireEndpoint != member.RetireEndpoint {
+			return nil, errors.New("central member retirement requires one explicit retireEndpoint")
+		}
+		retireEndpoint = member.RetireEndpoint
+	}
+	if retireEndpoint != "" && !installation.Spec.Central.DynamicMembership {
+		return nil, errors.New("explicit Deployment retirement requires central dynamicMembership=true")
+	}
 
 	type candidate struct {
 		endpoint   string
@@ -53,17 +66,36 @@ func SelectRemoval(ctx context.Context, kube client.Reader, installation *api.Ku
 	}
 	candidates := make([]candidate, 0, len(topology.Members))
 	for _, member := range topology.Members {
-		if member.Workload.Kind != "StatefulSet" || member.Pod.Name != member.Workload.Name+"-0" {
+		if retireEndpoint != "" && member.Pod.Name != retireEndpoint {
 			continue
 		}
-		retirement, err := PinRetirement(ctx, kube, installation, workload.Reference{Name: member.Workload.Name, UID: member.Workload.UID})
+		if retireEndpoint != "" && member.Workload.Kind == "StatefulSet" && member.Pod.Name != member.Workload.Name+"-0" {
+			return nil, errors.New("explicit retirement must identify the ordinal Pod of an independent StatefulSet")
+		}
+		if retireEndpoint == "" && (member.Workload.Kind != "StatefulSet" || member.Pod.Name != member.Workload.Name+"-0") {
+			continue
+		}
+		workloadRef := workload.Reference{Name: member.Workload.Name, UID: member.Workload.UID}
+		var retirement Retirement
+		var err error
+		switch member.Workload.Kind {
+		case "StatefulSet":
+			retirement, err = PinRetirement(ctx, kube, installation, workloadRef)
+		case "Deployment":
+			retirement, err = PinDeploymentRetirement(ctx, kube, installation, workloadRef, workload.Reference{Name: member.Pod.Name, UID: member.Pod.UID})
+		default:
+			err = errors.New("unsupported retained central workload kind")
+		}
 		if err != nil {
 			return nil, fmt.Errorf("cannot pin central member %s for retirement: %w", member.Workload.Name, err)
 		}
 		candidates = append(candidates, candidate{endpoint: member.Pod.Name, retirement: retirement})
 	}
 	if len(candidates) == 0 {
-		return nil, errors.New("central replica decrease is unsafe: no independently managed one-member StatefulSet can be retired; ordinary Chart multi-replica workloads are not selectable")
+		if retireEndpoint != "" {
+			return nil, fmt.Errorf("central replica decrease cannot find the requested retained endpoint %q", retireEndpoint)
+		}
+		return nil, errors.New("central replica decrease is unsafe: no independently managed one-member StatefulSet can be retired; ordinary Chart multi-replica workloads require an explicit retireEndpoint")
 	}
 	if len(candidates) != 1 {
 		return nil, fmt.Errorf("central replica decrease is ambiguous: %d independently managed members are eligible; an explicit retirement selection is required", len(candidates))
@@ -115,6 +147,11 @@ func SelectAddition(ctx context.Context, kube client.Reader, installation *api.K
 		if existing[workload.RecordName(string(installation.UID), member.Name)] {
 			continue
 		}
+		// Retirement-only entries select an existing Chart Pod for scale-in;
+		// they do not describe a workload that can be prepared and started.
+		if member.RetireEndpoint != "" {
+			continue
+		}
 		if desired == current && member.ReplaceEndpoint == "" {
 			continue
 		}
@@ -146,10 +183,20 @@ func SelectAddition(ctx context.Context, kube client.Reader, installation *api.K
 			return nil, errors.New("memberRequest.replaceEndpoint must identify a retained central Pod")
 		}
 		retained := topology.Members[index]
-		if retained.Workload.Kind != "StatefulSet" || retained.Pod.Name != retained.Workload.Name+"-0" {
-			return nil, errors.New("memberRequest.replaceEndpoint must identify an independently managed one-member StatefulSet")
+		workloadRef := workload.Reference{Name: retained.Workload.Name, UID: retained.Workload.UID}
+		var pinned Retirement
+		var err error
+		switch retained.Workload.Kind {
+		case "StatefulSet":
+			if retained.Pod.Name != retained.Workload.Name+"-0" {
+				return nil, errors.New("memberRequest.replaceEndpoint must identify the ordinal Pod of an independent StatefulSet")
+			}
+			pinned, err = PinRetirement(ctx, kube, installation, workloadRef)
+		case "Deployment":
+			pinned, err = PinDeploymentRetirement(ctx, kube, installation, workloadRef, workload.Reference{Name: retained.Pod.Name, UID: retained.Pod.UID})
+		default:
+			return nil, errors.New("memberRequest.replaceEndpoint must identify an owned Deployment or independent StatefulSet")
 		}
-		pinned, err := PinRetirement(ctx, kube, installation, workload.Reference{Name: retained.Workload.Name, UID: retained.Workload.UID})
 		if err != nil {
 			return nil, fmt.Errorf("cannot pin central member %s for replacement: %w", retained.Workload.Name, err)
 		}

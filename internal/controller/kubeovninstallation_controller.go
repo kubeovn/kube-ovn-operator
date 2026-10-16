@@ -803,7 +803,20 @@ func validateMemberRequestLifecycle(installation *operatorv1alpha1.KubeOVNInstal
 }
 
 func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstallation, request lifecycle.Request) error {
-	if installation == nil || request.Add == nil {
+	if installation == nil || request.Add == nil && request.RemoveEndpoint == "" {
+		return nil
+	}
+	if request.Add == nil {
+		for _, member := range installation.Spec.Central.MemberRequests {
+			if member.RetireEndpoint == request.RemoveEndpoint {
+				return nil
+			}
+		}
+		for _, member := range installation.Spec.Central.MemberRequests {
+			if member.RetireEndpoint != "" {
+				return fmt.Errorf("retirement member request changed after operation admission; restore retireEndpoint %q before retrying", request.RemoveEndpoint)
+			}
+		}
 		return nil
 	}
 	plan := request.Add.Workload.Preparation

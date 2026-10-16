@@ -15,15 +15,16 @@ topology baseline while retaining the old record. It admits one addition at a
 time when an unused `spec.central.memberRequests` entry pins the node, bound
 PVC/PV, digest-pinned image and NB/SB listener addresses. The original Chart
 Deployment remains at its retained count while the new member is prepared and
-started as an independently managed StatefulSet. Replica reductions still
-require exactly one independently managed, owned one-member `OnDelete`
-StatefulSet. Ambiguous retirement candidates and ordinary multi-replica Chart
-Deployments remain blocked with an explicit safety status; they cannot silently
-reapply the Chart. A request may set `replaceEndpoint` to combine the new
-member with removal of one exact retained StatefulSet Pod at the same replica
-count. The replacement pins the old workload UID and admitted spec before
-preparation and reuses the same joint NB/SB catch-up, backup, quorum and
-retirement gates.
+started as an independently managed StatefulSet. Replica reductions require
+one exact retirement candidate. An independently managed, owned one-member
+`OnDelete` StatefulSet can be selected automatically; an ordinary multi-replica
+Chart Deployment requires a request with `retireEndpoint`, which pins one
+exact Pod, its ReplicaSet and every surviving Pod before a one-step scale-in.
+A request may set `replaceEndpoint` to combine the new member with removal of
+one exact retained StatefulSet or Chart Deployment Pod at the same replica
+count. The replacement pins the old workload UID, ReplicaSet UID when
+applicable and admitted spec before preparation and reuses the same joint
+NB/SB catch-up, backup, quorum and retirement gates.
 
 ## Durable contract
 
@@ -77,16 +78,20 @@ four-member configuration is the final desired replica count.
 ## Retirement and remaining integration
 
 `PinRetirement` accepts only an owned one-member `OnDelete` StatefulSet with
-external storage, pinning its UID and complete admitted spec. Retirement uses a
-resourceVersion-checked replica update; any unrelated spec or identity change
-blocks it. It retains the zero-replica StatefulSet, PVCs, PVs and identity records.
-It does not remove a Namespace, database or persistent volume.
+external storage, pinning its UID and complete admitted spec. Deployment
+retirement uses `PinDeploymentRetirement` to pin the Deployment UID, one stable
+ReplicaSet UID, the target Pod UID and all surviving Pod UIDs. It sets the
+target's `controller.kubernetes.io/pod-deletion-cost` to the minimum value,
+then performs one resourceVersion-checked scale-down after joint membership
+convergence. The executor waits for the target Pod to disappear and blocks if
+any survivor is replaced or lost. StatefulSet retirement retains the
+zero-replica StatefulSet; both paths retain storage and identity records. They
+do not remove a Namespace, database or persistent volume.
 
-An ordinary multi-replica Chart Deployment cannot guarantee which member a
-replica decrease removes. Migrating those workloads to independently managed
-members remains a prerequisite for their retirement through this executor.
-The default selector requires one and only one eligible independent member; it
-does not infer a target from replica ordering or pod names. A desired increase
+Replica count alone never identifies a safe Deployment member. The selector
+requires one and only one implicit StatefulSet candidate, or an explicit
+`retireEndpoint` for a Chart Deployment. It does not infer a target from
+replica ordering or pod names. A desired increase
 requires a complete explicit member request, including node, bound PVC/PV,
 runtime image and listener addresses, and is therefore not synthesized from
 Chart values. Member requests are additions to an installation with a retained
@@ -94,10 +99,10 @@ topology; the initial Chart install must establish that baseline first. The
 provisioner creates the native preparation result during the durable `Preparing` phase; callers do not inject generated server IDs.
 Runtime image publication/selection, automatic storage and TLS Secret lifecycle,
 node placement/changes, lifecycle-authorized inventory transitions and generation transitions,
-broader Chart workload handoff and post-transition network checks remain part of
-controller integration. The selected one-step reduction path authorizes and
-records its next apply checkpoint after the immutable completion receipt and
-successor topology are pinned.
+broader automatic Chart workload migration and post-transition network checks
+remain part of controller integration. The selected one-step reduction path
+authorizes and records its next apply checkpoint after the immutable completion
+receipt and successor topology are pinned.
 
 Backup pairs are conservative sampled fences, not atomic cross-database snapshots
 or an application write barrier. Continuous writes can prevent a matching pair

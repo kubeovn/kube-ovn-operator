@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"uuid"
@@ -532,6 +533,72 @@ func TestRetirementWaitsForPodsAndRejectsSpecChanges(t *testing.T) {
 	if _, err := f.step(t, ref); err == nil {
 		t.Fatal("retirement accepted changed workload spec")
 	}
+}
+
+func TestDeploymentRetirementPinsTargetAndScalesOnlyThatPod(t *testing.T) {
+	f := setup(t)
+	old := new(appsv1.StatefulSet)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: "old"}, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kube.Delete(t.Context(), old); err != nil {
+		t.Fatal(err)
+	}
+	controller := true
+	labels := map[string]string{"app": "ovn-central"}
+	owner := metav1.OwnerReference{APIVersion: api.GroupVersion.String(), Kind: "KubeOVNInstallation", Name: f.installation.Name, UID: f.installation.UID, Controller: &controller}
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: "test", Labels: map[string]string{apply.ManagedByLabel: apply.ManagedByValue, apply.InstallationLabel: f.installation.Name, apply.InstallationNamespaceLabel: f.installation.Namespace, apply.InstallationUIDLabel: string(f.installation.UID)}, OwnerReferences: []metav1.OwnerReference{owner}}, Spec: appsv1.DeploymentSpec{Replicas: new(int32(2)), Selector: &metav1.LabelSelector{MatchLabels: labels}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}, Spec: corev1.PodSpec{HostNetwork: true, Containers: []corev1.Container{{Name: "ovn-central", Image: f.request.Add.Workload.Image}}}}}}
+	if err := f.kube.Create(t.Context(), deployment); err != nil {
+		t.Fatal(err)
+	}
+	deploymentOwner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "Deployment", Name: deployment.Name, UID: deployment.UID, Controller: &controller}
+	replicaSet := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "old-rs", Namespace: "test", OwnerReferences: []metav1.OwnerReference{deploymentOwner}}, Spec: appsv1.ReplicaSetSpec{Replicas: new(int32(2)), Selector: &metav1.LabelSelector{MatchLabels: labels}, Template: deployment.Spec.Template}}
+	if err := f.kube.Create(t.Context(), replicaSet); err != nil {
+		t.Fatal(err)
+	}
+	podOwner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: replicaSet.Name, UID: replicaSet.UID, Controller: &controller}
+	ready := corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+	for _, pod := range []*corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "old-0", Namespace: "test", OwnerReferences: []metav1.OwnerReference{podOwner}}, Spec: corev1.PodSpec{NodeName: "node-a", HostNetwork: true, Containers: []corev1.Container{{Name: "ovn-central", Image: f.request.Add.Workload.Image}}}, Status: ready}, {ObjectMeta: metav1.ObjectMeta{Name: "old-1", Namespace: "test", OwnerReferences: []metav1.OwnerReference{podOwner}}, Spec: corev1.PodSpec{NodeName: "node-b", HostNetwork: true, Containers: []corev1.Container{{Name: "ovn-central", Image: f.request.Add.Workload.Image}}}, Status: ready}} {
+		if err := f.kube.Create(t.Context(), pod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	targetPod := new(corev1.Pod)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: "old-0"}, targetPod); err != nil {
+		t.Fatal(err)
+	}
+	retirement, err := PinDeploymentRetirement(t.Context(), f.kube, f.installation, workload.Reference{Name: "old", UID: deployment.UID}, workload.Reference{Name: "old-0", UID: targetPod.UID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.request.Retirement = &retirement
+	ref := f.started(t)
+	for i := range 2 {
+		f.join(i, true)
+	}
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Retiring)
+	f.mustStep(t, ref, Retiring)
+	current := new(appsv1.Deployment)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: "old"}, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Spec.Replicas == nil || *current.Spec.Replicas != 1 {
+		t.Fatalf("Deployment was not scaled by one: %v", current.Spec.Replicas)
+	}
+	target := new(corev1.Pod)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: "old-0"}, target); err != nil {
+		t.Fatal(err)
+	}
+	if target.Annotations[podDeletionCostAnnotation] != strconv.Itoa(minimumPodDeletionCost) {
+		t.Fatalf("target Pod was not prioritized: %#v", target.Annotations)
+	}
+	if err := f.kube.Delete(t.Context(), target); err != nil {
+		t.Fatal(err)
+	}
+	f.mustStep(t, ref, Complete)
 }
 
 func TestCanonicalDoesNotMutateCallerAndRejectsIncompleteInventories(t *testing.T) {

@@ -112,6 +112,15 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 			if member.ReplaceEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.ReplaceEndpoint)) != 0 {
 				errs = append(errs, fmt.Errorf("central.memberRequests[%q].replaceEndpoint must be a DNS subdomain", member.Name))
 			}
+			if member.RetireEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.RetireEndpoint)) != 0 {
+				errs = append(errs, fmt.Errorf("central.memberRequests[%q].retireEndpoint must be a DNS subdomain", member.Name))
+			}
+			if member.ReplaceEndpoint != "" && member.RetireEndpoint != "" {
+				errs = append(errs, fmt.Errorf("central.memberRequests[%q] cannot set both replaceEndpoint and retireEndpoint", member.Name))
+			}
+			if member.RetireEndpoint != "" && member.ReplaceEndpoint == "" {
+				continue
+			}
 			for field, value := range map[string]string{
 				"nodeName":                member.NodeName,
 				"claimName":               member.ClaimName,

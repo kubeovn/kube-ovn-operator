@@ -86,3 +86,17 @@ func TestValidateMemberRequestReplacementEndpoint(t *testing.T) {
 		t.Fatalf("invalid replacement endpoint was accepted: %v", errors)
 	}
 }
+
+func TestValidateMemberRequestRetirementEndpoint(t *testing.T) {
+	spec := operatorv1alpha1.KubeOVNInstallationSpec{
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire", RetireEndpoint: "ovn-central-abc-0"}}},
+	}
+	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
+		t.Fatalf("valid retirement-only request was rejected: %v", errors)
+	}
+	spec.Central.MemberRequests[0].ReplaceEndpoint = "ovn-central-abc-0"
+	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "both replaceEndpoint and retireEndpoint") {
+		t.Fatalf("conflicting retirement and replacement endpoints were accepted: %v", errors)
+	}
+}

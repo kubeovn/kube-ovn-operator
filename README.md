@@ -45,11 +45,12 @@ the independent StatefulSet converges. Replica count alone never selects a
 member. These requests describe additions to an installation with a retained
 topology; the initial Chart install must omit them and add them only after the
 first retained topology is recorded. Set `replaceEndpoint` on a request to
-replace one exact retained, independently managed one-member StatefulSet Pod at
-the same replica count; the endpoint, workload UID and full retirement spec are
-pinned before the replacement starts. Ordinary multi-replica Chart Deployment
-members remain ineligible because Kubernetes cannot identify a safe Pod and
-storage handoff for them. Adoption is available through an explicit
+replace one exact retained central Pod at the same replica count; the endpoint,
+workload UID, ReplicaSet UID (for a Chart Deployment) and full retirement spec
+are pinned before the replacement starts. Set `retireEndpoint` on a
+retirement-only request to select one exact Chart Deployment Pod for a one-step
+scale-in. The controller uses Pod deletion cost and verifies every surviving
+Pod UID before accepting the Deployment handoff. Adoption is available through an explicit
 selector and only claims ownership of resources that already exist.
 
 `internal/apply` checks ownership with uncached reads, dry-runs the complete
@@ -183,11 +184,10 @@ authorizes startup and observes both databases catching up before removal.
 A backup capture and verification adapter is available as described below.
 The durable approval adapter is described below. Default-controller operation
 selection admits one addition at a time from an explicit `memberRequests` entry
-and admits reductions only when the retained topology has exactly one
-independently managed, single-member `OnDelete` StatefulSet that can be pinned
-for retirement. Ordinary multi-replica Chart workloads remain blocked until
-their member handoff is implemented. Production wiring and strict in-flight
-fencing remain required for broader automatic membership changes.
+and admits reductions only when the retained endpoint is either an exactly
+one-member `OnDelete` StatefulSet or an explicitly selected stable Chart
+Deployment Pod. Production wiring and strict in-flight fencing remain required
+for broader automatic membership changes.
 
 ## New member preparation
 
@@ -278,14 +278,15 @@ resourceVersion-guarded installation journal before preparing, starting or remov
 members. `NewKubernetes` connects the actual workload, pod admin, backup and
 approval providers. Its inventory includes temporarily added peers, independently
 of the final replica count. Both databases must catch up before either old member
-can leave; both must converge before the exact old one-member StatefulSet is
-scaled to zero. Completion waits for its Pods to disappear and retains storage.
+can leave; both must converge before the exact old StatefulSet is scaled to zero
+or the selected Chart Deployment is scaled down by one. Completion waits for the
+target Pod to disappear and retains storage.
 
 Reconstructed executors recover partial NB/SB transitions, lost responses and
 the original completion receipt. A changed identity, missing retained member,
-lost quorum or stale backup blocks progress. Ordinary Chart Deployment retirement,
-node selection, generation transitions and default-controller apply-checkpoint
-wiring remain open. See [joint lifecycle contract](docs/joint-lifecycle.md).
+lost quorum or stale backup blocks progress. Node selection, generation
+transitions, strict in-flight fencing and broader Deployment migration remain
+open. See [joint lifecycle contract](docs/joint-lifecycle.md).
 
 ## Permanent-loss approvals
 
