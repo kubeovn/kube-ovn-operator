@@ -475,7 +475,8 @@ func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Cont
 			if err != nil {
 				return err
 			}
-			if installation.Spec.Central.Replicas > int32(len(retained.Members)) {
+			replacement := installation.Spec.Central.Replicas == int32(len(retained.Members)) && hasMemberReplacementRequest(installation)
+			if installation.Spec.Central.Replicas > int32(len(retained.Members)) || replacement {
 				request, err = lifecycle.SelectAddition(centralCtx, r.Lifecycle.Reader(), installation, retained)
 			} else {
 				request, err = lifecycle.SelectRemoval(centralCtx, r.Lifecycle.Reader(), installation, retained)
@@ -514,6 +515,18 @@ func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Cont
 		return false, err
 	}
 	return true, nil
+}
+
+func hasMemberReplacementRequest(installation *operatorv1alpha1.KubeOVNInstallation) bool {
+	if installation == nil || !installation.Spec.Central.DynamicMembership {
+		return false
+	}
+	for _, member := range installation.Spec.Central.MemberRequests {
+		if member.ReplaceEndpoint != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, rendered chart.Rendered) error {
@@ -808,7 +821,7 @@ func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstal
 		if member.Name != memberName {
 			continue
 		}
-		if member.NodeName != request.Add.Workload.Node.Name || member.ClaimName != request.Add.Workload.Claim.Name || member.VolumeName != request.Add.Workload.Volume.Name || member.Image != request.Add.Workload.Image || member.NorthboundAddress != northboundAddress || member.SouthboundAddress != southboundAddress || member.NorthboundClientAddress != request.Add.NorthboundAddress || member.SouthboundClientAddress != request.Add.SouthboundAddress {
+		if member.NodeName != request.Add.Workload.Node.Name || member.ClaimName != request.Add.Workload.Claim.Name || member.VolumeName != request.Add.Workload.Volume.Name || member.Image != request.Add.Workload.Image || member.NorthboundAddress != northboundAddress || member.SouthboundAddress != southboundAddress || member.NorthboundClientAddress != request.Add.NorthboundAddress || member.SouthboundClientAddress != request.Add.SouthboundAddress || member.ReplaceEndpoint != request.RemoveEndpoint {
 			return fmt.Errorf("lifecycle member request %q changed after operation admission; restore the pinned node, storage, image and NB/SB addresses before retrying", memberName)
 		}
 		return nil

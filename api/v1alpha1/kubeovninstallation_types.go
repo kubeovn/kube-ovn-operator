@@ -78,9 +78,12 @@ type CentralSpec struct {
 
 // CentralMemberSpec is an explicit, pre-provisioned member slot. The claim
 // and volume must already be Bound to the selected node; the operator records
-// their live UIDs before creating a preparation Job or StatefulSet.
+// their live UIDs before creating a preparation Job or StatefulSet. When
+// replaceEndpoint is set, the slot is a same-size replacement for the pinned
+// old one-member StatefulSet endpoint.
 type CentralMemberSpec struct {
 	Name                    string `json:"name"`
+	ReplaceEndpoint         string `json:"replaceEndpoint,omitempty"`
 	NodeName                string `json:"nodeName"`
 	ClaimName               string `json:"claimName"`
 	VolumeName              string `json:"volumeName"`

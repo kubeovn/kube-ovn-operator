@@ -59,11 +59,14 @@ approval evidence through the lifecycle executor before any mutation.
 
 Baseline transitions require explicit lifecycle completion evidence; this module
 does not absorb external topology changes automatically. The default controller
-can select one safe replica reduction from a retained inventory only when an
-exactly one-member independent StatefulSet is pinned successfully. Additions,
-ambiguous reductions, ordinary Chart Deployments and broader old Deployment
-handoff remain open. The selected path can authorize its next apply checkpoint
-only after the immutable completion receipt and successor baseline are pinned;
+can select one safe replica reduction or an explicit same-size replacement only
+when the old member is an exactly one-member independent StatefulSet pinned
+successfully. A replacement uses
+`central.memberRequests[].replaceEndpoint` to bind the old Pod endpoint,
+workload UID and admitted spec before adding the new member. Ambiguous
+reductions, ordinary Chart Deployments and broader old Deployment handoff
+remain blocked. The selected path can authorize its next apply checkpoint only
+after the immutable completion receipt and successor baseline are pinned;
 strict in-flight fencing remains open. Joint observations are samples, not an
 atomic NB/SB snapshot. Retained metadata assumes trusted Kubernetes writers and
 cannot authenticate against an actor able to rewrite both records and status.

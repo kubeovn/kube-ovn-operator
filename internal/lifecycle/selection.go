@@ -94,14 +94,16 @@ func SelectAddition(ctx context.Context, kube client.Reader, installation *api.K
 	if err := topology.Validate(); err != nil {
 		return nil, fmt.Errorf("retained topology is not selectable: %w", err)
 	}
+	if !installation.Spec.Central.DynamicMembership {
+		return nil, errors.New("central dynamicMembership must be enabled for automatic member addition or replacement")
+	}
 	desired, current := int(installation.Spec.Central.Replicas), len(topology.Members)
 	switch {
 	case desired == current:
-		return nil, nil
+		// A same-size transition is an explicit replacement. It must name the
+		// old endpoint because replica count cannot identify a member to retire.
 	case desired < current:
 		return nil, errors.New("automatic membership addition cannot reduce the retained member count")
-	case !installation.Spec.Central.DynamicMembership:
-		return nil, errors.New("central dynamicMembership must be enabled for automatic member addition")
 	}
 
 	existing := make(map[string]bool, len(topology.Members))
@@ -113,15 +115,45 @@ func SelectAddition(ctx context.Context, kube client.Reader, installation *api.K
 		if existing[workload.RecordName(string(installation.UID), member.Name)] {
 			continue
 		}
+		if desired == current && member.ReplaceEndpoint == "" {
+			continue
+		}
 		available = append(available, member)
 	}
 	if len(available) == 0 {
+		if desired == current {
+			return nil, nil
+		}
 		return nil, errors.New("central membership increase requires one explicit unused memberRequest")
 	}
 	slices.SortFunc(available, func(a, b api.CentralMemberSpec) int { return cmp.Compare(a.Name, b.Name) })
 	member := available[0]
 	if err := validateMemberSpec(member); err != nil {
 		return nil, err
+	}
+	if desired > current && member.ReplaceEndpoint != "" {
+		return nil, errors.New("memberRequest.replaceEndpoint requires a same-size central replacement")
+	}
+	var retirement *Retirement
+	if member.ReplaceEndpoint != "" {
+		if desired != current {
+			return nil, errors.New("memberRequest.replaceEndpoint requires replicas to match the retained member count")
+		}
+		index := slices.IndexFunc(topology.Members, func(retained health.CentralIdentity) bool {
+			return retained.Pod.Name == member.ReplaceEndpoint
+		})
+		if index < 0 {
+			return nil, errors.New("memberRequest.replaceEndpoint must identify a retained central Pod")
+		}
+		retained := topology.Members[index]
+		if retained.Workload.Kind != "StatefulSet" || retained.Pod.Name != retained.Workload.Name+"-0" {
+			return nil, errors.New("memberRequest.replaceEndpoint must identify an independently managed one-member StatefulSet")
+		}
+		pinned, err := PinRetirement(ctx, kube, installation, workload.Reference{Name: retained.Workload.Name, UID: retained.Workload.UID})
+		if err != nil {
+			return nil, fmt.Errorf("cannot pin central member %s for replacement: %w", retained.Workload.Name, err)
+		}
+		retirement = &pinned
 	}
 
 	node := new(corev1.Node)
@@ -172,6 +204,10 @@ func SelectAddition(ctx context.Context, kube client.Reader, installation *api.K
 		Workload:          workload.Request{InstallationGeneration: installation.Generation, Preparation: canonicalPlan, Node: workload.Reference{Name: node.Name, UID: node.UID}, Claim: workload.Reference{Name: claim.Name, UID: claim.UID}, Volume: workload.Reference{Name: volume.Name, UID: volume.UID}, Image: member.Image},
 		NorthboundAddress: member.NorthboundClientAddress, SouthboundAddress: member.SouthboundClientAddress,
 	}}
+	if retirement != nil {
+		request.RemoveEndpoint = member.ReplaceEndpoint
+		request.Retirement = retirement
+	}
 	if err := request.launch(prepare.Result{}).Validate(); err != nil {
 		return nil, fmt.Errorf("validate member launch addresses: %w", err)
 	}
@@ -181,6 +217,9 @@ func SelectAddition(ctx context.Context, kube client.Reader, installation *api.K
 func validateMemberSpec(member api.CentralMemberSpec) error {
 	if len(validation.IsDNS1123Label(member.Name)) != 0 {
 		return errors.New("memberRequest.name must be a DNS label")
+	}
+	if member.ReplaceEndpoint != "" && len(validation.IsDNS1123Subdomain(member.ReplaceEndpoint)) != 0 {
+		return errors.New("memberRequest.replaceEndpoint must be a DNS subdomain")
 	}
 	for _, value := range []string{member.NodeName, member.ClaimName, member.VolumeName, member.Image, member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
 		if strings.TrimSpace(value) == "" {

@@ -99,6 +99,44 @@ func TestSelectAdditionRequiresPinnedMemberObjectsAndBuildsBothDatabasePlan(t *t
 	}
 }
 
+func TestSelectAdditionBuildsSameSizeReplacementForPinnedStatefulSet(t *testing.T) {
+	installation, topology, objects := selectionFixture(t, 1)
+	installation.Spec.Central.Replicas = int32(len(topology.Members))
+	installation.Spec.Central.DynamicMembership = true
+	member := memberRequest("member-replacement", "node-new", "claim-new", "volume-new", "192.0.2.99")
+	member.ReplaceEndpoint = "member-0-0"
+	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{member}
+	objects = append(objects, memberObjects(installation, "node-new", "claim-new", "volume-new", "192.0.2.99")...)
+
+	request, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request == nil || request.Add == nil || request.RemoveEndpoint != member.ReplaceEndpoint || request.Retirement == nil {
+		t.Fatalf("unexpected same-size replacement request: %+v", request)
+	}
+	if request.Retirement.Workload.Name != "member-0" || request.Add.Workload.Preparation.MemberName != member.Name {
+		t.Fatalf("replacement did not bind old and new workload identities: %+v", request)
+	}
+	if _, _, err := canonical(*request); err != nil {
+		t.Fatalf("same-size replacement request is not canonical: %v", err)
+	}
+}
+
+func TestSelectAdditionRejectsReplacementOfChartDeployment(t *testing.T) {
+	installation, topology, objects := selectionFixture(t, 1)
+	installation.Spec.Central.Replicas = int32(len(topology.Members))
+	installation.Spec.Central.DynamicMembership = true
+	member := memberRequest("member-replacement", "node-new", "claim-new", "volume-new", "192.0.2.99")
+	member.ReplaceEndpoint = "chart-1-0"
+	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{member}
+	objects = append(objects, memberObjects(installation, "node-new", "claim-new", "volume-new", "192.0.2.99")...)
+
+	if _, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology); err == nil || !strings.Contains(err.Error(), "independently managed") {
+		t.Fatalf("Chart Deployment replacement was accepted: %v", err)
+	}
+}
+
 func TestSelectAdditionRejectsUnpinnedSlots(t *testing.T) {
 	installation, topology, objects := selectionFixture(t, 1)
 	installation.Spec.Central.Replicas = 5

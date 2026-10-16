@@ -242,7 +242,9 @@ installations skip them; external/HCP verification still awaits peer evidence.
    The default controller now retains and verifies the initial complete local RAFT
    identity inventory and admits explicit `central.memberRequests` additions one
    at a time while retaining the Chart Deployment count; these requests are
-   accepted only after that initial retained topology exists; see [central topology](central-topology.md).
+   accepted only after that initial retained topology exists. A request can also
+   set `replaceEndpoint` to replace one pinned independent StatefulSet member at
+   the same replica count; see [central topology](central-topology.md).
    Migrate ordinary Chart Deployments to independently controlled members.
    Validate node replacement and every intermediate quorum state before enabling
    automatic changes.

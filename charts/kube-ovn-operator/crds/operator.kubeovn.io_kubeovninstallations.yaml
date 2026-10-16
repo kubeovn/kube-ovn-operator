@@ -68,6 +68,7 @@ spec:
                         required: [name, nodeName, claimName, volumeName, image, northboundAddress, southboundAddress, northboundClientAddress, southboundClientAddress]
                         properties:
                           name: {type: string, minLength: 1}
+                          replaceEndpoint: {type: string, minLength: 1}
                           nodeName: {type: string, minLength: 1}
                           claimName: {type: string, minLength: 1}
                           volumeName: {type: string, minLength: 1}

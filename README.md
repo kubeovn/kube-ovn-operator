@@ -44,7 +44,12 @@ and keeps the original Chart Deployment at its retained replica count while
 the independent StatefulSet converges. Replica count alone never selects a
 member. These requests describe additions to an installation with a retained
 topology; the initial Chart install must omit them and add them only after the
-first retained topology is recorded. Adoption is available through an explicit
+first retained topology is recorded. Set `replaceEndpoint` on a request to
+replace one exact retained, independently managed one-member StatefulSet Pod at
+the same replica count; the endpoint, workload UID and full retirement spec are
+pinned before the replacement starts. Ordinary multi-replica Chart Deployment
+members remain ineligible because Kubernetes cannot identify a safe Pod and
+storage handoff for them. Adoption is available through an explicit
 selector and only claims ownership of resources that already exist.
 
 `internal/apply` checks ownership with uncached reads, dry-runs the complete

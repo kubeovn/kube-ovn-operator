@@ -109,6 +109,9 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 			if len(kvalidation.IsDNS1123Label(member.Name)) != 0 {
 				errs = append(errs, fmt.Errorf("central.memberRequests name %q must be a DNS label", member.Name))
 			}
+			if member.ReplaceEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.ReplaceEndpoint)) != 0 {
+				errs = append(errs, fmt.Errorf("central.memberRequests[%q].replaceEndpoint must be a DNS subdomain", member.Name))
+			}
 			for field, value := range map[string]string{
 				"nodeName":                member.NodeName,
 				"claimName":               member.ClaimName,

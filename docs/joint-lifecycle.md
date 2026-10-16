@@ -19,7 +19,11 @@ started as an independently managed StatefulSet. Replica reductions still
 require exactly one independently managed, owned one-member `OnDelete`
 StatefulSet. Ambiguous retirement candidates and ordinary multi-replica Chart
 Deployments remain blocked with an explicit safety status; they cannot silently
-reapply the Chart.
+reapply the Chart. A request may set `replaceEndpoint` to combine the new
+member with removal of one exact retained StatefulSet Pod at the same replica
+count. The replacement pins the old workload UID and admitted spec before
+preparation and reuses the same joint NB/SB catch-up, backup, quorum and
+retirement gates.
 
 ## Durable contract
 
