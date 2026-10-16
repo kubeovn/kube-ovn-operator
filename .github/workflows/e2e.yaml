@@ -74,3 +74,4 @@ jobs:
         run: |
           kubectl get kubeovninstallations,deployments,replicasets,pods,pvc,pv,configmaps -A -o wide || true
           kubectl get events -A --sort-by=.metadata.creationTimestamp || true
+          kubectl logs -n kube-ovn-operator-system -l app=ovn-central --all-containers --prefix --tail=100 || true
