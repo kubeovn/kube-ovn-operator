@@ -283,6 +283,19 @@ reason and expiry. The caller pins the approval name and UID. Creation permissio
 is the approval authority; a self-reported `approvedBy` field is not authority.
 The existing recovery request's `approvedBy` value cannot authorize a kick.
 
+`KubeOVNRecoveryRequest` now resolves its namespaced installation reference,
+pins the installation UID and generation, validates the requested mode and
+expiry, and requires `backupRef` to match the installation's verified backup
+pair for `reconvert` and `freshBootstrap`. It records a deterministic
+identity-bound plan in status and moves valid requests to
+`AwaitingExecution`. `approvedBy` is included in the plan digest for audit but
+is never treated as an authorization signal. Recreated installations, changed
+request generations, expired requests, HCP targets and mismatched backups are
+fenced with terminal status reasons. An explicit `RecoveryExecutor` is the
+only integration point that can move a plan through `Executing` to `Succeeded`;
+the default operator leaves that adapter unset and therefore performs no
+database or storage mutation.
+
 `internal/approval.Provider` reserves the immutable decision in status before
 dispatch, permits retries for the same operation, and records completion only
 when all approved databases have quorum and no longer contain the old server.
