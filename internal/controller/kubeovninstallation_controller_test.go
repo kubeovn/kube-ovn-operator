@@ -11,11 +11,13 @@ import (
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
+	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
 	"github.com/kubeovn/kube-ovn-operator/internal/prepare"
+	"github.com/kubeovn/kube-ovn-operator/internal/topology"
 	"github.com/kubeovn/kube-ovn-operator/internal/workload"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -866,6 +868,142 @@ func TestValidateLifecycleMemberRequestPinsCurrentSpec(t *testing.T) {
 	if err := validateLifecycleMemberRequest(installation, request); err == nil || !strings.Contains(err.Error(), "was removed") {
 		t.Fatalf("member request removal was not rejected: %v", err)
 	}
+}
+
+type lifecycleCoordinatorFake struct {
+	reader    client.Reader
+	begin     int
+	request   lifecycle.Request
+	reference lifecycle.Reference
+}
+
+func (f *lifecycleCoordinatorFake) Reader() client.Reader { return f.reader }
+
+func (f *lifecycleCoordinatorFake) SetStoreFactory(func(*operatorv1alpha1.KubeOVNInstallation) (backup.Store, error)) {
+}
+
+func (f *lifecycleCoordinatorFake) Begin(_ context.Context, _ *operatorv1alpha1.KubeOVNInstallation, request lifecycle.Request) (lifecycle.Reference, error) {
+	f.begin++
+	f.request = request
+	return f.reference, nil
+}
+
+func (f *lifecycleCoordinatorFake) Resume(context.Context, *operatorv1alpha1.KubeOVNInstallation, *operatorv1alpha1.CentralOperationReference) (*lifecycle.Recovery, error) {
+	return nil, nil
+}
+
+func (f *lifecycleCoordinatorFake) ProtectedBackupRefs(context.Context, *operatorv1alpha1.KubeOVNInstallation, *operatorv1alpha1.CentralOperationReference) ([]string, error) {
+	return nil, nil
+}
+
+func (f *lifecycleCoordinatorFake) CleanupBackups(context.Context, *operatorv1alpha1.KubeOVNInstallation, backup.RetentionPolicy, []string, time.Time) (backup.RetentionResult, error) {
+	return backup.RetentionResult{}, nil
+}
+
+func (f *lifecycleCoordinatorFake) CaptureBackupPair(context.Context, *operatorv1alpha1.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding) (*operatorv1alpha1.BackupStatus, error) {
+	return nil, nil
+}
+
+func (f *lifecycleCoordinatorFake) VerifyBackupPair(context.Context, *operatorv1alpha1.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding, *operatorv1alpha1.BackupStatus) error {
+	return nil
+}
+
+var _ lifecycleCoordinator = (*lifecycleCoordinatorFake)(nil)
+
+type lifecycleTopologyFake struct {
+	ref      *operatorv1alpha1.CentralTopologyReference
+	retained health.CentralTopology
+}
+
+func (f *lifecycleTopologyFake) Ensure(context.Context, *operatorv1alpha1.KubeOVNInstallation) (*operatorv1alpha1.CentralTopologyReference, error) {
+	return f.ref, nil
+}
+
+func (f *lifecycleTopologyFake) VerifyRetained(context.Context, *operatorv1alpha1.KubeOVNInstallation) (*operatorv1alpha1.CentralTopologyReference, error) {
+	return f.ref, nil
+}
+
+func (f *lifecycleTopologyFake) Retained(context.Context, *operatorv1alpha1.KubeOVNInstallation) (health.CentralTopology, error) {
+	return f.retained, nil
+}
+
+var _ topology.Provider = (*lifecycleTopologyFake)(nil)
+var _ topology.InventoryProvider = (*lifecycleTopologyFake)(nil)
+
+func TestReconcileSelectsAndPersistsAnAdditionFromLiveMemberObjects(t *testing.T) {
+	installation := &operatorv1alpha1.KubeOVNInstallation{
+		ObjectMeta: metav1.ObjectMeta{Name: "addition", Namespace: "default", UID: types.UID("addition-uid"), Generation: 2},
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
+				Name: "member-new", NodeName: "node-new", ClaimName: "claim-new", VolumeName: "volume-new",
+				Image:             "example/central@sha256:" + strings.Repeat("a", 64),
+				NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644",
+				NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642",
+			}}},
+		},
+	}
+	previous := installation.Spec
+	previous.Central.Replicas = 3
+	previous.Central.MemberRequests = nil
+	previousJSON, err := stdjson.Marshal(previous, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := &operatorv1alpha1.CentralTopologyReference{Name: "inventory", UID: types.UID("inventory-uid"), Digest: "sha256:" + strings.Repeat("b", 64)}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(previousJSON)), Version: previous.Version}
+	installation.Status.Topology.Inventory = ref
+
+	retained := additionTopologyFixture()
+	objects := make([]client.Object, 0, 4)
+	objects = append(objects,
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-new", UID: types.UID("node-new-uid")}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}, Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "192.0.2.99"}}}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim-new", Namespace: "default", UID: types.UID("claim-new-uid")}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "volume-new"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
+		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "volume-new", UID: types.UID("volume-new-uid")}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Name: "claim-new", Namespace: "default", UID: types.UID("claim-new-uid")}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}},
+	)
+	objects = append(objects, installation)
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation).WithObjects(objects...).Build()
+	lifecycleFake := &lifecycleCoordinatorFake{reader: kube, reference: lifecycle.Reference{Journal: workload.Reference{Name: "journal", UID: types.UID("journal-uid")}, Request: workload.Reference{Name: "request", UID: types.UID("request-uid")}}}
+	topologyFake := &lifecycleTopologyFake{ref: ref, retained: retained}
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: controllerScheme(t), Leases: lease.New(kube), Topology: topologyFake, Lifecycle: lifecycleFake}
+	result, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: clientKey(installation)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != 10*time.Second || lifecycleFake.begin != 1 || lifecycleFake.request.Add == nil || lifecycleFake.request.Add.Workload.Preparation.MemberName != "member-new" {
+		t.Fatalf("default controller did not admit the expected addition: result=%+v begin=%d request=%+v", result, lifecycleFake.begin, lifecycleFake.request)
+	}
+	got := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), clientKey(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Topology.Operation == nil || got.Status.Topology.Operation.JournalUID != types.UID("journal-uid") || got.Status.Topology.Operation.RequestUID != types.UID("request-uid") {
+		t.Fatalf("addition operation was not durably recorded: %+v", got.Status.Topology.Operation)
+	}
+}
+
+func additionTopologyFixture() health.CentralTopology {
+	topology := health.CentralTopology{Members: make([]health.CentralIdentity, 0, 3)}
+	for index := 0; index < 3; index++ {
+		member := health.CentralIdentity{
+			Node:        health.ObjectIdentity{Name: fmt.Sprintf("node-%d", index), UID: types.UID(fmt.Sprintf("node-uid-%d", index))},
+			Workload:    health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: fmt.Sprintf("central-%d", index), UID: types.UID(fmt.Sprintf("workload-uid-%d", index))}, Kind: "Deployment"},
+			Storage:     []health.StorageIdentity{{MountPath: "/var/lib/ovn-member", HostPath: fmt.Sprintf("/var/lib/ovn/%d", index)}},
+			Pod:         health.ObjectIdentity{Name: fmt.Sprintf("central-%d-pod", index), UID: types.UID(fmt.Sprintf("pod-uid-%d", index))},
+			ContainerID: fmt.Sprintf("containerd://central-%d", index),
+		}
+		for database, name := range []string{"OVN_Northbound", "OVN_Southbound"} {
+			member.Databases[database] = health.DatabaseIdentity{
+				Database:      name,
+				ClusterID:     fmt.Sprintf("1111111%d-2222-3333-4444-555555555555", database),
+				ServerID:      fmt.Sprintf("0000000%d-1111-2222-3333-444444444444", index+1),
+				Address:       fmt.Sprintf("tcp:192.0.2.%d:%d", index+1, 6643+database),
+				ClientAddress: fmt.Sprintf("tcp:192.0.2.%d:%d", index+1, 6641+database),
+			}
+		}
+		topology.Members = append(topology.Members, member)
+	}
+	return topology
 }
 
 func clientKey(object client.Object) client.ObjectKey {

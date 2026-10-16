@@ -53,12 +53,27 @@ type KubeOVNInstallationReconciler struct {
 	Runtime         health.RuntimeProvider
 	Network         health.NetworkProvider
 	Topology        topology.Provider
-	Lifecycle       *lifecycle.Manager
+	Lifecycle       lifecycleCoordinator
 	WorkloadFactory func(apply.InstallationIdentity) apply.ApplyClient
 	// ScheduledBackup is an injectable checkpoint seam. Production uses the
 	// lifecycle manager; tests can provide a verified pair capture without
 	// constructing Pod and object-store adapters.
 	ScheduledBackup func(context.Context, *operatorv1alpha1.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding) (*operatorv1alpha1.BackupStatus, error)
+}
+
+// lifecycleCoordinator is the controller boundary for durable central
+// operations. Keeping it narrow makes the admission path testable without
+// replacing the Kubernetes identity and storage checks performed by the
+// production Manager.
+type lifecycleCoordinator interface {
+	Reader() client.Reader
+	SetStoreFactory(func(*operatorv1alpha1.KubeOVNInstallation) (backup.Store, error))
+	Begin(context.Context, *operatorv1alpha1.KubeOVNInstallation, lifecycle.Request) (lifecycle.Reference, error)
+	Resume(context.Context, *operatorv1alpha1.KubeOVNInstallation, *operatorv1alpha1.CentralOperationReference) (*lifecycle.Recovery, error)
+	ProtectedBackupRefs(context.Context, *operatorv1alpha1.KubeOVNInstallation, *operatorv1alpha1.CentralOperationReference) ([]string, error)
+	CleanupBackups(context.Context, *operatorv1alpha1.KubeOVNInstallation, backup.RetentionPolicy, []string, time.Time) (backup.RetentionResult, error)
+	CaptureBackupPair(context.Context, *operatorv1alpha1.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding) (*operatorv1alpha1.BackupStatus, error)
+	VerifyBackupPair(context.Context, *operatorv1alpha1.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding, *operatorv1alpha1.BackupStatus) error
 }
 
 func (r *KubeOVNInstallationReconciler) SetupWithManager(mgr manager.Manager) error {
@@ -461,9 +476,9 @@ func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Cont
 				return err
 			}
 			if installation.Spec.Central.Replicas > int32(len(retained.Members)) {
-				request, err = lifecycle.SelectAddition(centralCtx, r.Lifecycle.Client, installation, retained)
+				request, err = lifecycle.SelectAddition(centralCtx, r.Lifecycle.Reader(), installation, retained)
 			} else {
-				request, err = lifecycle.SelectRemoval(centralCtx, r.Lifecycle.Client, installation, retained)
+				request, err = lifecycle.SelectRemoval(centralCtx, r.Lifecycle.Reader(), installation, retained)
 			}
 			if err != nil || request == nil {
 				return err

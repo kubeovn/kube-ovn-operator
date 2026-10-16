@@ -31,6 +31,24 @@ type Manager struct {
 	MaxBytes     int64
 }
 
+// Reader exposes the direct Kubernetes reader used for immutable lifecycle
+// selection. The controller uses this boundary instead of reaching into the
+// concrete manager, which keeps admission tests independent of backup stores.
+func (m *Manager) Reader() client.Reader {
+	if m == nil {
+		return nil
+	}
+	return m.Client
+}
+
+// SetStoreFactory configures the operator-owned backup store used by lifecycle
+// capture, verification and retention operations.
+func (m *Manager) SetStoreFactory(factory func(*api.KubeOVNInstallation) (backup.Store, error)) {
+	if m != nil {
+		m.StoreFactory = factory
+	}
+}
+
 type Recovery struct {
 	Reference  Reference
 	Request    Request
