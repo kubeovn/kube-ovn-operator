@@ -35,15 +35,27 @@ Before the first workload write, status records a spec and manifest digest.
 Repeated reconciliation can repair the same resource set. A changed spec or
 rendered topology is blocked until a lifecycle executor can authorize it.
 This checkpoint also survives an operator restart or a partially applied batch.
-HCP, adoption and broader dynamic membership transitions currently require
-those future executors.
+HCP and broader dynamic membership transitions currently require those future
+executors. Adoption is available through an explicit selector and only claims
+ownership of resources that already exist.
 
 `internal/apply` checks ownership with uncached reads, dry-runs the complete
 batch, then creates new resources or uses server-side apply without force for
-existing resources. It cannot adopt foreign resources. PVCs and resources
-annotated `helm.sh/resource-policy: keep` receive installation labels but no
-owner reference, so deletion of the installation does not garbage-collect them.
-Cluster-scoped resources also use labels rather than an invalid namespaced owner.
+existing resources. PVCs and resources annotated `helm.sh/resource-policy: keep`
+receive installation labels but no owner reference, so deletion of the
+installation does not garbage-collect them. Cluster-scoped resources also use
+labels rather than an invalid namespaced owner.
+
+Set `spec.adoption.enabled: true` with a non-empty Kubernetes label selector to
+take over an existing installation. Every chart resource selected for adoption
+must already exist in the installation namespace (or at cluster scope), match
+the selector, and have no foreign controller owner, deletion timestamp, or
+installation identity labels. The operator first server-side dry-runs the
+complete ownership patch, then writes only its managed-by and installation
+labels plus the installation controller owner under the normal Leases. Generated
+network-probe resources are created by the subsequent regular apply and are not
+part of the existing-resource adoption set. Adoption never deletes, recreates,
+or force-claims workload fields.
 
 ## Status and verification
 

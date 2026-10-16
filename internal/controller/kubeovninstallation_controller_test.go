@@ -296,6 +296,23 @@ func (r *recordingWorkload) Apply(context.Context, []*unstructured.Unstructured)
 
 var _ apply.ApplyClient = (*recordingWorkload)(nil)
 
+type adoptingWorkload struct {
+	recordingWorkload
+	adoptCalls int
+	adoptCount int
+	selector   map[string]string
+	adoptErr   error
+}
+
+func (w *adoptingWorkload) Adopt(_ context.Context, objects []*unstructured.Unstructured, selector map[string]string) error {
+	w.adoptCalls++
+	w.adoptCount = len(objects)
+	w.selector = selector
+	return w.adoptErr
+}
+
+var _ apply.Adopter = (*adoptingWorkload)(nil)
+
 func TestReconcileUsesInjectedWorkloadAdapter(t *testing.T) {
 	scheme := controllerScheme(t)
 	installation := &operatorv1alpha1.KubeOVNInstallation{
@@ -320,6 +337,29 @@ func TestReconcileUsesInjectedWorkloadAdapter(t *testing.T) {
 	}
 	if gotIdentity.Namespace != installation.Namespace || gotIdentity.Name != installation.Name || gotIdentity.UID != installation.UID {
 		t.Fatalf("unexpected workload identity: %#v", gotIdentity)
+	}
+}
+
+func TestReconcileAdoptsBeforeRegularApply(t *testing.T) {
+	scheme := controllerScheme(t)
+	installation := &operatorv1alpha1.KubeOVNInstallation{
+		ObjectMeta: metav1.ObjectMeta{Name: "adopt", Namespace: "default", UID: types.UID("uid-adopt"), Generation: 1},
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
+			Central:  operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Adoption: operatorv1alpha1.AdoptionSpec{Enabled: true, Selector: map[string]string{"app": "kube-ovn"}},
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+	workload := new(adoptingWorkload)
+	reconciler := &KubeOVNInstallationReconciler{Client: client, Scheme: scheme, Leases: lease.New(client), Renderer: objectRenderer{}, WorkloadFactory: func(apply.InstallationIdentity) apply.ApplyClient {
+		return workload
+	}}
+	if _, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Name: installation.Name, Namespace: installation.Namespace}}); err != nil {
+		t.Fatal(err)
+	}
+	if workload.adoptCalls != 1 || workload.adoptCount != 1 || workload.applyCalls != 1 || workload.selector["app"] != "kube-ovn" {
+		t.Fatalf("unexpected adoption/apply calls: %#v", workload)
 	}
 }
 

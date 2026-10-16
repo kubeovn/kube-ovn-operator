@@ -95,6 +95,9 @@ spec:
                         destination: {type: string}
                 adoption:
                   type: object
+                  x-kubernetes-validations:
+                    - rule: "!has(self.enabled) || !self.enabled || (has(self.selector) && size(self.selector) > 0)"
+                      message: "selector must contain at least one label when adoption is enabled"
                   properties:
                     enabled: {type: boolean}
                     selector: {type: object, additionalProperties: {type: string}}

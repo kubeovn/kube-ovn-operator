@@ -267,3 +267,98 @@ func TestApplyStopsTheBatchWhenOperationGuardIsLost(t *testing.T) {
 		t.Fatalf("expected two dry-runs and one persisted patch, got %d", patches)
 	}
 }
+
+func TestAdoptDryRunsTheCompleteExistingBatchBeforeClaimingOwnership(t *testing.T) {
+	first := configMap("first", map[string]string{"app": "kube-ovn"})
+	first.SetUID(types.UID("first-uid"))
+	first.SetResourceVersion("1")
+	second := configMap("second", map[string]string{"app": "kube-ovn"})
+	second.SetUID(types.UID("second-uid"))
+	second.SetResourceVersion("2")
+	kube := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), first, second)
+	patches := 0
+	var payloads [][]byte
+	kube.PrependReactor("patch", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		patches++
+		payloads = append(payloads, action.(k8stesting.PatchAction).GetPatch())
+		return true, actionResult(action), nil
+	})
+	adapter := &Client{Dynamic: kube, Mapper: testMapper(), Identity: testIdentity}
+	objects := []*unstructured.Unstructured{configMap("first", nil), configMap("second", nil)}
+	if err := adapter.Adopt(t.Context(), objects, map[string]string{"app": "kube-ovn"}); err != nil {
+		t.Fatal(err)
+	}
+	if patches != 4 {
+		t.Fatalf("expected two dry-runs followed by two writes, got %d patch calls", patches)
+	}
+	for _, payload := range payloads {
+		var object map[string]any
+		if err := json.Unmarshal(payload, &object); err != nil {
+			t.Fatal(err)
+		}
+		metadata := object["metadata"].(map[string]any)
+		labels := metadata["labels"].(map[string]any)
+		if labels[ManagedByLabel] != ManagedByValue || labels[InstallationLabel] != testIdentity.Name || labels[InstallationUIDLabel] != string(testIdentity.UID) {
+			t.Fatalf("adoption patch did not claim installation labels: %#v", labels)
+		}
+		if _, ok := metadata["ownerReferences"]; !ok {
+			t.Fatalf("adoption patch did not claim controller ownership: %#v", metadata)
+		}
+	}
+	if objects[0].GetLabels() != nil || objects[0].GetOwnerReferences() != nil {
+		t.Fatalf("adopter mutated rendered input: %#v", objects[0].Object)
+	}
+}
+
+func TestAdoptRejectsMissingOrUnsafeResources(t *testing.T) {
+	tests := []struct {
+		name     string
+		object   *unstructured.Unstructured
+		selector map[string]string
+		want     error
+	}{
+		{name: "missing", object: configMap("missing", nil), selector: map[string]string{"app": "kube-ovn"}},
+		{name: "selector mismatch", object: adoptedConfigMap("mismatch", map[string]string{"app": "other"}), selector: map[string]string{"app": "kube-ovn"}},
+		{name: "external owner", object: adoptedConfigMapWithOwner("owner", map[string]string{"app": "kube-ovn"}), selector: map[string]string{"app": "kube-ovn"}},
+		{name: "other installation", object: adoptedConfigMap("other-installation", map[string]string{"app": "kube-ovn", InstallationLabel: "other"}), selector: map[string]string{"app": "kube-ovn"}},
+		{name: "empty selector", object: adoptedConfigMap("empty", map[string]string{"app": "kube-ovn"}), selector: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := []runtime.Object{}
+			if tt.object.GetUID() != "" {
+				objects = append(objects, tt.object)
+			}
+			kube := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), objects...)
+			adapter := &Client{Dynamic: kube, Mapper: testMapper(), Identity: testIdentity}
+			if err := adapter.Adopt(t.Context(), []*unstructured.Unstructured{configMap(tt.object.GetName(), nil)}, tt.selector); err == nil {
+				t.Fatal("unsafe adoption unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func actionResult(action k8stesting.Action) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"name":      action.(k8stesting.PatchAction).GetName(),
+			"namespace": action.(k8stesting.PatchAction).GetNamespace(),
+		},
+	}}
+}
+
+func adoptedConfigMap(name string, labels map[string]string) *unstructured.Unstructured {
+	object := configMap(name, labels)
+	object.SetUID(types.UID("resource-uid-" + name))
+	object.SetResourceVersion("1")
+	return object
+}
+
+func adoptedConfigMapWithOwner(name string, labels map[string]string) *unstructured.Unstructured {
+	object := adoptedConfigMap(name, labels)
+	controller := true
+	object.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "other", UID: "other", Controller: &controller}})
+	return object
+}
