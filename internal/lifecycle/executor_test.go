@@ -598,6 +598,39 @@ func TestCompletedOperationCannotDriveOrReplayItsSuccessor(t *testing.T) {
 	}
 }
 
+func TestInspectRequiresImmutableCompletionReceipt(t *testing.T) {
+	f := setup(t)
+	ref := f.started(t)
+	for i := range 2 {
+		f.join(i, true)
+	}
+	for _, phase := range []Phase{Removing, Removing, Removing, Retiring, Retiring, Complete} {
+		f.mustStep(t, ref, phase)
+	}
+	var operation *Operation
+	err := f.guarded(t, func(ctx context.Context) error {
+		var err error
+		operation, err = Inspect(ctx, f.kube, f.installation, &ref)
+		return err
+	})
+	if err != nil || operation == nil || operation.Completion == nil {
+		t.Fatalf("completed operation was not inspected with its receipt: %+v %v", operation, err)
+	}
+	receipt := new(corev1.ConfigMap)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: f.installation.Namespace, Name: ref.Request.Name + "-complete"}, receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kube.Delete(t.Context(), receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.guarded(t, func(ctx context.Context) error {
+		_, err := Inspect(ctx, f.kube, f.installation, &ref)
+		return err
+	}); err == nil {
+		t.Fatal("completed journal was accepted without its immutable completion receipt")
+	}
+}
+
 func TestAdditionOnlyRequiresBothNewMembersHealthy(t *testing.T) {
 	f := setup(t)
 	f.request.RemoveEndpoint, f.request.Retirement = "", nil

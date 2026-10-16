@@ -6,10 +6,14 @@ transport, backup capture/verification, permanent-loss approvals and Kubernetes
 member provisioner. The caller holds both installation-bound Leases and supplies
 an uncached client and an existing trusted backup store with age/size limits.
 
-The default installation reconciler does not yet select operations or invoke this
-executor. Initial-apply checkpoint restrictions remain in force. This executor
-is part of the complete lifecycle implementation, not automatic node replacement
-or a complete installation/upgrade controller.
+The default installation reconciler now discovers and resumes the durable
+operation journal before Chart rendering. It holds both operation Leases, checks
+the status-pinned original topology reference and immutable completion receipt,
+and fences ordinary Apply while the operation is incomplete. After completion,
+the controller performs a fresh final discovery and writes a new immutable
+topology baseline while retaining the old record. It still does not select new
+operations automatically, hand off an ordinary multi-replica Chart Deployment,
+or provide a complete installation/upgrade controller.
 
 ## Durable contract
 

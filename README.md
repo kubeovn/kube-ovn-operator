@@ -205,12 +205,20 @@ uses host networking on the pinned Node, unprivileged high ports, dropped Linux
 capabilities and no service-account token. Records and storage reservations are
 retained; this adapter has no delete, resize or automatic retirement path.
 
-The default controller is not yet connected to this adapter. The joint
-NB/SB executor now authorizes `Start` from fresh quorum/backup evidence, observes
-both new members catching up and only then removes an old member. Runtime image
-publication, automatic storage provisioning, TLS Secret identity management and
-Kubernetes node replacement remain separate work. Pod readiness alone does not
-prove database health. See [member workload contract](docs/member-workloads.md).
+The default controller now resumes a persisted joint operation before rendering
+or applying the Chart. It holds both operation Leases, validates the pinned
+request and immutable completion receipt, and keeps ordinary Apply fenced while
+the operation is incomplete. After a completed operation it discovers a fresh
+final topology and creates a new immutable baseline; the old baseline remains
+for audit. Automatic operation selection, old Chart Deployment handoff, runtime
+image publication, automatic storage provisioning, TLS Secret identity
+management and Kubernetes node replacement remain separate work. Pod readiness
+alone does not prove database health. See [member workload contract](docs/member-workloads.md).
+
+Lifecycle recovery is enabled only when the operator is started with an
+existing operator-owned `--backup-dir`; `--backup-max-age` and
+`--backup-max-bytes` define the explicit backup policy. The operator never
+creates the directory or changes its permissions.
 
 ## Retained central topology
 

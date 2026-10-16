@@ -161,14 +161,27 @@ type CentralTopologyReference struct {
 	Digest string    `json:"digest"`
 }
 
+// CentralOperationReference retains the admitted operation and its original
+// topology across restarts. Completion does not authorize replaying old charts.
+type CentralOperationReference struct {
+	JournalName      string                    `json:"journalName"`
+	JournalUID       types.UID                 `json:"journalUID"`
+	RequestName      string                    `json:"requestName"`
+	RequestUID       types.UID                 `json:"requestUID"`
+	Inventory        CentralTopologyReference  `json:"inventory"`
+	HandoffInventory *CentralTopologyReference `json:"handoffInventory,omitempty"`
+	CompletionDigest string                    `json:"completionDigest,omitempty"`
+}
+
 type TopologyStatus struct {
-	Inventory              *CentralTopologyReference `json:"inventory,omitempty"`
-	DesiredCentralReplicas int32                     `json:"desiredCentralReplicas,omitempty"`
-	ReadyCentralReplicas   int32                     `json:"readyCentralReplicas,omitempty"`
-	Members                []CentralMemberStatus     `json:"members,omitempty"`
-	Databases              []CentralDatabaseStatus   `json:"databases,omitempty"`
-	NorthdProcesses        []NorthdProcessStatus     `json:"northdProcesses,omitempty"`
-	Nodes                  []DataPlaneNodeStatus     `json:"nodes,omitempty"`
+	Inventory              *CentralTopologyReference  `json:"inventory,omitempty"`
+	Operation              *CentralOperationReference `json:"operation,omitempty"`
+	DesiredCentralReplicas int32                      `json:"desiredCentralReplicas,omitempty"`
+	ReadyCentralReplicas   int32                      `json:"readyCentralReplicas,omitempty"`
+	Members                []CentralMemberStatus      `json:"members,omitempty"`
+	Databases              []CentralDatabaseStatus    `json:"databases,omitempty"`
+	NorthdProcesses        []NorthdProcessStatus      `json:"northdProcesses,omitempty"`
+	Nodes                  []DataPlaneNodeStatus      `json:"nodes,omitempty"`
 }
 
 type NorthdProcessStatus struct {

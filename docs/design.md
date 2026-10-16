@@ -50,11 +50,13 @@ an uncertain outcome and requires fresh observation. A successful unixctl reply
 starts an asynchronous change and does not authorize workload scaling.
 
 These checks do not make the multiple OVSDB/Kubernetes observations atomic or
-fence an already submitted command after Lease loss. The default reconciler does
-not invoke membership mutations. `internal/lifecycle` now connects the backup,
-approval and member providers with persistent joint NB/SB operation state. The
-default controller still needs operation selection and apply-checkpoint wiring. There
-is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
+fence an already submitted command after Lease loss. The default reconciler now
+resumes an already persisted operation before Chart rendering and creates a
+successor topology baseline only after the immutable completion receipt and fresh
+final observation pass. `internal/lifecycle` connects the backup, approval and
+member providers with persistent joint NB/SB operation state. Automatic operation
+selection, ordinary Chart handoff and apply-checkpoint authorization remain open.
+There is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
 a new database before its process starts, and a departed server cannot rejoin.
 
 `internal/prepare` now implements explicit local NB/SB preparation: persist the
