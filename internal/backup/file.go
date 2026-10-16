@@ -111,6 +111,84 @@ func (s *FileStore) Open(ctx context.Context, reference string) (Record, io.Read
 	return record, data, nil
 }
 
+// List returns only complete digest directories containing an authenticated
+// manifest and snapshot. Pending directories, unknown names and corrupt pairs
+// are ignored so cleanup can never infer ownership from a partial write.
+func (s *FileStore) List(ctx context.Context) ([]Object, error) {
+	if s == nil || s.root == nil {
+		return nil, errors.New("file store is not configured")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	directory, err := s.root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	entries, readErr := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return nil, err
+	}
+	objects := make([]Object, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		name := entry.Name()
+		if !entry.IsDir() || !validDigest(name, sha256.Size) {
+			continue
+		}
+		info, err := s.root.Lstat(name)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		reference := "sha256:" + name
+		record, snapshot, err := s.Open(ctx, reference)
+		if err != nil {
+			continue
+		}
+		_ = snapshot.Close()
+		if record.FormatVersion != 1 || record.CompletedAt.IsZero() {
+			continue
+		}
+		objects = append(objects, Object{Reference: reference, Record: record})
+	}
+	return objects, nil
+}
+
+// Delete removes one complete operator-owned digest directory after opening
+// both pair members. The digest-only path and os.Root keep deletion inside the
+// configured backup directory.
+func (s *FileStore) Delete(ctx context.Context, reference string) error {
+	if s == nil || s.root == nil {
+		return errors.New("file store is not configured")
+	}
+	name, ok := strings.CutPrefix(reference, "sha256:")
+	if !ok || !validDigest(name, sha256.Size) {
+		return errors.New("invalid backup reference")
+	}
+	record, snapshot, err := s.Open(ctx, reference)
+	if err != nil {
+		return err
+	}
+	_ = snapshot.Close()
+	if record.FormatVersion != 1 || record.CompletedAt.IsZero() {
+		return errors.New("backup pair is not complete")
+	}
+	info, err := s.root.Lstat(name)
+	if err != nil || !info.IsDir() {
+		return errors.New("backup object is not an operator-owned directory")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.root.RemoveAll(name); err != nil {
+		return err
+	}
+	return errors.Join(s.syncDirectory("."), ctx.Err())
+}
+
 func (s *FileStore) openRegular(name string) (*os.File, error) {
 	info, err := s.root.Lstat(name)
 	if err != nil || !info.Mode().IsRegular() {

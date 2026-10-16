@@ -122,7 +122,15 @@ type BackupSpec struct {
 	// Schedule is an interval duration such as "6h" or "24h". A scheduled
 	// capture only records a verified NB/SB pair and never authorizes Chart
 	// writes.
-	Schedule string `json:"schedule,omitempty"`
+	Schedule  string              `json:"schedule,omitempty"`
+	Retention BackupRetentionSpec `json:"retention,omitempty"`
+}
+
+// BackupRetentionSpec enables deletion of complete operator-owned pairs. A
+// zero KeepLast and empty MaxAge disable cleanup; either field may be used.
+type BackupRetentionSpec struct {
+	KeepLast int32  `json:"keepLast,omitzero"`
+	MaxAge   string `json:"maxAge,omitempty"`
 }
 
 type AdoptionSpec struct {
@@ -147,6 +155,7 @@ type KubeOVNInstallationStatus struct {
 	Upgrade            UpgradeStatus          `json:"upgrade,omitempty"`
 	HCP                HCPStatus              `json:"hcp,omitempty"`
 	LastBackup         *BackupStatus          `json:"lastBackup,omitempty"`
+	BackupRetention    *BackupRetentionStatus `json:"backupRetention,omitempty"`
 	ObservedGeneration int64                  `json:"observedGeneration,omitempty"`
 	Network            *NetworkStatus         `json:"network,omitempty"`
 }
@@ -283,6 +292,17 @@ type BackupStatus struct {
 	Version        string            `json:"version,omitempty"`
 	TopologyDigest string            `json:"topologyDigest,omitempty"`
 	CompletedAt    metav1.Time       `json:"completedAt,omitempty"`
+}
+
+// BackupRetentionStatus records the last cleanup attempt. A failed attempt
+// remains visible so the next reconcile can retry without claiming success.
+type BackupRetentionStatus struct {
+	LastAttempt metav1.Time `json:"lastAttempt,omitzero"`
+	LastSuccess metav1.Time `json:"lastSuccess,omitzero"`
+	Scanned     int32       `json:"scanned,omitzero"`
+	Protected   int32       `json:"protected,omitzero"`
+	Deleted     int32       `json:"deleted,omitzero"`
+	Reason      string      `json:"reason,omitempty"`
 }
 
 // +kubebuilder:object:root=true

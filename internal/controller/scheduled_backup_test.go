@@ -6,6 +6,8 @@ import (
 	stdjson "encoding/json/v2"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +81,23 @@ func TestEnsureScheduledBackupCapturesAndBindsVerifiedPair(t *testing.T) {
 	}
 	if captures != 1 || installation.Status.LastBackup == nil || installation.Status.LastBackup.ID == "" {
 		t.Fatalf("scheduled pair was not persisted in memory: captures=%d backup=%+v", captures, installation.Status.LastBackup)
+	}
+}
+
+func TestProtectedBackupReferencesIncludesLastBackupAndUpgradeCheckpoint(t *testing.T) {
+	installation := &api.KubeOVNInstallation{Status: api.KubeOVNInstallationStatus{
+		LastBackup: &api.BackupStatus{DatabaseRefs: map[string]string{
+			"OVN_Northbound": "sha256:" + strings.Repeat("a", 64),
+			"OVN_Southbound": "sha256:" + strings.Repeat("b", 64),
+		}},
+		Upgrade: api.UpgradeStatus{Checkpoint: &api.UpgradeCheckpointStatus{DatabaseRefs: map[string]string{
+			"OVN_Northbound": "sha256:" + strings.Repeat("a", 64),
+			"OVN_Southbound": "sha256:" + strings.Repeat("c", 64),
+		}}},
+	}}
+	want := []string{"sha256:" + strings.Repeat("a", 64), "sha256:" + strings.Repeat("b", 64), "sha256:" + strings.Repeat("c", 64)}
+	if got := protectedBackupReferences(installation); !slices.Equal(got, want) {
+		t.Fatalf("protected references = %v, want %v", got, want)
 	}
 }
 

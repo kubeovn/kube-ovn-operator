@@ -94,6 +94,11 @@ spec:
                         required: {type: boolean}
                         destination: {type: string}
                         schedule: {type: string}
+                        retention:
+                          type: object
+                          properties:
+                            keepLast: {type: integer, format: int32, minimum: 0}
+                            maxAge: {type: string}
                 adoption:
                   type: object
                   x-kubernetes-validations:
@@ -159,4 +164,13 @@ spec:
                         reason: {type: string}
                 hcp: {type: object, x-kubernetes-preserve-unknown-fields: true}
                 lastBackup: {type: object, x-kubernetes-preserve-unknown-fields: true}
+                backupRetention:
+                  type: object
+                  properties:
+                    lastAttempt: {type: string, format: date-time}
+                    lastSuccess: {type: string, format: date-time}
+                    scanned: {type: integer, format: int32}
+                    protected: {type: integer, format: int32}
+                    deleted: {type: integer, format: int32}
+                    reason: {type: string}
                 network: {type: object, x-kubernetes-preserve-unknown-fields: true}

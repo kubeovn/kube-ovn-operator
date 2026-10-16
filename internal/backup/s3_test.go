@@ -284,3 +284,76 @@ func TestS3StoreAllowsRetryAfterPartialPublication(t *testing.T) {
 		t.Fatalf("PUT count = %d, want 4 (partial pair plus successful retry)", putCount)
 	}
 }
+
+func TestS3StoreListsCompletePairsAndDeletesBothObjects(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		storage = map[string][]byte{}
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if request.Method == http.MethodGet && request.URL.Query().Get("list-type") == "2" {
+			prefix := request.URL.Query().Get("prefix")
+			var keys []string
+			for key := range storage {
+				key = strings.TrimPrefix(key, "/test-bucket/")
+				if strings.HasPrefix(key, prefix) {
+					keys = append(keys, key)
+				}
+			}
+			slices.Sort(keys)
+			writer.Header().Set("Content-Type", "application/xml")
+			_, _ = io.WriteString(writer, "<ListBucketResult>")
+			for _, key := range keys {
+				_, _ = fmt.Fprintf(writer, "<Contents><Key>%s</Key></Contents>", key)
+			}
+			_, _ = io.WriteString(writer, "<IsTruncated>false</IsTruncated></ListBucketResult>")
+			return
+		}
+		switch request.Method {
+		case http.MethodPut:
+			data, err := io.ReadAll(request.Body)
+			if err != nil {
+				http.Error(writer, "read failed", http.StatusInternalServerError)
+				return
+			}
+			storage[request.URL.Path] = data
+		case http.MethodGet:
+			data, ok := storage[request.URL.Path]
+			if !ok {
+				http.NotFound(writer, request)
+				return
+			}
+			_, _ = writer.Write(data)
+		case http.MethodDelete:
+			delete(storage, request.URL.Path)
+		default:
+			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+	store, err := NewS3Store("s3://test-bucket/operator", Credentials{AccessKeyID: "access", SecretAccessKey: "secret", Endpoint: server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, completed := range []time.Time{time.Date(2026, 10, 16, 17, 0, 0, 0, time.UTC), time.Date(2026, 10, 16, 16, 0, 0, 0, time.UTC)} {
+		if _, err := store.Publish(t.Context(), func(writer io.Writer) (Record, error) {
+			_, writeErr := writer.Write([]byte("snapshot"))
+			return Record{FormatVersion: 1, CompletedAt: completed}, writeErr
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listed, err := store.List(t.Context())
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("listed objects=%+v err=%v", listed, err)
+	}
+	if err := store.Delete(t.Context(), listed[0].Reference); err != nil {
+		t.Fatal(err)
+	}
+	listed, err = store.List(t.Context())
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("after deletion objects=%+v err=%v", listed, err)
+	}
+}

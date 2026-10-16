@@ -342,9 +342,13 @@ after backup readback to reject changes while storage was being verified.
 as a previously provisioned volume mount, with atomic rename and fsync support.
 The caller must explicitly configure maximum age and size (at most 1 GiB).
 Parsing also limits schemas to 4 MiB, JSON tokens to 1 MiB and each table to
-250,000 rows. Published files are private to their owner; the store never
-deletes them. File digests prove integrity, not human approval or authenticity
-against an actor who can rewrite both the store and trusted references.
+250,000 rows. Published files are private to their owner. The stores expose a
+restricted retention surface that lists only complete digest-keyed pairs and
+deletes only pairs in the configured destination. File cleanup stays below the
+`os.Root` boundary; S3 cleanup uses signed ListObjects and paired DELETE
+requests. Pending, malformed, unknown and incomplete objects are skipped. File
+digests prove integrity, not human approval or authenticity against an actor
+who can rewrite both the store and trusted references.
 
 The persistent lifecycle executor now records a verified NB/SB backup pair in
 `status.lastBackup`, including the two immutable references, a pair ID, the
@@ -365,8 +369,14 @@ both operation Leases, requires the retained topology and current observed
 version, persists `status.lastBackup`, and returns before Chart rendering; it
 does not change `status.applyCheckpoint` or authorize a Chart write. Scheduling
 is skipped while a lifecycle operation or version-only upgrade is in flight,
-and for HCP or data-plane-only installations. Retention, recovery execution and
-product RPO/RTO policy remain to be implemented. A version-only upgrade now
+and for HCP or data-plane-only installations. Set
+`spec.upgrade.backup.retention.keepLast` and/or
+`spec.upgrade.backup.retention.maxAge` to enable cleanup; leaving both empty
+disables deletion. The controller runs cleanup under both operation Leases,
+protects `status.lastBackup`, the verified upgrade checkpoint and active
+lifecycle journal references, and records attempts in
+`status.backupRetention`. Failed deletion remains visible and is retried.
+Recovery execution and product RPO/RTO policy remain to be implemented. A version-only upgrade now
 stores a separate durable `status.upgrade.checkpoint` with `Capturing`,
 `Verified`, `Applying`, `Applied` and `Failed` phases. The checkpoint contains
 both immutable database references and binds them to the source version, target

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,6 +36,57 @@ type Recovery struct {
 	Request    Request
 	State      State
 	Completion *Completion
+}
+
+// CleanupBackups applies an explicit retention policy to the configured
+// operator-owned store. It does not create storage and refuses stores without
+// the restricted inventory/delete surface.
+func (m *Manager) CleanupBackups(ctx context.Context, installation *api.KubeOVNInstallation, policy backup.RetentionPolicy, protected []string, now time.Time) (backup.RetentionResult, error) {
+	if m == nil || installation == nil || m.StoreFactory == nil {
+		return backup.RetentionResult{}, errors.New("backup cleanup requires an installation and store factory")
+	}
+	store, err := m.StoreFactory(installation)
+	if err != nil {
+		return backup.RetentionResult{}, err
+	}
+	defer func() {
+		if closer, ok := store.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}()
+	retention, ok := store.(backup.RetentionStore)
+	if !ok {
+		return backup.RetentionResult{}, errors.New("configured backup store does not support retention cleanup")
+	}
+	return backup.Cleanup(ctx, retention, policy, protected, now)
+}
+
+// ProtectedBackupRefs reads the active lifecycle journal and returns every
+// database reference that may still be needed by an in-flight operation.
+func (m *Manager) ProtectedBackupRefs(ctx context.Context, installation *api.KubeOVNInstallation, pinned *api.CentralOperationReference) ([]string, error) {
+	if pinned == nil {
+		return nil, nil
+	}
+	operation, err := Inspect(ctx, m.Client, installation, &Reference{
+		Journal: workload.Reference{Name: pinned.JournalName, UID: pinned.JournalUID},
+		Request: workload.Reference{Name: pinned.RequestName, UID: pinned.RequestUID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if operation == nil {
+		return nil, errors.New("active lifecycle operation disappeared")
+	}
+	refs := make([]string, 0, len(operation.State.Databases))
+	for _, database := range operation.State.Databases {
+		if database.BackupRef != "" {
+			refs = append(refs, database.BackupRef)
+		}
+		if database.Intent != nil && database.Intent.BackupRef != "" {
+			refs = append(refs, database.Intent.BackupRef)
+		}
+	}
+	return slices.Compact(slices.Sorted(slices.Values(refs))), nil
 }
 
 // BackupBinding identifies the installation state that a verified pair
