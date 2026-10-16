@@ -105,6 +105,7 @@ docker run --rm --network=none \
       "${tool}" --cid="${sb_cid}" join-cluster "/controller-seed/ovnsb-${index}.db" OVN_Southbound "tcp:${node}:6644" "tcp:${first_node}:6644"
       index=$((index + 1))
     done
+    chmod 0644 /controller-seed/*.db
   '
 for index in 0 1 2; do
   node=${control_plane_nodes[${index}]}
