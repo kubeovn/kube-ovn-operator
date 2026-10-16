@@ -216,6 +216,31 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		}
 		return reconcile.Result{RequeueAfter: outcome.RequeueAfter}, nil
 	}
+	if due, cleanup, cleanupErr := r.ensureBackupRetention(ctx, installation, now()); due {
+		attempted := metav1.NewTime(now())
+		if installation.Status.BackupRetention == nil {
+			installation.Status.BackupRetention = new(operatorv1alpha1.BackupRetentionStatus)
+		}
+		status := installation.Status.BackupRetention
+		status.LastAttempt = attempted
+		status.Scanned = int32(cleanup.Scanned)
+		status.Protected = int32(cleanup.Protected)
+		status.Deleted = int32(cleanup.Deleted)
+		if cleanupErr != nil {
+			status.Reason = cleanupErr.Error()
+			setCondition(&installation.Status.Conditions, metav1.Condition{Type: "BackupRetention", Status: metav1.ConditionFalse, Reason: "CleanupFailed", Message: cleanupErr.Error(), ObservedGeneration: installation.Generation, LastTransitionTime: attempted})
+			if statusErr := r.Status().Update(ctx, installation); statusErr != nil {
+				return reconcile.Result{}, statusErr
+			}
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		status.LastSuccess = attempted
+		status.Reason = ""
+		setCondition(&installation.Status.Conditions, metav1.Condition{Type: "BackupRetention", Status: metav1.ConditionTrue, Reason: "CleanupComplete", Message: fmt.Sprintf("retention scanned %d pair(s), deleted %d", cleanup.Scanned, cleanup.Deleted), ObservedGeneration: installation.Generation, LastTransitionTime: attempted})
+		if statusErr := r.Status().Update(ctx, installation); statusErr != nil {
+			return reconcile.Result{}, statusErr
+		}
+	}
 	if localRaft(installation) && r.Lifecycle != nil && (installation.Status.Topology.Operation == nil || installation.Status.Topology.Operation.HandoffApplied) && installation.Status.Topology.Inventory != nil && installation.Status.ApplyCheckpoint != nil {
 		started, selectionErr := r.beginAutomaticLifecycle(ctx, installation, plan, now)
 		if selectionErr != nil {
@@ -722,6 +747,60 @@ func recordLifecycleBackupStatus(installation *operatorv1alpha1.KubeOVNInstallat
 type scheduledBackupOutcome struct {
 	Due          bool
 	RequeueAfter time.Duration
+}
+
+const backupRetentionCheckInterval = 10 * time.Minute
+
+func (r *KubeOVNInstallationReconciler) ensureBackupRetention(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, current time.Time) (bool, backup.RetentionResult, error) {
+	if !localRaft(installation) || r.Lifecycle == nil {
+		return false, backup.RetentionResult{}, nil
+	}
+	policy, err := backup.ParseRetention(installation.Spec.Upgrade.Backup.Retention.KeepLast, installation.Spec.Upgrade.Backup.Retention.MaxAge)
+	if err != nil {
+		return true, backup.RetentionResult{}, err
+	}
+	if policy.KeepLast == 0 && policy.MaxAge == 0 {
+		return false, backup.RetentionResult{}, nil
+	}
+	if previous := installation.Status.BackupRetention; previous != nil && previous.Reason == "" && !previous.LastSuccess.IsZero() && current.Sub(previous.LastSuccess.Time) < backupRetentionCheckInterval {
+		return false, backup.RetentionResult{}, nil
+	}
+	if r.Leases == nil {
+		return true, backup.RetentionResult{}, errors.New("backup retention requires operation leases")
+	}
+	protected := protectedBackupReferences(installation)
+	var active []string
+	var cleanup backup.RetentionResult
+	err = r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
+			if installation.Status.Topology.Operation != nil {
+				active, err = r.Lifecycle.ProtectedBackupRefs(centralCtx, installation, installation.Status.Topology.Operation)
+				if err != nil {
+					return err
+				}
+			}
+			protected = append(protected, active...)
+			protected = slices.Compact(slices.Sorted(slices.Values(protected)))
+			cleanup, err = r.Lifecycle.CleanupBackups(centralCtx, installation, policy, protected, current)
+			return err
+		})
+	})
+	return true, cleanup, err
+}
+
+func protectedBackupReferences(installation *operatorv1alpha1.KubeOVNInstallation) []string {
+	if installation == nil {
+		return nil
+	}
+	refs := make([]string, 0, 6)
+	if last := installation.Status.LastBackup; last != nil {
+		refs = append(refs, last.DatabaseRefs["OVN_Northbound"], last.DatabaseRefs["OVN_Southbound"])
+	}
+	if checkpoint := installation.Status.Upgrade.Checkpoint; checkpoint != nil {
+		refs = append(refs, checkpoint.DatabaseRefs["OVN_Northbound"], checkpoint.DatabaseRefs["OVN_Southbound"])
+	}
+	refs = slices.DeleteFunc(refs, func(reference string) bool { return strings.TrimSpace(reference) == "" })
+	return slices.Compact(slices.Sorted(slices.Values(refs)))
 }
 
 // ensureScheduledBackup captures one verified NB/SB pair only when the

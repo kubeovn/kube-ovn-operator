@@ -158,7 +158,11 @@ func (in *UpgradeSpec) DeepCopyInto(out *UpgradeSpec) {
 	*out = *in
 	in.Backup.DeepCopyInto(&out.Backup)
 }
-func (in *BackupSpec) DeepCopyInto(out *BackupSpec) { *out = *in }
+func (in *BackupSpec) DeepCopyInto(out *BackupSpec) {
+	*out = *in
+	in.Retention.DeepCopyInto(&out.Retention)
+}
+func (in *BackupRetentionSpec) DeepCopyInto(out *BackupRetentionSpec) { *out = *in }
 func (in *AdoptionSpec) DeepCopyInto(out *AdoptionSpec) {
 	*out = *in
 	if in.Selector != nil {
@@ -189,6 +193,12 @@ func (in *KubeOVNInstallationStatus) DeepCopyInto(out *KubeOVNInstallationStatus
 				out.LastBackup.DatabaseRefs[key] = value
 			}
 		}
+	}
+	if in.BackupRetention != nil {
+		out.BackupRetention = new(BackupRetentionStatus)
+		*out.BackupRetention = *in.BackupRetention
+		out.BackupRetention.LastAttempt = *in.BackupRetention.LastAttempt.DeepCopy()
+		out.BackupRetention.LastSuccess = *in.BackupRetention.LastSuccess.DeepCopy()
 	}
 	if in.Network != nil {
 		out.Network = new(*in.Network)
@@ -258,6 +268,11 @@ func (in *BackupStatus) DeepCopyInto(out *BackupStatus) {
 			out.DatabaseRefs[key] = value
 		}
 	}
+}
+func (in *BackupRetentionStatus) DeepCopyInto(out *BackupRetentionStatus) {
+	*out = *in
+	out.LastAttempt = *in.LastAttempt.DeepCopy()
+	out.LastSuccess = *in.LastSuccess.DeepCopy()
 }
 func (in *KubeOVNRecoveryRequestSpec) DeepCopyInto(out *KubeOVNRecoveryRequestSpec) {
 	*out = *in

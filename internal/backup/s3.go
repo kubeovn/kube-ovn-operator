@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json/v2"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -50,8 +51,8 @@ func CredentialsFromEnvironment() (Credentials, error) {
 
 // S3Store implements backup.Store with immutable object keys. A failed
 // publication may leave an unreachable object, but no reference is returned
-// until both the snapshot and manifest PUTs succeed. The store never deletes
-// objects; retention is a separate lifecycle policy.
+// until both the snapshot and manifest PUTs succeed. Pair deletion is exposed
+// only through the restricted retention surface.
 type S3Store struct {
 	destination S3Destination
 	credentials Credentials
@@ -59,6 +60,14 @@ type S3Store struct {
 	clock       func() time.Time
 	endpoint    *url.URL
 	pathStyle   bool
+}
+
+type s3ListPage struct {
+	Contents []struct {
+		Key string `xml:"Key"`
+	} `xml:"Contents"`
+	IsTruncated           bool   `xml:"IsTruncated"`
+	NextContinuationToken string `xml:"NextContinuationToken"`
 }
 
 func NewS3Store(rawDestination string, credentials Credentials, client *http.Client) (*S3Store, error) {
@@ -177,6 +186,115 @@ func (s *S3Store) Open(ctx context.Context, reference string) (Record, io.ReadCl
 	return record, data, nil
 }
 
+// List discovers complete digest-keyed pairs below the configured prefix.
+// S3 list results are treated as untrusted: unknown keys, incomplete pairs
+// and manifests that do not authenticate their digest are skipped.
+func (s *S3Store) List(ctx context.Context) ([]Object, error) {
+	if s == nil || s.client == nil || s.endpoint == nil || s.clock == nil {
+		return nil, errors.New("S3 store is not configured")
+	}
+	basePrefix := s.destination.Prefix
+	if basePrefix != "" {
+		basePrefix += "/"
+	}
+	objects := make(map[string]map[string]struct{})
+	var token string
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		query := make(url.Values)
+		query.Set("list-type", "2")
+		query.Set("prefix", basePrefix)
+		if token != "" {
+			query.Set("continuation-token", token)
+		}
+		response, err := s.requestAt(ctx, http.MethodGet, s.listURL(query), nil, 0, "", "")
+		if err != nil {
+			return nil, err
+		}
+		data, readErr := io.ReadAll(io.LimitReader(response, 8<<20))
+		closeErr := response.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return nil, err
+		}
+		var page s3ListPage
+		if err := xml.Unmarshal(data, &page); err != nil {
+			return nil, errors.New("invalid S3 list response")
+		}
+		for _, entry := range page.Contents {
+			digest, object, ok := s.parseListedKey(entry.Key, basePrefix)
+			if !ok {
+				continue
+			}
+			if objects[digest] == nil {
+				objects[digest] = make(map[string]struct{}, 2)
+			}
+			objects[digest][object] = struct{}{}
+		}
+		if !page.IsTruncated || page.NextContinuationToken == "" {
+			break
+		}
+		token = page.NextContinuationToken
+	}
+	refs := make([]string, 0, len(objects))
+	for digest, members := range objects {
+		if len(members) == 2 {
+			refs = append(refs, "sha256:"+digest)
+		}
+	}
+	slices.Sort(refs)
+	result := make([]Object, 0, len(refs))
+	for _, reference := range refs {
+		record, snapshot, err := s.Open(ctx, reference)
+		if err != nil {
+			continue
+		}
+		_ = snapshot.Close()
+		if record.FormatVersion != 1 || record.CompletedAt.IsZero() {
+			continue
+		}
+		result = append(result, Object{Reference: reference, Record: record})
+	}
+	return result, nil
+}
+
+func (s *S3Store) parseListedKey(key, prefix string) (string, string, bool) {
+	relative, ok := strings.CutPrefix(key, prefix)
+	if !ok {
+		return "", "", false
+	}
+	parts := strings.Split(relative, "/")
+	if len(parts) != 2 || !validDigest(parts[0], sha256.Size) || (parts[1] != "snapshot.db" && parts[1] != "record.json") {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// Delete authenticates a complete pair before removing both objects. Both
+// DELETE requests are attempted so a transient failure can be retried by the
+// caller without leaving the first request unissued.
+func (s *S3Store) Delete(ctx context.Context, reference string) error {
+	if s == nil || s.client == nil || s.endpoint == nil || s.clock == nil {
+		return errors.New("S3 store is not configured")
+	}
+	name, ok := strings.CutPrefix(reference, "sha256:")
+	if !ok || !validDigest(name, sha256.Size) {
+		return errors.New("invalid backup reference")
+	}
+	record, snapshot, err := s.Open(ctx, reference)
+	if err != nil {
+		return err
+	}
+	_ = snapshot.Close()
+	if record.FormatVersion != 1 || record.CompletedAt.IsZero() {
+		return errors.New("backup pair is not complete")
+	}
+	snapshotErr := s.do(ctx, http.MethodDelete, s.objectKey(name, "snapshot.db"), nil, 0, "", "")
+	manifestErr := s.do(ctx, http.MethodDelete, s.objectKey(name, "record.json"), nil, 0, "", "")
+	return errors.Join(snapshotErr, manifestErr)
+}
+
 func (s *S3Store) objectKey(name, object string) string {
 	key := name + "/" + object
 	if s.destination.Prefix == "" {
@@ -197,6 +315,16 @@ func (s *S3Store) objectURL(key string) *url.URL {
 	}
 	endpoint.Path = appendURLPath(endpoint.Path, key)
 	endpoint.RawPath = ""
+	return endpoint
+}
+
+func (s *S3Store) listURL(query url.Values) *url.URL {
+	endpoint := s.endpoint.Clone()
+	if s.pathStyle {
+		endpoint.Path = appendURLPath(endpoint.Path, s.destination.Bucket)
+		endpoint.RawPath = ""
+	}
+	endpoint.RawQuery = query.Encode()
 	return endpoint
 }
 
@@ -266,6 +394,10 @@ func (s *S3Store) do(ctx context.Context, method, key string, body io.Reader, le
 }
 
 func (s *S3Store) request(ctx context.Context, method, key string, body io.Reader, length int64, contentType, payloadHash string) (io.ReadCloser, error) {
+	return s.requestAt(ctx, method, s.objectURL(key), body, length, contentType, payloadHash)
+}
+
+func (s *S3Store) requestAt(ctx context.Context, method string, requestURL *url.URL, body io.Reader, length int64, contentType, payloadHash string) (io.ReadCloser, error) {
 	if s == nil || s.client == nil || s.endpoint == nil || s.clock == nil {
 		return nil, errors.New("S3 store is not configured")
 	}
@@ -279,7 +411,6 @@ func (s *S3Store) request(ctx context.Context, method, key string, body io.Reade
 	now := s.clock().UTC()
 	amzDate := now.Format("20060102T150405Z")
 	date := now.Format("20060102")
-	requestURL := s.objectURL(key)
 	request, err := http.NewRequestWithContext(ctx, method, requestURL.String(), body)
 	if err != nil {
 		return nil, err
@@ -308,7 +439,7 @@ func (s *S3Store) request(ctx context.Context, method, key string, body io.Reade
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		_ = response.Body.Close()
-		return nil, fmt.Errorf("S3 request %s %s failed with HTTP %d", method, key, response.StatusCode)
+		return nil, fmt.Errorf("S3 request %s %s failed with HTTP %d", method, requestURL.Path, response.StatusCode)
 	}
 	return response.Body, nil
 }

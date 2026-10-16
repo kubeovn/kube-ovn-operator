@@ -122,15 +122,18 @@ token and row-count limits bound parsing memory. Truncated data, exec/disk
 failure, cancellation and stale process identity cannot yield a usable reference.
 
 The store is a trusted, operator-owned boundary; content hashes are not human
-approval signatures. No published backup is automatically deleted. The lifecycle
-controller records a verified pair of references, its pair ID, observed version
+approval signatures. The lifecycle controller records a verified pair of
+references, its pair ID, observed version
 and retained topology digest in `status.lastBackup`, together with the
 configured destination. The built-in backend accepts a local absolute `file://`
 URL that exactly matches the operator's `--backup-dir`, or an
 `s3://bucket/prefix` URL signed with credentials already exposed through the
 AWS credential environment. S3 publication uses immutable digest-keyed objects
 and returns a reference only after both snapshot and manifest uploads succeed;
-partial uploads are not deleted automatically. A version-only upgrade
+partial uploads are not deleted automatically. File and S3 stores expose a
+restricted retention surface that lists only complete digest-keyed pairs and
+deletes only pairs in the configured destination; pending, malformed, unknown
+and incomplete objects are skipped. A version-only upgrade
 re-verifies a matching pair or captures a new pair and persists a separate
 `status.upgrade.checkpoint`. Its `Capturing` phase is written before either
 native capture, `Verified` is written only after both references and both
@@ -148,8 +151,12 @@ binding. The scheduler persists `status.lastBackup` and exits before Chart
 rendering; it never changes `status.applyCheckpoint` or grants apply
 authorization. It skips HCP/data-plane-only installations, active lifecycle
 operations, version-only upgrades and installations without retained topology.
-Retention, RPO/RTO policy and the restore/recovery executor remain part of the
-full lifecycle goal. Restore/rejoin execution and cross-database rollback are
+`spec.upgrade.backup.retention.keepLast` and `maxAge` enable cleanup; empty
+fields disable deletion. Cleanup runs under both operation Leases, protects
+the latest verified pair, the upgrade checkpoint and active lifecycle journal
+references, and records failures in `status.backupRetention` for retry.
+RPO/RTO policy and the restore/recovery executor remain part of the full
+lifecycle goal. Restore/rejoin execution and cross-database rollback are
 still pending. Native OVSDB restore tests verify schema/data loading
 and preserved row UUIDs, but runtime format validation does not reimplement the
 OVSDB semantic type checker.

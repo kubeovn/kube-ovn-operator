@@ -52,6 +52,22 @@ type Store interface {
 	Open(context.Context, string) (Record, io.ReadCloser, error)
 }
 
+// RetentionStore is the optional destructive surface used by the retention
+// controller. Implementations must return only complete operator-owned pairs
+// and must reject references outside their configured destination.
+type RetentionStore interface {
+	Store
+	List(context.Context) ([]Object, error)
+	Delete(context.Context, string) error
+}
+
+// Object is a complete immutable backup pair discovered by a RetentionStore.
+// A store must omit incomplete, malformed or foreign objects from List.
+type Object struct {
+	Reference string
+	Record    Record
+}
+
 type Provider struct {
 	Source          Source
 	Store           Store
