@@ -46,13 +46,13 @@ kind load docker-image --name "${cluster_name}" kube-ovn-central-fixture:e2e
 fixture_image_name=docker.io/library/kube-ovn-central-fixture:e2e
 fixture_digest=""
 for node in $(kind get nodes --name "${cluster_name}"); do
-  digest=$(docker exec "${node}" ctr -n k8s.io images ls | awk -v image="${fixture_image_name}" '$1 == image {print $3}')
+  digest=$(docker exec "${node}" /usr/local/bin/ctr -n k8s.io images ls | awk -v image="${fixture_image_name}" '$1 == image {print $3}')
   if [[ ! "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
     echo "could not read fixture image digest on ${node}" >&2
     exit 1
   fi
   fixture_digest=${digest}
-  docker exec "${node}" ctr -n k8s.io images tag "${fixture_image_name}" "docker.io/library/kube-ovn-central-fixture@${digest}" >/dev/null
+  docker exec "${node}" /usr/local/bin/ctr -n k8s.io images tag "${fixture_image_name}" "docker.io/library/kube-ovn-central-fixture@${digest}" >/dev/null
 done
 member_image="docker.io/library/kube-ovn-central-fixture@${fixture_digest}"
 
