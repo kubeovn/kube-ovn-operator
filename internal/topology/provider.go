@@ -107,6 +107,13 @@ func (p *Kubernetes) Handoff(ctx context.Context, installation *api.KubeOVNInsta
 	} else if err != nil {
 		return nil, err
 	}
+	expectedUID := object.UID
+	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+		return nil, err
+	}
+	if object.UID != expectedUID {
+		return nil, errors.New("central topology handoff record was replaced")
+	}
 	// The newly created record cannot match the still-pinned previous status;
 	// validate its immutable contents before the controller publishes the new
 	// status reference.
