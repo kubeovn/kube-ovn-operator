@@ -559,28 +559,38 @@ func TestUpgradeAuthorizationBindsTheCurrentVersionAndTopology(t *testing.T) {
 	ref := &operatorv1alpha1.CentralTopologyReference{Name: "topology", UID: types.UID("topology-uid"), Digest: "sha256:" + strings.Repeat("a", 64)}
 	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(previousJSON)), Version: previous.Version}
 	installation.Status.Topology.Inventory = ref
-	installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{ID: "pair-id", Version: previous.Version, TopologyDigest: ref.Digest}
+	refs := map[string]string{"OVN_Northbound": "sha256:" + strings.Repeat("b", 64), "OVN_Southbound": "sha256:" + strings.Repeat("c", 64)}
+	refsJSON, err := stdjson.Marshal(refs, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairID := fmt.Sprintf("sha256:%x", sha256.Sum256(refsJSON))
+	installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{ID: pairID, DatabaseRefs: refs, Version: previous.Version, TopologyDigest: ref.Digest, CompletedAt: metav1.NewTime(time.Unix(10, 0))}
 	installation.Status.LastBackup.Destination = installation.Spec.Upgrade.Backup.Destination
-	installation.Status.Upgrade = operatorv1alpha1.UpgradeStatus{BackupID: "pair-id", TargetVersion: installation.Spec.Version, CheckpointAuthorized: true}
+	installation.Status.Upgrade = operatorv1alpha1.UpgradeStatus{BackupID: pairID, TargetVersion: installation.Spec.Version, CheckpointAuthorized: true, Checkpoint: &operatorv1alpha1.UpgradeCheckpointStatus{ID: pairID, DatabaseRefs: refs, SourceVersion: previous.Version, TargetVersion: installation.Spec.Version, Destination: installation.Spec.Upgrade.Backup.Destination, TopologyDigest: ref.Digest, CapturedAt: metav1.NewTime(time.Unix(10, 0)), Phase: operatorv1alpha1.UpgradeCheckpointVerified}}
 	if !upgradeAuthorizesApply(installation) {
 		t.Fatal("valid upgrade backup pair did not authorize the version checkpoint")
 	}
 
-	installation.Status.Upgrade.TargetVersion = "v1.19.0"
+	installation.Status.Upgrade.Checkpoint.TargetVersion = "v1.19.0"
 	if upgradeAuthorizesApply(installation) {
 		t.Fatal("authorization was reused for a different target version")
 	}
-	installation.Status.Upgrade.TargetVersion = installation.Spec.Version
+	installation.Status.Upgrade.Checkpoint.TargetVersion = installation.Spec.Version
 	installation.Spec.Upgrade.Backup.Destination = "file:///var/lib/kube-ovn/other"
 	if upgradeAuthorizesApply(installation) {
 		t.Fatal("authorization was reused for a different backup destination")
 	}
-	installation.Spec.Upgrade.Backup.Destination = " file:///var/lib/kube-ovn/backups "
-	installation.Status.LastBackup.TopologyDigest = "sha256:" + strings.Repeat("b", 64)
+	installation.Spec.Upgrade.Backup.Destination = "file:///var/lib/kube-ovn/backups"
+	installation.Status.LastBackup.TopologyDigest = "sha256:" + strings.Repeat("d", 64)
+	if !upgradeAuthorizesApply(installation) {
+		t.Fatal("authorization was coupled to a mutable LastBackup summary")
+	}
+	installation.Status.Upgrade.Checkpoint.TopologyDigest = "sha256:" + strings.Repeat("e", 64)
 	if upgradeAuthorizesApply(installation) {
 		t.Fatal("authorization was reused for a different retained topology")
 	}
-	installation.Status.LastBackup.TopologyDigest = ref.Digest
+	installation.Status.Upgrade.Checkpoint.TopologyDigest = ref.Digest
 	installation.Status.Upgrade.CheckpointAuthorized = false
 	if upgradeAuthorizesApply(installation) {
 		t.Fatal("consumed authorization remained usable")
@@ -602,8 +612,14 @@ func TestUpgradeCheckpointAcceptsOnlyVersionChange(t *testing.T) {
 	ref := &operatorv1alpha1.CentralTopologyReference{Name: "topology", UID: types.UID("topology-uid"), Digest: "sha256:" + strings.Repeat("a", 64)}
 	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(previousJSON)), ManifestHash: "old-manifest", Version: previous.Version}
 	installation.Status.Topology.Inventory = ref
-	installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{ID: "pair-id", Version: previous.Version, TopologyDigest: ref.Digest}
-	installation.Status.Upgrade = operatorv1alpha1.UpgradeStatus{BackupID: "pair-id", TargetVersion: installation.Spec.Version, CheckpointAuthorized: true}
+	refs := map[string]string{"OVN_Northbound": "sha256:" + strings.Repeat("b", 64), "OVN_Southbound": "sha256:" + strings.Repeat("c", 64)}
+	refsJSON, err := stdjson.Marshal(refs, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairID := fmt.Sprintf("sha256:%x", sha256.Sum256(refsJSON))
+	installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{ID: pairID, DatabaseRefs: refs, Version: previous.Version, TopologyDigest: ref.Digest, CompletedAt: metav1.NewTime(time.Unix(10, 0))}
+	installation.Status.Upgrade = operatorv1alpha1.UpgradeStatus{BackupID: pairID, TargetVersion: installation.Spec.Version, CheckpointAuthorized: true, Checkpoint: &operatorv1alpha1.UpgradeCheckpointStatus{ID: pairID, DatabaseRefs: refs, SourceVersion: previous.Version, TargetVersion: installation.Spec.Version, Destination: "", TopologyDigest: ref.Digest, CapturedAt: metav1.NewTime(time.Unix(10, 0)), Phase: operatorv1alpha1.UpgradeCheckpointVerified}}
 	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation).WithObjects(installation).Build()
 	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: controllerScheme(t)}
 	rendered := chart.Rendered{Objects: []*unstructured.Unstructured{{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "next", "namespace": "default"}}}}}
@@ -616,6 +632,83 @@ func TestUpgradeCheckpointAcceptsOnlyVersionChange(t *testing.T) {
 	installation.Spec.Central.Replicas = 5
 	if upgradeOnlySpecChange(installation) {
 		t.Fatal("member change was accepted as a version-only upgrade")
+	}
+}
+
+func TestUpgradeCheckpointPersistsCaptureAuthorizationAndApplyPhases(t *testing.T) {
+	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "upgrade-phases", Namespace: "default", UID: types.UID("upgrade-phases-uid"), Generation: 2}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{
+		Version: "v1.18.0", Mode: operatorv1alpha1.InstallationModeFull,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+	}}
+	installation.Spec.Upgrade.Backup.Destination = "file:///var/lib/kube-ovn/backups"
+	installation.Status.ObservedVersion = "v1.17.0"
+	previous := installation.Spec
+	previous.Version = installation.Status.ObservedVersion
+	previousJSON, err := stdjson.Marshal(previous, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := &operatorv1alpha1.CentralTopologyReference{Name: "topology", UID: types.UID("topology-uid"), Digest: "sha256:" + strings.Repeat("a", 64)}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(previousJSON)), Version: previous.Version}
+	installation.Status.Topology.Inventory = ref
+	refs := map[string]string{"OVN_Northbound": "sha256:" + strings.Repeat("b", 64), "OVN_Southbound": "sha256:" + strings.Repeat("c", 64)}
+	refsJSON, err := stdjson.Marshal(refs, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairID := fmt.Sprintf("sha256:%x", sha256.Sum256(refsJSON))
+	backup := &operatorv1alpha1.BackupStatus{ID: pairID, DatabaseRefs: refs, Destination: "file:///var/lib/kube-ovn/backups", Version: previous.Version, TopologyDigest: ref.Digest, CompletedAt: metav1.NewTime(time.Unix(10, 0))}
+	checkpoint := upgradeCheckpointFromBackup(backup, installation.Spec.Version)
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation).WithObjects(installation).Build()
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: controllerScheme(t)}
+
+	if err := reconciler.persistUpgradeCheckpoint(t.Context(), installation, checkpoint, backup, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := installation.Status.Upgrade.Checkpoint; got == nil || got.Phase != operatorv1alpha1.UpgradeCheckpointVerified || installation.Status.Upgrade.CheckpointAuthorized {
+		t.Fatalf("capture phase was not persisted as an un-authorized verified pair: %+v", installation.Status.Upgrade)
+	}
+	copy := installation.Status.DeepCopy()
+	copy.Upgrade.Checkpoint.DatabaseRefs["OVN_Northbound"] = "changed"
+	if installation.Status.Upgrade.Checkpoint.DatabaseRefs["OVN_Northbound"] == "changed" {
+		t.Fatal("upgrade checkpoint deep copy shares database references")
+	}
+	if upgradeAuthorizesApply(installation) {
+		t.Fatal("verified pair without explicit authorization was usable")
+	}
+	if err := reconciler.persistUpgradeCheckpoint(t.Context(), installation, checkpoint, backup, true); err != nil {
+		t.Fatal(err)
+	}
+	if !upgradeAuthorizesApply(installation) {
+		t.Fatal("authorized verified pair was not usable")
+	}
+	if err := reconciler.beginUpgradeApply(t.Context(), installation); err != nil {
+		t.Fatal(err)
+	}
+	if installation.Status.Upgrade.Checkpoint.Phase != operatorv1alpha1.UpgradeCheckpointApplying || installation.Status.Upgrade.CheckpointAuthorized {
+		t.Fatalf("apply phase was not durably fenced: %+v", installation.Status.Upgrade)
+	}
+	if !upgradeAuthorizesApply(installation) {
+		t.Fatal("in-flight apply could not recover its idempotent target")
+	}
+	if err := reconciler.markUpgradeCheckpointApplied(t.Context(), installation, time.Unix(20, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if installation.Status.Upgrade.Checkpoint.Phase != operatorv1alpha1.UpgradeCheckpointApplied || upgradeAuthorizesApply(installation) {
+		t.Fatalf("applied checkpoint remained reusable: %+v", installation.Status.Upgrade)
+	}
+	if err := reconciler.failUpgradeCheckpoint(t.Context(), installation, "verification failed"); err != nil {
+		t.Fatal(err)
+	}
+	if installation.Status.Upgrade.Checkpoint.Phase != operatorv1alpha1.UpgradeCheckpointFailed || installation.Status.Upgrade.Checkpoint.Reason != "verification failed" || upgradeAuthorizesApply(installation) {
+		t.Fatalf("failed checkpoint was not terminally fenced: %+v", installation.Status.Upgrade)
+	}
+	got := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), clientKey(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Upgrade.Checkpoint == nil || got.Status.Upgrade.Checkpoint.Phase != operatorv1alpha1.UpgradeCheckpointFailed {
+		t.Fatalf("checkpoint phase was not persisted in the API: %+v", got.Status.Upgrade)
 	}
 }
 

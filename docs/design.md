@@ -131,9 +131,16 @@ URL that exactly matches the operator's `--backup-dir`, or an
 AWS credential environment. S3 publication uses immutable digest-keyed objects
 and returns a reference only after both snapshot and manifest uploads succeed;
 partial uploads are not deleted automatically. A version-only upgrade
-re-verifies a matching pair or captures a new pair and authorizes one target
-apply checkpoint; the authorization is consumed when the Chart write is
-accepted and is bound to the destination as well as the version and topology.
+re-verifies a matching pair or captures a new pair and persists a separate
+`status.upgrade.checkpoint`. Its `Capturing` phase is written before either
+native capture, `Verified` is written only after both references and both
+post-capture fences pass, and `Applying` is persisted before the Chart write.
+`Applied` records an accepted write and `Failed` records a terminal safety
+failure. The checkpoint binds both immutable references to the source version,
+target version, destination and retained topology, so `status.lastBackup` cannot
+replace or authorize a different target. This is a durable cross-database
+coordination protocol; the two native backup calls are still sequential and do
+not provide an application write barrier or an atomic RAFT snapshot.
 `spec.upgrade.backup.schedule` accepts an interval duration between one minute
 and thirty days. Once due, the controller captures a verified NB/SB pair under
 both operation Leases, using the retained topology and observed version as the
@@ -141,8 +148,9 @@ binding. The scheduler persists `status.lastBackup` and exits before Chart
 rendering; it never changes `status.applyCheckpoint` or grants apply
 authorization. It skips HCP/data-plane-only installations, active lifecycle
 operations, version-only upgrades and installations without retained topology.
-Retention, NB/SB upgrade checkpoint coordination, RPO/RTO policy and
-the restore/recovery executor remain part of the full lifecycle goal. Native OVSDB restore tests verify schema/data loading
+Retention, RPO/RTO policy and the restore/recovery executor remain part of the
+full lifecycle goal. Restore/rejoin execution and cross-database rollback are
+still pending. Native OVSDB restore tests verify schema/data loading
 and preserved row UUIDs, but runtime format validation does not reimplement the
 OVSDB semantic type checker.
 

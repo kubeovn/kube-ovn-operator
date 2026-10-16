@@ -134,7 +134,29 @@ spec:
                         name: {type: string, minLength: 1}
                         uid: {type: string, minLength: 1}
                         digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
-                upgrade: {type: object, x-kubernetes-preserve-unknown-fields: true}
+                upgrade:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  properties:
+                    planID: {type: string}
+                    step: {type: string}
+                    canRollback: {type: boolean}
+                    backupID: {type: string}
+                    targetVersion: {type: string}
+                    checkpointAuthorized: {type: boolean}
+                    checkpoint:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        databaseRefs: {type: object, additionalProperties: {type: string}}
+                        sourceVersion: {type: string}
+                        targetVersion: {type: string}
+                        destination: {type: string}
+                        topologyDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                        capturedAt: {type: string, format: date-time}
+                        appliedAt: {type: string, format: date-time}
+                        phase: {type: string, enum: [Capturing, Verified, Applying, Applied, Failed]}
+                        reason: {type: string}
                 hcp: {type: object, x-kubernetes-preserve-unknown-fields: true}
                 lastBackup: {type: object, x-kubernetes-preserve-unknown-fields: true}
                 network: {type: object, x-kubernetes-preserve-unknown-fields: true}

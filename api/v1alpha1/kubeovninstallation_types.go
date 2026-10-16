@@ -228,13 +228,44 @@ type CentralDatabaseStatus struct {
 	ConnectedMembers int32  `json:"connectedMembers,omitzero"`
 }
 
+// UpgradeCheckpointPhase records the durable cross-database upgrade gate.
+// The checkpoint is separate from LastBackup so scheduled or lifecycle
+// captures cannot replace the pair that authorizes this target version.
+type UpgradeCheckpointPhase string
+
+const (
+	UpgradeCheckpointCapturing UpgradeCheckpointPhase = "Capturing"
+	UpgradeCheckpointVerified  UpgradeCheckpointPhase = "Verified"
+	UpgradeCheckpointApplying  UpgradeCheckpointPhase = "Applying"
+	UpgradeCheckpointApplied   UpgradeCheckpointPhase = "Applied"
+	UpgradeCheckpointFailed    UpgradeCheckpointPhase = "Failed"
+)
+
+// UpgradeCheckpointStatus is the durable, installation-bound NB/SB pair used
+// by one version-only upgrade. DatabaseRefs are immutable store references;
+// the pair is usable only after both databases have been verified against the
+// same source version, target version, destination and retained topology.
+type UpgradeCheckpointStatus struct {
+	ID             string                 `json:"id,omitempty"`
+	DatabaseRefs   map[string]string      `json:"databaseRefs,omitempty"`
+	SourceVersion  string                 `json:"sourceVersion,omitempty"`
+	TargetVersion  string                 `json:"targetVersion,omitempty"`
+	Destination    string                 `json:"destination,omitempty"`
+	TopologyDigest string                 `json:"topologyDigest,omitempty"`
+	CapturedAt     metav1.Time            `json:"capturedAt,omitzero"`
+	AppliedAt      metav1.Time            `json:"appliedAt,omitzero"`
+	Phase          UpgradeCheckpointPhase `json:"phase,omitempty"`
+	Reason         string                 `json:"reason,omitempty"`
+}
+
 type UpgradeStatus struct {
-	PlanID               string `json:"planID,omitempty"`
-	Step                 string `json:"step,omitempty"`
-	CanRollback          bool   `json:"canRollback,omitempty"`
-	BackupID             string `json:"backupID,omitempty"`
-	TargetVersion        string `json:"targetVersion,omitempty"`
-	CheckpointAuthorized bool   `json:"checkpointAuthorized,omitzero"`
+	PlanID               string                   `json:"planID,omitempty"`
+	Step                 string                   `json:"step,omitempty"`
+	CanRollback          bool                     `json:"canRollback,omitempty"`
+	BackupID             string                   `json:"backupID,omitempty"`
+	TargetVersion        string                   `json:"targetVersion,omitempty"`
+	CheckpointAuthorized bool                     `json:"checkpointAuthorized,omitzero"`
+	Checkpoint           *UpgradeCheckpointStatus `json:"checkpoint,omitempty"`
 }
 
 type HCPStatus struct {
