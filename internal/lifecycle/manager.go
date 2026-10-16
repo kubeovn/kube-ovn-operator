@@ -30,6 +30,18 @@ type Recovery struct {
 	Completion *Completion
 }
 
+// Begin admits a controller-selected operation into the same durable executor
+// used by Resume. The journal is the source of truth before this method
+// returns, so a lost status update cannot cause a different selection on retry.
+func (m *Manager) Begin(ctx context.Context, installation *api.KubeOVNInstallation, request Request) (Reference, error) {
+	executor, closeStore, err := m.executor(installation)
+	if err != nil {
+		return Reference{}, err
+	}
+	defer closeStore()
+	return executor.Begin(ctx, request)
+}
+
 // Resume discovers the active installation operation, advances one durable
 // step when possible, and re-reads the journal. A complete result is accepted
 // only after the immutable receipt has been validated. The caller must hold
@@ -60,20 +72,11 @@ func (m *Manager) Resume(ctx context.Context, installation *api.KubeOVNInstallat
 		return nil, err
 	}
 	if operation.State.Phase != Complete {
-		if m.StoreFactory == nil || m.MaxAge <= 0 || m.MaxBytes <= 0 {
-			return nil, errors.New("active lifecycle operation requires an explicit backup store policy")
-		}
-		store, err := m.StoreFactory(installation)
+		executor, closeStore, err := m.executor(installation)
 		if err != nil {
 			return nil, err
 		}
-		if closer, ok := store.(interface{ Close() error }); ok {
-			defer func() { _ = closer.Close() }()
-		}
-		executor, err := NewKubernetes(m.Client, installation, m.Runner, store, m.MaxAge, m.MaxBytes)
-		if err != nil {
-			return nil, err
-		}
+		defer closeStore()
 		state, err := executor.Step(ctx, operation.Reference)
 		if err != nil {
 			return nil, err
@@ -90,4 +93,27 @@ func (m *Manager) Resume(ctx context.Context, installation *api.KubeOVNInstallat
 		}
 	}
 	return &Recovery{Reference: operation.Reference, Request: operation.Request, State: operation.State, Completion: operation.Completion}, nil
+}
+
+func (m *Manager) executor(installation *api.KubeOVNInstallation) (*Executor, func(), error) {
+	if m == nil || m.Client == nil || m.Runner == nil || installation == nil {
+		return nil, func() {}, errors.New("lifecycle manager requires a direct client, Pod runner and installation")
+	}
+	if m.StoreFactory == nil || m.MaxAge <= 0 || m.MaxBytes <= 0 {
+		return nil, func() {}, errors.New("active lifecycle operation requires an explicit backup store policy")
+	}
+	store, err := m.StoreFactory(installation)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	closeStore := func() {}
+	if closer, ok := store.(interface{ Close() error }); ok {
+		closeStore = func() { _ = closer.Close() }
+	}
+	executor, err := NewKubernetes(m.Client, installation, m.Runner, store, m.MaxAge, m.MaxBytes)
+	if err != nil {
+		closeStore()
+		return nil, func() {}, err
+	}
+	return executor, closeStore, nil
 }

@@ -305,3 +305,32 @@ func TestRetainedVerificationDoesNotInitializeBeforeFirstRollout(t *testing.T) {
 		t.Fatalf("lost status bypassed retained verification: %+v %v", got, err)
 	}
 }
+
+func TestRetainedVerificationUsesPinnedCountAcrossDesiredReplicaChanges(t *testing.T) {
+	f := newFixture(t)
+	ref, err := f.ensure(t)
+	if err != nil || ref == nil {
+		t.Fatalf("initial inventory: %+v %v", ref, err)
+	}
+	f.installation.Status.Topology.Inventory = ref
+	f.installation.Spec.Central.Replicas = 3
+	if err := f.kube.Update(t.Context(), f.installation); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kube.Status().Update(t.Context(), f.installation); err != nil {
+		t.Fatal(err)
+	}
+	leases := lease.New(f.kube)
+	err = leases.With(t.Context(), f.installation, lease.Installation, func(ctx context.Context) error {
+		return leases.With(ctx, f.installation, lease.Central, func(ctx context.Context) error {
+			got, err := f.provider.VerifyRetained(ctx, f.installation)
+			if err != nil || got == nil || *got != *ref {
+				return fmt.Errorf("pinned inventory was not verified after desired replica change: %+v %w", got, err)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

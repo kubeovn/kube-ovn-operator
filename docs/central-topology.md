@@ -2,8 +2,9 @@
 
 The default controller records an initial local RAFT identity inventory after
 workload rollout. It requires both installation-bound Leases, an uncached client
-and a complete observation of the desired central Pods. It does not select or
-start a membership transition. HCP, external databases and standalone mode use
+and a complete observation of the desired central Pods. Discovery itself does
+not select or start a membership transition; the controller's lifecycle selector
+may admit the safe one-member reduction described below. HCP, external databases and standalone mode use
 their existing health paths and do not establish this local RAFT baseline.
 
 Discovery follows the Pod/ReplicaSet/workload owner UID chain to the installation.
@@ -57,11 +58,14 @@ successor baseline. A future operation selector still must obtain fresh quorum,
 backup and approval evidence through the lifecycle executor.
 
 Baseline transitions require explicit lifecycle completion evidence; this module
-does not absorb external topology changes automatically. Automatic operation
-selection, old Deployment handoff, generation/apply-checkpoint authorization
-and strict in-flight fencing remain open. Joint observations are samples, not an
-atomic NB/SB snapshot. Retained metadata assumes trusted Kubernetes writers and
-cannot authenticate against an actor able to rewrite both records and status.
+does not absorb external topology changes automatically. The default controller
+can select one safe replica reduction from a retained inventory only when an
+exactly one-member independent StatefulSet is pinned successfully. Additions,
+ambiguous reductions, ordinary Chart Deployments, old Deployment handoff,
+generation/apply-checkpoint authorization and strict in-flight fencing remain
+open. Joint observations are samples, not an atomic NB/SB snapshot. Retained
+metadata assumes trusted Kubernetes writers and cannot authenticate against an
+actor able to rewrite both records and status.
 
 Tests cover complete and partial discovery, peer health/configuration disagreement,
 listener resolution and changes, identity replacement, missing/corrupt records,

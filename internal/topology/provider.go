@@ -33,6 +33,12 @@ type HandoffProvider interface {
 	Handoff(context.Context, *api.KubeOVNInstallation, *api.CentralTopologyReference) (*api.CentralTopologyReference, error)
 }
 
+// InventoryProvider exposes the validated retained identity set to a lifecycle
+// selector. It never discovers or authorizes a new topology by itself.
+type InventoryProvider interface {
+	Retained(context.Context, *api.KubeOVNInstallation) (health.CentralTopology, error)
+}
+
 // Kubernetes requires an uncached client and both installation-bound Leases.
 // Ensure returns a validated retained reference even when live discovery fails.
 // The caller persists that reference before publishing the observation failure.
@@ -56,6 +62,31 @@ func (p *Kubernetes) VerifyRetained(ctx context.Context, installation *api.KubeO
 
 func (p *Kubernetes) Ensure(ctx context.Context, installation *api.KubeOVNInstallation) (*api.CentralTopologyReference, error) {
 	return p.ensure(ctx, installation, true)
+}
+
+// Retained reads the currently pinned immutable topology without sampling a
+// potentially changing live membership. The lifecycle executor performs a
+// fresh quorum and identity observation before admitting the request.
+func (p *Kubernetes) Retained(ctx context.Context, installation *api.KubeOVNInstallation) (health.CentralTopology, error) {
+	if p.Client == nil || installation == nil || installation.Status.Topology.Inventory == nil {
+		return health.CentralTopology{}, errors.New("retained central topology is not available")
+	}
+	if err := p.guard(ctx, installation); err != nil {
+		return health.CentralTopology{}, err
+	}
+	object := new(corev1.ConfigMap)
+	ref := installation.Status.Topology.Inventory
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: ref.Name}, object); err != nil {
+		return health.CentralTopology{}, err
+	}
+	saved, current, err := readRecord(object, installation)
+	if err != nil {
+		return health.CentralTopology{}, err
+	}
+	if current == nil || *current != *ref {
+		return health.CentralTopology{}, errors.New("retained central topology reference changed")
+	}
+	return saved.Topology, p.guard(ctx, installation)
 }
 
 // Handoff records a newly observed topology under a new immutable name. The
@@ -164,7 +195,11 @@ func (p *Kubernetes) ensure(ctx context.Context, installation *api.KubeOVNInstal
 	if ref == nil && !initialize {
 		return nil, nil
 	}
-	observed, err := health.DiscoverCentralTopology(ctx, p.Client, p.Runner, installation)
+	expectedReplicas := int(installation.Spec.Central.Replicas)
+	if ref != nil {
+		expectedReplicas = len(saved.Topology.Members)
+	}
+	observed, err := health.DiscoverCentralTopologyWithExpectedReplicas(ctx, p.Client, p.Runner, installation, expectedReplicas)
 	if err != nil {
 		return ref, err
 	}

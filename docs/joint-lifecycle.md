@@ -11,9 +11,12 @@ operation journal before Chart rendering. It holds both operation Leases, checks
 the status-pinned original topology reference and immutable completion receipt,
 and fences ordinary Apply while the operation is incomplete. After completion,
 the controller performs a fresh final discovery and writes a new immutable
-topology baseline while retaining the old record. It still does not select new
-operations automatically, hand off an ordinary multi-replica Chart Deployment,
-or provide a complete installation/upgrade controller.
+topology baseline while retaining the old record. It also admits a single-step
+replica reduction when the retained inventory contains exactly one independently
+managed, owned one-member `OnDelete` StatefulSet and pins that workload before
+calling `Begin`. Additions, reductions requiring multiple operations, ambiguous
+retirement candidates and ordinary multi-replica Chart Deployments are blocked
+with an explicit safety status; they cannot silently reapply the Chart.
 
 ## Durable contract
 
@@ -75,6 +78,11 @@ It does not remove a Namespace, database or persistent volume.
 An ordinary multi-replica Chart Deployment cannot guarantee which member a
 replica decrease removes. Migrating those workloads to independently managed
 members remains a prerequisite for their retirement through this executor.
+The default selector requires one and only one eligible independent member; it
+does not infer a target from replica ordering or pod names. A desired increase
+also requires a complete prepared member request, including node, bound PVC/PV,
+runtime image and native preparation result, and is therefore not synthesized
+from Chart values.
 Runtime image publication/selection, automatic storage and TLS Secret lifecycle,
 node placement/changes, lifecycle-authorized inventory transitions and generation transitions,
 installation apply-checkpoint authorization and post-transition network checks

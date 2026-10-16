@@ -75,13 +75,22 @@ func (t CentralTopology) SameIdentity(other CentralTopology) bool {
 // Complete full IDs come from each server's own status. CommandClient then
 // verifies that every peer agrees with the leader's complete configuration.
 func DiscoverCentralTopology(ctx context.Context, reader client.Reader, runner CommandRunner, installation *api.KubeOVNInstallation) (CentralTopology, error) {
+	return DiscoverCentralTopologyWithExpectedReplicas(ctx, reader, runner, installation, int(installation.Spec.Central.Replicas))
+}
+
+// DiscoverCentralTopologyWithExpectedReplicas verifies a complete live
+// inventory against an explicitly selected member count. Retained verification
+// uses the previously admitted count while a desired replica change is waiting
+// for lifecycle authorization; final handoff uses the installation's desired
+// count through DiscoverCentralTopology.
+func DiscoverCentralTopologyWithExpectedReplicas(ctx context.Context, reader client.Reader, runner CommandRunner, installation *api.KubeOVNInstallation, expectedReplicas int) (CentralTopology, error) {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	bound, err := newMembershipRunner(ctx, reader, runner, installation)
 	if err != nil {
 		return CentralTopology{}, err
 	}
-	if len(bound.pods) == 0 || len(bound.pods) > 7 || len(bound.pods) != int(installation.Spec.Central.Replicas) {
+	if expectedReplicas < 1 || len(bound.pods) == 0 || len(bound.pods) > 7 || len(bound.pods) != expectedReplicas {
 		return CentralTopology{}, errors.New("complete desired central Pod inventory is not available")
 	}
 	result := CentralTopology{}
