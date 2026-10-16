@@ -437,6 +437,13 @@ replacement executor.
 Set `OVSDB_TEST_BIN` to a directory containing `ovsdb-tool`,
 `ovsdb-server`, `ovsdb-client` and `ovs-appctl` to run those tests locally. The kind job checks live Lease contention,
 renewal past the initial expiry, release, and loss cancellation.
+The CI `controller-deployment-handoff` job uses a three-control-plane kind
+cluster and a synthetic host-network central fixture to drive the real default
+controller through initial topology recording and `replaceEndpoint` admission.
+It checks the pinned Deployment/ReplicaSet/Pod identities and persisted
+lifecycle request and journal before stopping; native replacement convergence
+and workload retirement remain covered by the lifecycle integration tests until
+the real member runtime is wired into this scenario.
 The OVN runtime tests additionally use `OVN_TEST_BIN`, `OVN_TEST_SCHEMA_DIR`
 and `OVS_TEST_SCHEMA`; see the CI workflow for the extracted package layout.
 

@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ovn-central
+  template:
+    metadata:
+      labels:
+        app: ovn-central
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: ovn-central
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: ovn-central
+          image: kube-ovn-central-fixture:e2e
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args: ["exec sleep 3600"]
+          env:
+            - name: MASTER_NODES
+              value: {{ .Values.MASTER_NODES | quote }}
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          volumeMounts:
+            - name: ovn-data
+              mountPath: /etc/ovn
+      volumes:
+        - name: ovn-data
+          hostPath:
+            path: /tmp/kube-ovn-operator-controller-fixture
+            type: DirectoryOrCreate

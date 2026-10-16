@@ -52,3 +52,25 @@ jobs:
           kubectl get events -n kube-ovn-operator-system --sort-by=.metadata.creationTimestamp
           kubectl logs -n kube-ovn-operator-system member-seed-0 --all-containers --tail=100 || true
           kubectl logs -n kube-ovn-operator-system -l app=ovn-central --all-containers --tail=100 || true
+
+  controller-deployment-handoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: kube-ovn-operator-controller-e2e
+          config: test/e2e/kind-controller.yaml
+          wait: 120s
+      - name: Verify default Controller Deployment handoff admission
+        run: bash test/e2e/controller-handoff-smoke.sh
+      - name: Diagnose default Controller handoff failure
+        if: failure()
+        run: |
+          kubectl get kubeovninstallations,deployments,replicasets,pods,pvc,pv,configmaps -A -o wide || true
+          kubectl get events -A --sort-by=.metadata.creationTimestamp || true
