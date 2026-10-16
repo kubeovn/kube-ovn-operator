@@ -45,7 +45,7 @@ kind load docker-image --name "${cluster_name}" kube-ovn-central-fixture:e2e
 # StatefulSet can start on the worker without reaching a registry.
 fixture_image_name=docker.io/library/kube-ovn-central-fixture:e2e
 fixture_digest=""
-for node in $(kind get nodes --name "${cluster_name}"); do
+for node in $(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
   digest=$(docker exec "${node}" /usr/local/bin/ctr -n k8s.io images ls | awk -v image="${fixture_image_name}" '$1 == image {print $3}')
   if [[ ! "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
     echo "could not read fixture image digest on ${node}" >&2
