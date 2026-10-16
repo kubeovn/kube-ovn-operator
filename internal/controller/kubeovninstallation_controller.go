@@ -108,6 +108,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			return reconcile.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 		if recovery != nil {
+			recordLifecycleBackupStatus(installation, recovery)
 			if installation.Status.Topology.Operation == nil {
 				installation.Status.Topology.Operation = newOperationReference(recovery, installation.Status.Topology.Inventory)
 			}
@@ -602,6 +603,39 @@ func replicaOnlySpecChange(installation *operatorv1alpha1.KubeOVNInstallation, r
 		return false, fmt.Errorf("hash prior installation spec: %w", err)
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(data)) == installation.Status.ApplyCheckpoint.SpecHash, nil
+}
+
+func recordLifecycleBackupStatus(installation *operatorv1alpha1.KubeOVNInstallation, recovery *lifecycle.Recovery) {
+	if installation == nil || recovery == nil || len(recovery.Request.Databases) != 2 {
+		return
+	}
+	refs := make(map[string]string, len(recovery.Request.Databases))
+	latest := time.Time{}
+	for index, database := range recovery.Request.Databases {
+		if index >= len(recovery.State.Databases) || database.Database == "" {
+			return
+		}
+		captured := recovery.State.Databases[index]
+		if captured.BackupRef == "" || captured.CapturedAt.IsZero() {
+			return
+		}
+		refs[database.Database] = captured.BackupRef
+		if captured.CapturedAt.After(latest) {
+			latest = captured.CapturedAt
+		}
+	}
+	if len(refs) != 2 {
+		return
+	}
+	data, err := stdjson.Marshal(refs, stdjson.Deterministic(true))
+	if err != nil {
+		return
+	}
+	installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{
+		ID:           fmt.Sprintf("sha256:%x", sha256.Sum256(data)),
+		DatabaseRefs: refs,
+		CompletedAt:  metav1.NewTime(latest),
+	}
 }
 
 func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, rendered chart.Rendered) error {

@@ -14,6 +14,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
+	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -499,6 +500,33 @@ func TestLifecycleHandoffIsConsumedAfterApplyBeforeObservation(t *testing.T) {
 	}
 	if got.Status.Topology.Operation == nil || !got.Status.Topology.Operation.HandoffApplied {
 		t.Fatalf("successful apply did not consume handoff authorization: %+v", got.Status.Topology.Operation)
+	}
+}
+
+func TestRecordLifecycleBackupStatusRequiresAVerifiedPair(t *testing.T) {
+	installation := &operatorv1alpha1.KubeOVNInstallation{}
+	first := time.Unix(10, 0).UTC()
+	recovery := &lifecycle.Recovery{
+		Request: lifecycle.Request{Databases: []lifecycle.Inventory{{Database: "OVN_Northbound"}, {Database: "OVN_Southbound"}}},
+		State:   lifecycle.State{Databases: [2]lifecycle.DatabaseState{{BackupRef: "sha256:" + strings.Repeat("a", 64), CapturedAt: first}, {BackupRef: "sha256:" + strings.Repeat("b", 64), CapturedAt: first.Add(time.Second)}}},
+	}
+	recordLifecycleBackupStatus(installation, recovery)
+	if installation.Status.LastBackup == nil || len(installation.Status.LastBackup.DatabaseRefs) != 2 || installation.Status.LastBackup.CompletedAt.Time != first.Add(time.Second) {
+		t.Fatalf("verified backup pair was not recorded: %+v", installation.Status.LastBackup)
+	}
+	if installation.Status.LastBackup.ID == "" {
+		t.Fatal("backup pair has no stable ID")
+	}
+	copy := installation.Status.DeepCopy()
+	copy.LastBackup.DatabaseRefs["OVN_Northbound"] = "sha256:" + strings.Repeat("c", 64)
+	if installation.Status.LastBackup.DatabaseRefs["OVN_Northbound"] == copy.LastBackup.DatabaseRefs["OVN_Northbound"] {
+		t.Fatal("backup status deep copy shares database references")
+	}
+	installation.Status.LastBackup = nil
+	recovery.State.Databases[1].BackupRef = ""
+	recordLifecycleBackupStatus(installation, recovery)
+	if installation.Status.LastBackup != nil {
+		t.Fatal("partial backup pair was exposed as a completed checkpoint")
 	}
 }
 

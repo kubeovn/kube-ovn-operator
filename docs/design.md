@@ -114,10 +114,13 @@ token and row-count limits bound parsing memory. Truncated data, exec/disk
 failure, cancellation and stale process identity cannot yield a usable reference.
 
 The store is a trusted, operator-owned boundary; content hashes are not human
-approval signatures. No published backup is automatically deleted. The default
-controller does not provision a volume or connect this provider to the CR yet.
-S3, retention/scheduling, NB/SB checkpoint coordination, RPO/RTO policy and the
-restore/recovery executor remain part of the full lifecycle goal. Native OVSDB
+approval signatures. No published backup is automatically deleted. The lifecycle
+controller records a verified pair of references and its pair ID in
+`status.lastBackup`, but does not provision a volume or use that status as an
+upgrade authorization. The default controller does not yet connect this provider
+to `spec.upgrade.backup.destination`. S3, retention/scheduling, NB/SB upgrade
+checkpoint coordination, RPO/RTO policy and the restore/recovery executor
+remain part of the full lifecycle goal. Native OVSDB
 restore tests verify schema/data loading and preserved row UUIDs, but runtime
 format validation does not reimplement the OVSDB semantic type checker.
 

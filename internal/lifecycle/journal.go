@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
@@ -41,6 +42,7 @@ const (
 
 type DatabaseState struct {
 	BackupRef        string             `json:"backupRef,omitempty"`
+	CapturedAt       time.Time          `json:"capturedAt,omitempty"`
 	Intent           *membership.Change `json:"intent,omitempty"`
 	ApprovalReserved bool               `json:"approvalReserved,omitzero"`
 }

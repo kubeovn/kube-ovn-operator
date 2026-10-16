@@ -320,9 +320,10 @@ Parsing also limits schemas to 4 MiB, JSON tokens to 1 MiB and each table to
 deletes them. File digests prove integrity, not human approval or authenticity
 against an actor who can rewrite both the store and trusted references.
 
-This adapter is not yet wired to `spec.upgrade.backup.destination` or
-`status.lastBackup`; the persistent lifecycle executor must own those updates.
-S3, retention, backup scheduling, cross-database NB/SB checkpoints, recovery
+The persistent lifecycle executor now records a verified NB/SB backup pair in
+`status.lastBackup`, including the two immutable references, a pair ID and the
+latest capture time. It is not yet wired to `spec.upgrade.backup.destination`.
+S3, retention, backup scheduling, cross-database upgrade checkpoints, recovery
 execution and product RPO/RTO policy remain to be implemented. The provider
 checks the native file structure and provenance, not all OVSDB schema semantics;
 tests load the stored files into fresh OVSDB processes and verify recovered data
