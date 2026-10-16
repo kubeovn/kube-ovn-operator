@@ -217,10 +217,12 @@ or applying the Chart. It holds both operation Leases, validates the pinned
 request and immutable completion receipt, and keeps ordinary Apply fenced while
 the operation is incomplete. After a completed operation it discovers a fresh
 final topology and creates a new immutable baseline; the old baseline remains
-for audit. Automatic operation selection, old Chart Deployment handoff, runtime
-image publication, automatic storage provisioning, TLS Secret identity
-management and Kubernetes node replacement remain separate work. Pod readiness
-alone does not prove database health. See [member workload contract](docs/member-workloads.md).
+for audit. A safe selected reduction then authorizes the next apply checkpoint,
+applies the new Chart inputs and records the handoff as complete. Ordinary Chart
+Deployment retirement, runtime image publication, automatic storage
+provisioning, TLS Secret identity management and Kubernetes node replacement
+remain separate work. Pod readiness alone does not prove database health. See
+[member workload contract](docs/member-workloads.md).
 
 Lifecycle recovery is enabled only when the operator is started with an
 existing operator-owned `--backup-dir`; `--backup-max-age` and

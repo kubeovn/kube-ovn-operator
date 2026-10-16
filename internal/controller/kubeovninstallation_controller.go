@@ -119,54 +119,61 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				}
 				return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 			}
-			if installation.Status.Topology.Operation.HandoffInventory != nil {
-				plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "WorkloadHandoff", "central lifecycle completed; old Chart workload handoff is still required"
+			operation := installation.Status.Topology.Operation
+			if operation == nil {
+				return reconcile.Result{}, errors.New("completed lifecycle has no operation reference")
+			}
+			if recovery.Completion == nil && operation.CompletionDigest == "" {
+				return reconcile.Result{}, errors.New("completed lifecycle has no immutable completion receipt")
+			}
+			if operation.CompletionDigest == "" && recovery.Completion != nil {
+				operation.CompletionDigest = recovery.Completion.Digest
+			}
+			if operation.HandoffInventory == nil {
+				if r.Topology == nil {
+					return reconcile.Result{}, errors.New("completed lifecycle requires a topology handoff provider")
+				}
+				handoff, ok := r.Topology.(topology.HandoffProvider)
+				if !ok || installation.Status.Topology.Inventory == nil {
+					return reconcile.Result{}, errors.New("completed lifecycle cannot hand off without the retained topology provider")
+				}
+				var next *operatorv1alpha1.CentralTopologyReference
+				handoffErr := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+					return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
+						var err error
+						next, err = handoff.Handoff(centralCtx, installation, installation.Status.Topology.Inventory)
+						return err
+					})
+				})
+				if handoffErr != nil {
+					plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "TopologyHandoff", handoffErr.Error()
+					if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); err != nil {
+						return reconcile.Result{}, err
+					}
+					return reconcile.Result{RequeueAfter: 15 * time.Second}, nil
+				}
+				if next == nil {
+					return reconcile.Result{}, errors.New("topology handoff returned no reference")
+				}
+				operation.HandoffInventory = next
+				operation.HandoffApplied = false
+				installation.Status.Topology.Inventory = next
+				plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "WorkloadHandoff", "central topology handed off; apply checkpoint authorization is pending"
 				condition := &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionTrue, Reason: "LifecycleComplete", Message: plan.Blocking}
 				if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, condition); err != nil {
 					return reconcile.Result{}, err
 				}
-				return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+				return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 			}
-			if r.Topology == nil {
-				return reconcile.Result{}, errors.New("completed lifecycle requires a topology handoff provider")
+			if installation.Status.Topology.Inventory == nil || *installation.Status.Topology.Inventory != *operation.HandoffInventory {
+				return reconcile.Result{}, errors.New("completed lifecycle handoff does not match the retained topology")
 			}
-			handoff, ok := r.Topology.(topology.HandoffProvider)
-			if !ok || installation.Status.Topology.Inventory == nil {
-				return reconcile.Result{}, errors.New("completed lifecycle cannot hand off without the retained topology provider")
+			if !operation.HandoffApplied {
+				plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "WorkloadHandoff", "lifecycle completion authorizes the next Chart apply checkpoint"
 			}
-			var next *operatorv1alpha1.CentralTopologyReference
-			handoffErr := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
-				return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
-					var err error
-					next, err = handoff.Handoff(centralCtx, installation, installation.Status.Topology.Inventory)
-					return err
-				})
-			})
-			if handoffErr != nil {
-				plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "TopologyHandoff", handoffErr.Error()
-				if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); err != nil {
-					return reconcile.Result{}, err
-				}
-				return reconcile.Result{RequeueAfter: 15 * time.Second}, nil
-			}
-			if next == nil {
-				return reconcile.Result{}, errors.New("topology handoff returned no reference")
-			}
-			operation := installation.Status.Topology.Operation
-			operation.HandoffInventory = next
-			if recovery.Completion != nil {
-				operation.CompletionDigest = recovery.Completion.Digest
-			}
-			installation.Status.Topology.Inventory = next
-			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "WorkloadHandoff", "central topology handed off; old Chart workload remains fenced"
-			condition := &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionTrue, Reason: "LifecycleComplete", Message: plan.Blocking}
-			if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, condition); err != nil {
-				return reconcile.Result{}, err
-			}
-			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 	}
-	if localRaft(installation) && r.Lifecycle != nil && installation.Status.Topology.Operation == nil && installation.Status.Topology.Inventory != nil && installation.Status.ApplyCheckpoint != nil {
+	if localRaft(installation) && r.Lifecycle != nil && (installation.Status.Topology.Operation == nil || installation.Status.Topology.Operation.HandoffApplied) && installation.Status.Topology.Inventory != nil && installation.Status.ApplyCheckpoint != nil {
 		started, selectionErr := r.beginAutomaticLifecycle(ctx, installation, plan, now)
 		if selectionErr != nil {
 			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "LifecycleSelection", selectionErr.Error()
@@ -242,6 +249,11 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			}
 			if err := workload.Apply(operationCtx, rendered.Objects); err != nil {
 				return err
+			}
+			if lifecycleHandoffAuthorizesApply(installation) && installation.Status.Topology.Operation != nil {
+				// Consume the lifecycle authorization when the Chart write is
+				// accepted. Later observation failures must not make it reusable.
+				installation.Status.Topology.Operation.HandoffApplied = true
 			}
 			plan.Step = "Observe"
 			if observer, ok := workload.(apply.Observer); ok {
@@ -324,6 +336,13 @@ func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Cont
 			request, err = lifecycle.SelectRemoval(centralCtx, r.Lifecycle.Client, installation, retained)
 			if err != nil || request == nil {
 				return err
+			}
+			replicaOnly, err := replicaOnlySpecChange(installation, len(retained.Members))
+			if err != nil {
+				return err
+			}
+			if !replicaOnly {
+				return errors.New("automatic lifecycle selection requires the desired change to modify central replicas only")
 			}
 			verified, err := r.Topology.VerifyRetained(centralCtx, installation)
 			if err != nil {
@@ -572,6 +591,19 @@ func operationReference(reference lifecycle.Reference, inventory *operatorv1alph
 	return result
 }
 
+func replicaOnlySpecChange(installation *operatorv1alpha1.KubeOVNInstallation, retainedReplicas int) (bool, error) {
+	if installation == nil || installation.Status.ApplyCheckpoint == nil || retainedReplicas < 1 {
+		return false, errors.New("automatic lifecycle selection requires an existing apply checkpoint and retained member count")
+	}
+	spec := installation.Spec
+	spec.Central.Replicas = int32(retainedReplicas)
+	data, err := stdjson.Marshal(spec, stdjson.Deterministic(true))
+	if err != nil {
+		return false, fmt.Errorf("hash prior installation spec: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data)) == installation.Status.ApplyCheckpoint.SpecHash, nil
+}
+
 func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, rendered chart.Rendered) error {
 	specJSON, err := stdjson.Marshal(installation.Spec, stdjson.Deterministic(true))
 	if err != nil {
@@ -588,7 +620,16 @@ func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Contex
 	}
 	if existing := installation.Status.ApplyCheckpoint; existing != nil {
 		if *existing != checkpoint {
-			return fmt.Errorf("installation inputs changed after the first apply checkpoint; a lifecycle executor is required")
+			if !lifecycleHandoffAuthorizesApply(installation) {
+				return fmt.Errorf("installation inputs changed after the first apply checkpoint; a lifecycle executor is required")
+			}
+			previous := *existing
+			installation.Status.ApplyCheckpoint = &checkpoint
+			if err := r.Status().Update(ctx, installation); err != nil {
+				installation.Status.ApplyCheckpoint = &previous
+				return fmt.Errorf("persist lifecycle-authorized apply checkpoint: %w", err)
+			}
+			return nil
 		}
 		return nil
 	}
@@ -600,6 +641,13 @@ func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Contex
 		return fmt.Errorf("persist apply checkpoint: %w", err)
 	}
 	return nil
+}
+
+func lifecycleHandoffAuthorizesApply(installation *operatorv1alpha1.KubeOVNInstallation) bool {
+	if installation == nil || installation.Status.Topology.Operation == nil || installation.Status.Topology.Operation.HandoffApplied || installation.Status.Topology.Operation.CompletionDigest == "" || installation.Status.Topology.Operation.HandoffInventory == nil || installation.Status.Topology.Inventory == nil {
+		return false
+	}
+	return *installation.Status.Topology.Operation.HandoffInventory == *installation.Status.Topology.Inventory
 }
 
 func installationWithStatus(in *operatorv1alpha1.KubeOVNInstallation, status operatorv1alpha1.KubeOVNInstallationStatus) *operatorv1alpha1.KubeOVNInstallation {
