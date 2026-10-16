@@ -234,8 +234,22 @@ func (in *TopologyStatus) DeepCopyInto(out *TopologyStatus) {
 		copy(out.Nodes, in.Nodes)
 	}
 }
-func (in *UpgradeStatus) DeepCopyInto(out *UpgradeStatus) { *out = *in }
-func (in *HCPStatus) DeepCopyInto(out *HCPStatus)         { *out = *in }
+func (in *UpgradeStatus) DeepCopyInto(out *UpgradeStatus) {
+	*out = *in
+	if in.Checkpoint != nil {
+		out.Checkpoint = new(UpgradeCheckpointStatus)
+		*out.Checkpoint = *in.Checkpoint
+		out.Checkpoint.CapturedAt = *in.Checkpoint.CapturedAt.DeepCopy()
+		out.Checkpoint.AppliedAt = *in.Checkpoint.AppliedAt.DeepCopy()
+		if in.Checkpoint.DatabaseRefs != nil {
+			out.Checkpoint.DatabaseRefs = make(map[string]string, len(in.Checkpoint.DatabaseRefs))
+			for key, value := range in.Checkpoint.DatabaseRefs {
+				out.Checkpoint.DatabaseRefs[key] = value
+			}
+		}
+	}
+}
+func (in *HCPStatus) DeepCopyInto(out *HCPStatus) { *out = *in }
 func (in *BackupStatus) DeepCopyInto(out *BackupStatus) {
 	*out = *in
 	if in.DatabaseRefs != nil {

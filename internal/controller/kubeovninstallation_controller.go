@@ -6,6 +6,7 @@ import (
 	stdjson "encoding/json/v2"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -299,24 +300,36 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 					return err
 				}
 			}
+			upgradeAuthorized := upgradeAuthorizesApply(installation)
+			if upgradeAuthorized {
+				plan.Step = "UpgradeCheckpoint"
+				if err := r.beginUpgradeApply(operationCtx, installation); err != nil {
+					return err
+				}
+			}
 			plan.Step = "Apply"
 			if err := lease.CheckAll(operationCtx); err != nil {
 				return err
 			}
 			if err := workload.Apply(operationCtx, rendered.Objects); err != nil {
+				if upgradeAuthorized {
+					return errors.Join(err, r.failUpgradeApply(operationCtx, installation, err.Error()))
+				}
 				return err
 			}
-			upgradeAuthorized := upgradeAuthorizesApply(installation)
+			if upgradeAuthorized {
+				// Persist the accepted target before observing it. If the process
+				// exits after Chart Apply, the next reconciliation can retry this
+				// idempotent target from the durable Applying phase rather than
+				// treating the verified backup as a fresh authorization.
+				if err := r.markUpgradeCheckpointApplied(operationCtx, installation, now()); err != nil {
+					return err
+				}
+			}
 			if lifecycleHandoffAuthorizesApply(installation) && installation.Status.Topology.Operation != nil {
 				// Consume the lifecycle authorization when the Chart write is
 				// accepted. Later observation failures must not make it reusable.
 				installation.Status.Topology.Operation.HandoffApplied = true
-			}
-			if upgradeAuthorized {
-				// Consume the upgrade authorization as soon as the Chart write is
-				// accepted. A later observation failure must not replay the same
-				// version checkpoint on the next reconciliation.
-				installation.Status.Upgrade.CheckpointAuthorized = false
 			}
 			plan.Step = "Observe"
 			if observer, ok := workload.(apply.Observer); ok {
@@ -518,6 +531,12 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 			status.ObservedVersion = installation.Spec.Version
 			readyReason = "VerificationPending"
 		}
+	}
+	if observation != nil && observation.Ready && status.Upgrade.Checkpoint != nil && status.Upgrade.Checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplying && status.Upgrade.Checkpoint.TargetVersion == installation.Spec.Version {
+		status.Upgrade.Checkpoint.Phase = operatorv1alpha1.UpgradeCheckpointApplied
+		status.Upgrade.Checkpoint.Reason = "target rollout observed after an in-flight Chart write"
+		status.Upgrade.Checkpoint.AppliedAt = metav1.NewTime(now.UTC())
+		status.Upgrade.CheckpointAuthorized = false
 	}
 	if ovnReport != nil {
 		ovnStatus, ovnReason, ovnMessage = metav1.ConditionFalse, ovnReport.Reason, ovnReport.Message
@@ -805,28 +824,87 @@ func (r *KubeOVNInstallationReconciler) ensureUpgradeBackup(ctx context.Context,
 		return false, errors.New("upgrade requires a complete retained topology reference")
 	}
 	binding := lifecycle.BackupBinding{Destination: backupDestination(installation), Version: installation.Status.ObservedVersion, TopologyDigest: ref.Digest}
-	var retained health.CentralTopology
-	var captured *operatorv1alpha1.BackupStatus
+	targetVersion := installation.Spec.Version
+	ready := false
 	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
-			var err error
-			retained, err = provider.Retained(centralCtx, installation)
+			retained, err := provider.Retained(centralCtx, installation)
 			if err != nil {
 				return fmt.Errorf("verify retained topology before upgrade backup: %w", err)
 			}
-			current := installation.Status.LastBackup
-			if current != nil && strings.TrimSpace(current.Destination) == binding.Destination && current.Version == binding.Version && current.TopologyDigest == binding.TopologyDigest {
-				if err := r.Lifecycle.VerifyBackupPair(centralCtx, installation, retained, binding, current); err != nil {
-					installation.Status.Upgrade.CheckpointAuthorized = false
-					return fmt.Errorf("verify retained upgrade backup pair: %w", err)
+			checkpoint := installation.Status.Upgrade.Checkpoint
+			if upgradeCheckpointMatches(checkpoint, binding, targetVersion) {
+				candidate := backupFromUpgradeCheckpoint(checkpoint)
+				switch checkpoint.Phase {
+				case operatorv1alpha1.UpgradeCheckpointApplying:
+					// The target Chart write may have been accepted before the
+					// process stopped. Retrying the same target is idempotent and
+					// remains bound to this exact pair.
+					ready = true
+					return nil
+				case operatorv1alpha1.UpgradeCheckpointApplied:
+					if installation.Status.ObservedVersion == targetVersion {
+						return nil
+					}
+					checkpoint = cloneUpgradeCheckpoint(checkpoint)
+					checkpoint.Phase = operatorv1alpha1.UpgradeCheckpointApplying
+					checkpoint.Reason = "resuming an accepted upgrade whose target rollout is not yet observed"
+					if err := r.persistUpgradeCheckpoint(centralCtx, installation, checkpoint, candidate, false); err != nil {
+						return err
+					}
+					ready = true
+					return nil
+				case operatorv1alpha1.UpgradeCheckpointVerified:
+					if err := r.Lifecycle.VerifyBackupPair(centralCtx, installation, retained, binding, candidate); err != nil {
+						failure := r.failUpgradeCheckpoint(centralCtx, installation, fmt.Sprintf("verify retained upgrade backup pair: %v", err))
+						return errors.Join(fmt.Errorf("verify retained upgrade backup pair: %w", err), failure)
+					}
+					if installation.Status.Upgrade.CheckpointAuthorized {
+						ready = true
+						return nil
+					}
+					if err := r.persistUpgradeCheckpoint(centralCtx, installation, checkpoint, candidate, true); err != nil {
+						return err
+					}
+					// Persist authorization separately from capture/verification;
+					// a restart can never infer it from an incomplete pair.
+					return nil
 				}
-				captured = new(operatorv1alpha1.BackupStatus)
-				current.DeepCopyInto(captured)
-				return nil
 			}
-			captured, err = r.Lifecycle.CaptureBackupPair(centralCtx, installation, retained, binding)
-			if err != nil {
-				return fmt.Errorf("capture upgrade backup pair: %w", err)
+
+			// Persist the in-flight phase before touching either database. This
+			// makes a crash during the sequential native captures visible and
+			// prevents a partial pair from becoming an upgrade authorization.
+			pending := &operatorv1alpha1.UpgradeCheckpointStatus{
+				SourceVersion:  binding.Version,
+				TargetVersion:  targetVersion,
+				Destination:    binding.Destination,
+				TopologyDigest: binding.TopologyDigest,
+				Phase:          operatorv1alpha1.UpgradeCheckpointCapturing,
+			}
+			if err := r.persistUpgradeCheckpoint(centralCtx, installation, pending, nil, false); err != nil {
+				return err
+			}
+			candidate := matchingLastBackup(installation.Status.LastBackup, binding)
+			if candidate != nil {
+				if err := r.Lifecycle.VerifyBackupPair(centralCtx, installation, retained, binding, candidate); err != nil {
+					failure := r.failUpgradeCheckpoint(centralCtx, installation, fmt.Sprintf("verify retained upgrade backup pair: %v", err))
+					return errors.Join(fmt.Errorf("verify retained upgrade backup pair: %w", err), failure)
+				}
+			} else {
+				candidate, err = r.Lifecycle.CaptureBackupPair(centralCtx, installation, retained, binding)
+				if err != nil {
+					failure := r.failUpgradeCheckpoint(centralCtx, installation, fmt.Sprintf("capture upgrade backup pair: %v", err))
+					return errors.Join(fmt.Errorf("capture upgrade backup pair: %w", err), failure)
+				}
+			}
+			if err := validateScheduledBackup(candidate, binding); err != nil {
+				failure := r.failUpgradeCheckpoint(centralCtx, installation, err.Error())
+				return errors.Join(err, failure)
+			}
+			verified := upgradeCheckpointFromBackup(candidate, targetVersion)
+			if err := r.persistUpgradeCheckpoint(centralCtx, installation, verified, candidate, false); err != nil {
+				return err
 			}
 			return nil
 		})
@@ -834,17 +912,85 @@ func (r *KubeOVNInstallationReconciler) ensureUpgradeBackup(ctx context.Context,
 	if err != nil {
 		return false, err
 	}
-	if captured == nil {
-		return false, errors.New("upgrade backup manager returned no pair")
+	return ready, nil
+}
+
+func matchingLastBackup(status *operatorv1alpha1.BackupStatus, binding lifecycle.BackupBinding) *operatorv1alpha1.BackupStatus {
+	if status == nil || strings.TrimSpace(status.Destination) != binding.Destination || status.Version != binding.Version || status.TopologyDigest != binding.TopologyDigest {
+		return nil
 	}
-	installation.Status.LastBackup = captured
-	if installation.Status.Upgrade.TargetVersion != installation.Spec.Version || installation.Status.Upgrade.BackupID != captured.ID || !installation.Status.Upgrade.CheckpointAuthorized {
-		installation.Status.Upgrade.BackupID = captured.ID
-		installation.Status.Upgrade.TargetVersion = installation.Spec.Version
-		installation.Status.Upgrade.CheckpointAuthorized = true
-		return false, nil
+	result := new(operatorv1alpha1.BackupStatus)
+	status.DeepCopyInto(result)
+	return result
+}
+
+func upgradeCheckpointFromBackup(status *operatorv1alpha1.BackupStatus, targetVersion string) *operatorv1alpha1.UpgradeCheckpointStatus {
+	if status == nil {
+		return nil
 	}
-	return true, nil
+	return &operatorv1alpha1.UpgradeCheckpointStatus{
+		ID: status.ID, DatabaseRefs: maps.Clone(status.DatabaseRefs), SourceVersion: status.Version,
+		TargetVersion: targetVersion, Destination: status.Destination, TopologyDigest: status.TopologyDigest,
+		CapturedAt: status.CompletedAt, Phase: operatorv1alpha1.UpgradeCheckpointVerified,
+	}
+}
+
+func backupFromUpgradeCheckpoint(checkpoint *operatorv1alpha1.UpgradeCheckpointStatus) *operatorv1alpha1.BackupStatus {
+	if checkpoint == nil {
+		return nil
+	}
+	return &operatorv1alpha1.BackupStatus{
+		ID: checkpoint.ID, DatabaseRefs: maps.Clone(checkpoint.DatabaseRefs), Destination: checkpoint.Destination,
+		Version: checkpoint.SourceVersion, TopologyDigest: checkpoint.TopologyDigest, CompletedAt: checkpoint.CapturedAt,
+	}
+}
+
+func cloneUpgradeCheckpoint(checkpoint *operatorv1alpha1.UpgradeCheckpointStatus) *operatorv1alpha1.UpgradeCheckpointStatus {
+	if checkpoint == nil {
+		return nil
+	}
+	result := new(operatorv1alpha1.UpgradeCheckpointStatus)
+	*result = *checkpoint
+	result.DatabaseRefs = maps.Clone(checkpoint.DatabaseRefs)
+	return result
+}
+
+func upgradeCheckpointMatches(checkpoint *operatorv1alpha1.UpgradeCheckpointStatus, binding lifecycle.BackupBinding, targetVersion string) bool {
+	if checkpoint == nil || checkpoint.ID == "" || len(checkpoint.DatabaseRefs) != 2 || checkpoint.SourceVersion != binding.Version || checkpoint.TargetVersion != targetVersion || strings.TrimSpace(checkpoint.Destination) != binding.Destination || checkpoint.TopologyDigest != binding.TopologyDigest {
+		return false
+	}
+	return checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointVerified || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplying || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplied
+}
+
+func (r *KubeOVNInstallationReconciler) persistUpgradeCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, checkpoint *operatorv1alpha1.UpgradeCheckpointStatus, backup *operatorv1alpha1.BackupStatus, authorized bool) error {
+	previous := installation.Status.DeepCopy()
+	installation.Status.Upgrade.Checkpoint = cloneUpgradeCheckpoint(checkpoint)
+	installation.Status.Upgrade.CheckpointAuthorized = authorized
+	installation.Status.Upgrade.BackupID = ""
+	installation.Status.Upgrade.TargetVersion = ""
+	if checkpoint != nil {
+		installation.Status.Upgrade.BackupID = checkpoint.ID
+		installation.Status.Upgrade.TargetVersion = checkpoint.TargetVersion
+	}
+	if backup != nil {
+		installation.Status.LastBackup = new(operatorv1alpha1.BackupStatus)
+		backup.DeepCopyInto(installation.Status.LastBackup)
+	}
+	if err := r.Status().Update(ctx, installation); err != nil {
+		installation.Status = *previous
+		return fmt.Errorf("persist upgrade checkpoint: %w", err)
+	}
+	return nil
+}
+
+func (r *KubeOVNInstallationReconciler) failUpgradeCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, reason string) error {
+	checkpoint := cloneUpgradeCheckpoint(installation.Status.Upgrade.Checkpoint)
+	if checkpoint == nil {
+		checkpoint = &operatorv1alpha1.UpgradeCheckpointStatus{TargetVersion: installation.Spec.Version}
+	}
+	checkpoint.Phase = operatorv1alpha1.UpgradeCheckpointFailed
+	checkpoint.Reason = reason
+	return r.persistUpgradeCheckpoint(ctx, installation, checkpoint, nil, false)
 }
 
 func upgradeOnlySpecChange(installation *operatorv1alpha1.KubeOVNInstallation) bool {
@@ -896,6 +1042,37 @@ func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Contex
 	return nil
 }
 
+func (r *KubeOVNInstallationReconciler) beginUpgradeApply(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) error {
+	checkpoint := cloneUpgradeCheckpoint(installation.Status.Upgrade.Checkpoint)
+	if checkpoint == nil || !upgradeCheckpointMatches(checkpoint, lifecycle.BackupBinding{Destination: checkpoint.Destination, Version: checkpoint.SourceVersion, TopologyDigest: checkpoint.TopologyDigest}, checkpoint.TargetVersion) {
+		return errors.New("upgrade apply requires a complete durable checkpoint")
+	}
+	checkpoint.Phase = operatorv1alpha1.UpgradeCheckpointApplying
+	checkpoint.Reason = "Chart apply is authorized by the verified NB/SB pair"
+	return r.persistUpgradeCheckpoint(ctx, installation, checkpoint, backupFromUpgradeCheckpoint(checkpoint), false)
+}
+
+func (r *KubeOVNInstallationReconciler) markUpgradeCheckpointApplied(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, now time.Time) error {
+	checkpoint := cloneUpgradeCheckpoint(installation.Status.Upgrade.Checkpoint)
+	if checkpoint == nil || checkpoint.Phase != operatorv1alpha1.UpgradeCheckpointApplying {
+		return errors.New("upgrade apply did not have an Applying checkpoint")
+	}
+	checkpoint.Phase = operatorv1alpha1.UpgradeCheckpointApplied
+	checkpoint.Reason = "Chart write accepted; target rollout remains subject to observation"
+	checkpoint.AppliedAt = metav1.NewTime(now.UTC())
+	return r.persistUpgradeCheckpoint(ctx, installation, checkpoint, backupFromUpgradeCheckpoint(checkpoint), false)
+}
+
+func (r *KubeOVNInstallationReconciler) failUpgradeApply(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, reason string) error {
+	checkpoint := cloneUpgradeCheckpoint(installation.Status.Upgrade.Checkpoint)
+	if checkpoint == nil {
+		return errors.New("cannot record upgrade apply failure without a checkpoint")
+	}
+	checkpoint.Phase = operatorv1alpha1.UpgradeCheckpointFailed
+	checkpoint.Reason = reason
+	return r.persistUpgradeCheckpoint(ctx, installation, checkpoint, backupFromUpgradeCheckpoint(checkpoint), false)
+}
+
 func lifecycleHandoffAuthorizesApply(installation *operatorv1alpha1.KubeOVNInstallation) bool {
 	if installation == nil || installation.Status.Topology.Operation == nil || installation.Status.Topology.Operation.HandoffApplied || installation.Status.Topology.Operation.CompletionDigest == "" || installation.Status.Topology.Operation.HandoffInventory == nil || installation.Status.Topology.Inventory == nil {
 		return false
@@ -907,9 +1084,20 @@ func upgradeAuthorizesApply(installation *operatorv1alpha1.KubeOVNInstallation) 
 	if installation == nil || installation.Status.ApplyCheckpoint == nil || installation.Status.ObservedVersion == "" || installation.Status.ObservedVersion == installation.Spec.Version || !upgradeOnlySpecChange(installation) {
 		return false
 	}
-	backup := installation.Status.LastBackup
 	ref := installation.Status.Topology.Inventory
-	return installation.Status.Upgrade.CheckpointAuthorized && installation.Status.Upgrade.TargetVersion == installation.Spec.Version && installation.Status.Upgrade.BackupID != "" && backup != nil && backup.ID == installation.Status.Upgrade.BackupID && strings.TrimSpace(backup.Destination) == backupDestination(installation) && backup.Version == installation.Status.ObservedVersion && ref != nil && backup.TopologyDigest == ref.Digest && installation.Status.ApplyCheckpoint.Version == installation.Status.ObservedVersion
+	if ref == nil {
+		return false
+	}
+	binding := lifecycle.BackupBinding{Destination: backupDestination(installation), Version: installation.Status.ObservedVersion, TopologyDigest: ref.Digest}
+	checkpoint := installation.Status.Upgrade.Checkpoint
+	if !upgradeCheckpointMatches(checkpoint, binding, installation.Spec.Version) || checkpoint.ID == "" || len(checkpoint.DatabaseRefs) != 2 {
+		return false
+	}
+	backup := backupFromUpgradeCheckpoint(checkpoint)
+	if validateScheduledBackup(backup, binding) != nil || installation.Status.ApplyCheckpoint.Version != installation.Status.ObservedVersion {
+		return false
+	}
+	return checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplying || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointVerified && installation.Status.Upgrade.CheckpointAuthorized
 }
 
 func backupDestination(installation *operatorv1alpha1.KubeOVNInstallation) string {

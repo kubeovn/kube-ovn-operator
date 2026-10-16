@@ -356,18 +356,26 @@ the AWS credential environment. S3 publication uploads immutable digest-keyed
 snapshot and manifest objects and returns a reference only after both succeed;
 failed uploads are not deleted automatically. Before a version-only upgrade,
 the controller re-verifies a matching pair or captures a new one, then
-authorizes one apply checkpoint for the requested target version. The
-authorization is consumed when the Chart write is accepted and cannot be
-reused after a target, destination or topology change. Set
+persists the durable upgrade checkpoint for the requested target version. The
+checkpoint is consumed after the Chart write is accepted and cannot be reused
+after a target, destination or topology change. Set
 `spec.upgrade.backup.schedule` to a duration between one minute and thirty days
 to request periodic verified NB/SB captures. A due scheduled capture runs under
 both operation Leases, requires the retained topology and current observed
 version, persists `status.lastBackup`, and returns before Chart rendering; it
 does not change `status.applyCheckpoint` or authorize a Chart write. Scheduling
 is skipped while a lifecycle operation or version-only upgrade is in flight,
-and for HCP or data-plane-only installations. Retention, cross-database upgrade
-checkpoints, recovery execution and product RPO/RTO policy remain to be
-implemented. The
+and for HCP or data-plane-only installations. Retention, recovery execution and
+product RPO/RTO policy remain to be implemented. A version-only upgrade now
+stores a separate durable `status.upgrade.checkpoint` with `Capturing`,
+`Verified`, `Applying`, `Applied` and `Failed` phases. The checkpoint contains
+both immutable database references and binds them to the source version, target
+version, destination and retained topology. Only a verified pair can authorize
+the Chart write; an in-flight or failed phase cannot be inferred from
+`status.lastBackup`. The pair is coordinated durably, but the two native
+`ovsdb-client backup` calls remain sequential and do not form an application
+write barrier or an atomic RAFT snapshot. Cross-database rollback and the
+restore/recovery executor are still pending. The
 provider checks the native file structure and provenance, not all OVSDB schema
 semantics; tests load the stored files into fresh OVSDB processes and verify
 recovered data and row UUIDs for both OVN schemas. It does not restore over a
