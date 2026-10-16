@@ -32,6 +32,13 @@ const reservationAnnotation = "operator.kubeovn.io/member-reservation"
 const memberLabel = "operator.kubeovn.io/member-record"
 const dataPath = "/var/lib/ovn-member"
 
+// RecordName returns the stable ConfigMap/StatefulSet slot name for a member
+// request. It is derived from installation identity and the immutable member
+// name so a completed request can be matched to a retained topology.
+func RecordName(installationUID, memberName string) string {
+	return fmt.Sprintf("ovn-member-%x", sha256.Sum256([]byte(installationUID+"/"+memberName)))[:43]
+}
+
 // Reference pins an API object's identity, including after a controller restart.
 type Reference struct {
 	Name string    `json:"name"`
@@ -98,7 +105,7 @@ func (p *Provisioner) Prepare(ctx context.Context, request Request) (Preparation
 	if err := p.guard(ctx, request, ""); err != nil {
 		return Preparation{}, err
 	}
-	name := fmt.Sprintf("ovn-member-%x", sha256.Sum256([]byte(string(p.installation.UID)+"/"+request.Preparation.MemberName)))[:43]
+	name := RecordName(string(p.installation.UID), request.Preparation.MemberName)
 	record, err := p.record(ctx, name, "request.json", request, nil)
 	if err != nil {
 		return Preparation{}, err

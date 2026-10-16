@@ -53,3 +53,19 @@ func TestValidateBackupScheduleRejectsInvalidDuration(t *testing.T) {
 		t.Fatalf("invalid backup schedule was accepted: %v", errors)
 	}
 }
+
+func TestValidateMemberRequestsRequireDynamicMembershipAndPinnedImage(t *testing.T) {
+	spec := operatorv1alpha1.KubeOVNInstallationSpec{
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "member-new", NodeName: "node", ClaimName: "claim", VolumeName: "volume", Image: "example/central:dev", NorthboundAddress: "tcp:192.0.2.10:6643", SouthboundAddress: "tcp:192.0.2.10:6644", NorthboundClientAddress: "tcp:192.0.2.10:6641", SouthboundClientAddress: "tcp:192.0.2.10:6642"}}},
+	}
+	joined := JoinErrors(ValidateInstallationSpec(spec))
+	if !strings.Contains(joined, "dynamicMembership") || !strings.Contains(joined, "sha256") {
+		t.Fatalf("invalid member request was not fenced: %s", joined)
+	}
+	spec.Central.DynamicMembership = true
+	spec.Central.MemberRequests[0].Image = "example/central@sha256:" + strings.Repeat("a", 64)
+	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
+		t.Fatalf("valid member request was rejected: %v", errors)
+	}
+}

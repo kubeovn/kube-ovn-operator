@@ -70,6 +70,25 @@ type CentralSpec struct {
 	Placement         PlacementSpec `json:"placement,omitempty"`
 	Storage           StorageSpec   `json:"storage,omitempty"`
 	DynamicMembership bool          `json:"dynamicMembership,omitempty"`
+	// MemberRequests pin the Kubernetes identities and listener addresses for
+	// members that the lifecycle executor may add one at a time. The operator
+	// never discovers a replacement from replica count alone.
+	MemberRequests []CentralMemberSpec `json:"memberRequests,omitempty"`
+}
+
+// CentralMemberSpec is an explicit, pre-provisioned member slot. The claim
+// and volume must already be Bound to the selected node; the operator records
+// their live UIDs before creating a preparation Job or StatefulSet.
+type CentralMemberSpec struct {
+	Name                    string `json:"name"`
+	NodeName                string `json:"nodeName"`
+	ClaimName               string `json:"claimName"`
+	VolumeName              string `json:"volumeName"`
+	Image                   string `json:"image"`
+	NorthboundAddress       string `json:"northboundAddress"`
+	SouthboundAddress       string `json:"southboundAddress"`
+	NorthboundClientAddress string `json:"northboundClientAddress"`
+	SouthboundClientAddress string `json:"southboundClientAddress"`
 }
 
 type PlacementSpec struct {

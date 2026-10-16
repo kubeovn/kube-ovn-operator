@@ -57,8 +57,9 @@ final observation pass. `internal/lifecycle` connects the backup, approval and
 member providers with persistent joint NB/SB operation state. The default
 controller admits one safe one-step reduction and consumes a single
 lifecycle-authorized apply checkpoint after the successor baseline is pinned.
-Ordinary Chart handoff, additions, multi-step changes and broader generation
-transitions remain open.
+Explicit additions are selected one at a time from pinned member requests;
+ordinary Chart handoff, broader multi-step changes and generation transitions
+remain open.
 There is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
 a new database before its process starts, and a departed server cannot rejoin.
 
@@ -239,7 +240,9 @@ installations skip them; external/HCP verification still awaits peer evidence.
 2. Connect the persistent joint lifecycle executor to default-controller operation
    selection, lifecycle-authorized topology transitions and generation/apply-checkpoint changes.
    The default controller now retains and verifies the initial complete local RAFT
-   identity inventory; see [central topology](central-topology.md).
+   identity inventory and admits explicit `central.memberRequests` additions one
+   at a time while retaining the Chart Deployment count; these requests are
+   accepted only after that initial retained topology exists; see [central topology](central-topology.md).
    Migrate ordinary Chart Deployments to independently controlled members.
    Validate node replacement and every intermediate quorum state before enabling
    automatic changes.

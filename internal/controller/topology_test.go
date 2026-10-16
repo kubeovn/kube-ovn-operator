@@ -7,6 +7,7 @@ import (
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
+	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,6 +32,29 @@ func verifiedTopology(ctx context.Context, installation *api.KubeOVNInstallation
 		return nil, err
 	}
 	return &api.CentralTopologyReference{Name: "inventory", UID: "inventory-uid", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, nil
+}
+
+type retainedTopologyProvider struct {
+	topologyProviderFunc
+	retained health.CentralTopology
+}
+
+func (p retainedTopologyProvider) Retained(context.Context, *api.KubeOVNInstallation) (health.CentralTopology, error) {
+	return p.retained, nil
+}
+
+func TestLifecycleRenderSpecKeepsChartDeploymentAtItsRetainedCount(t *testing.T) {
+	scheme := controllerScheme(t)
+	installation := &api.KubeOVNInstallation{Name: "dynamic", Namespace: "default", UID: "installation", Generation: 2, Spec: api.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 5, DynamicMembership: true}}, Status: api.KubeOVNInstallationStatus{Topology: api.TopologyStatus{Inventory: &api.CentralTopologyReference{Name: "inventory", UID: "inventory-uid", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+	retained := health.CentralTopology{Members: []health.CentralIdentity{{Workload: health.WorkloadIdentity{Kind: "Deployment"}}, {Workload: health.WorkloadIdentity{Kind: "Deployment"}}, {Workload: health.WorkloadIdentity{Kind: "Deployment"}}, {Workload: health.WorkloadIdentity{Kind: "StatefulSet"}}, {Workload: health.WorkloadIdentity{Kind: "StatefulSet"}}}}
+	rendered, err := (&KubeOVNInstallationReconciler{Client: kube, Leases: lease.New(kube), Topology: retainedTopologyProvider{retained: retained}}).lifecycleRenderSpec(t.Context(), installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rendered.Central.Replicas != 3 {
+		t.Fatalf("dynamic rendering would scale the Chart Deployment to %d replicas", rendered.Central.Replicas)
+	}
 }
 
 func TestReconcileRetainsTopologyOnFailureAndNeverUsesItAsHealth(t *testing.T) {

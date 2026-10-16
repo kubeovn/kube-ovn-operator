@@ -15,6 +15,8 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
+	"github.com/kubeovn/kube-ovn-operator/internal/prepare"
+	"github.com/kubeovn/kube-ovn-operator/internal/workload"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -95,6 +97,45 @@ func TestReconcileBlocksInvalidSpecBeforeWritingChildren(t *testing.T) {
 	}
 	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || len(got.Status.Conditions) != 8 {
 		t.Fatalf("unexpected invalid status: %#v", got.Status)
+	}
+}
+
+func TestReconcileBlocksInitialMemberRequestsBeforeChartRender(t *testing.T) {
+	scheme := controllerScheme(t)
+	installation := &operatorv1alpha1.KubeOVNInstallation{
+		ObjectMeta: metav1.ObjectMeta{Name: "initial-members", Namespace: "default", UID: types.UID("initial-members-uid"), Generation: 1},
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
+			Central: operatorv1alpha1.CentralSpec{
+				Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true,
+				MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
+					Name: "member-new", NodeName: "node-new", ClaimName: "claim-new", VolumeName: "volume-new",
+					Image:             "example/central@sha256:" + strings.Repeat("a", 64),
+					NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644",
+					NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642",
+				}},
+			},
+		},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return time.Unix(10, 0) }}
+	if _, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: clientKey(installation)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := kube.Get(t.Context(), types.NamespacedName{Name: planConfigMapPrefix + installation.Name, Namespace: installation.Namespace}, new(corev1.ConfigMap)); err == nil {
+		t.Fatal("initial member requests unexpectedly rendered a Chart plan")
+	}
+	got := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), clientKey(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != operatorv1alpha1.PhaseDegraded || !strings.Contains(got.Status.Conditions[0].Message, "existing retained topology") {
+		t.Fatalf("initial member requests were not fenced clearly: %+v", got.Status)
+	}
+
+	got.Status.Topology.Inventory = &operatorv1alpha1.CentralTopologyReference{Name: "inventory", UID: types.UID("inventory-uid"), Digest: "sha256:" + strings.Repeat("b", 64)}
+	if err := validateMemberRequestLifecycle(got); err != nil {
+		t.Fatalf("member requests remained blocked after retaining a topology: %v", err)
 	}
 }
 
@@ -756,6 +797,74 @@ func TestReplicaOnlySpecChangePinsTheRetainedMemberCount(t *testing.T) {
 	ok, err = replicaOnlySpecChange(installation, 3)
 	if err != nil || ok {
 		t.Fatalf("unrelated spec change was admitted: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReplicaOnlySpecChangeAllowsASecondTransitionAfterTheFirstHandoff(t *testing.T) {
+	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}}
+	data, err := stdjson.Marshal(installation.Spec, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(data))}
+	// The desired spec has already been accepted by the first handoff, while
+	// the retained topology still has one intermediate member to retire.
+	ok, err := replicaOnlySpecChange(installation, 4)
+	if err != nil || !ok {
+		t.Fatalf("second replica transition was rejected: %v", err)
+	}
+	installation.Spec.Version = "v1.18.0"
+	ok, err = replicaOnlySpecChange(installation, 4)
+	if err != nil || ok {
+		t.Fatalf("version change was admitted during a second transition: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReplicaOnlySpecChangeAllowsPreparedSlotsWithTheFirstReplicaIncrease(t *testing.T) {
+	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
+		Central: operatorv1alpha1.CentralSpec{
+			Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true,
+			MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "member-new"}},
+		},
+	}}
+	previous := installation.Spec
+	previous.Central.Replicas = 3
+	previous.Central.MemberRequests = nil
+	data, err := stdjson.Marshal(previous, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(data))}
+	allowed, err := replicaOnlySpecChange(installation, 3)
+	if err != nil || !allowed {
+		t.Fatalf("prepared slots plus the first replica increase were rejected: allowed=%v err=%v", allowed, err)
+	}
+}
+
+func TestValidateLifecycleMemberRequestPinsCurrentSpec(t *testing.T) {
+	image := "example/central@sha256:" + strings.Repeat("a", 64)
+	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Central: operatorv1alpha1.CentralSpec{MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
+		Name: "member-new", NodeName: "node-new", ClaimName: "claim-new", VolumeName: "volume-new", Image: image,
+		NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644",
+		NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642",
+	}}}}}
+	request := lifecycle.Request{Add: &lifecycle.Addition{
+		Workload: workload.Request{
+			Node: workload.Reference{Name: "node-new"}, Claim: workload.Reference{Name: "claim-new"}, Volume: workload.Reference{Name: "volume-new"}, Image: image,
+			Preparation: prepare.Plan{MemberName: "member-new", Databases: []prepare.Database{{Name: "OVN_Northbound", LocalAddress: "tcp:192.0.2.99:6643"}, {Name: "OVN_Southbound", LocalAddress: "tcp:192.0.2.99:6644"}}},
+		}, NorthboundAddress: "tcp:192.0.2.99:6641", SouthboundAddress: "tcp:192.0.2.99:6642",
+	}}
+	if err := validateLifecycleMemberRequest(installation, request); err != nil {
+		t.Fatalf("matching lifecycle member request was rejected: %v", err)
+	}
+	installation.Spec.Central.MemberRequests[0].NodeName = "other-node"
+	if err := validateLifecycleMemberRequest(installation, request); err == nil || !strings.Contains(err.Error(), "changed after operation admission") {
+		t.Fatalf("member identity drift was not rejected: %v", err)
+	}
+	installation.Spec.Central.MemberRequests = nil
+	if err := validateLifecycleMemberRequest(installation, request); err == nil || !strings.Contains(err.Error(), "was removed") {
+		t.Fatalf("member request removal was not rejected: %v", err)
 	}
 }
 

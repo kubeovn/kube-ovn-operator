@@ -90,6 +90,14 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		logger.Info("installation plan is blocked", "reason", plan.Blocking)
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+	if err := validateMemberRequestLifecycle(installation); err != nil {
+		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "LifecycleSelection", err.Error()
+		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
+			return reconcile.Result{}, statusErr
+		}
+		logger.Info("member requests are waiting for an initial retained topology", "reason", err.Error())
+		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
 	// Recover a durable membership operation before rendering the chart. Node
 	// changes can make bootstrap rendering fail, while the operation's pinned
 	// inventory remains the only safe path to convergence.
@@ -117,6 +125,16 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			return reconcile.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 		if recovery != nil {
+			operation := installation.Status.Topology.Operation
+			if operation == nil || !operation.HandoffApplied {
+				if err := validateLifecycleMemberRequest(installation, recovery.Request); err != nil {
+					plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "Lifecycle", err.Error()
+					if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
+						return reconcile.Result{}, statusErr
+					}
+					return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+				}
+			}
 			recordLifecycleBackupStatus(installation, recovery)
 			if installation.Status.Topology.Operation == nil {
 				installation.Status.Topology.Operation = newOperationReference(recovery, installation.Status.Topology.Inventory)
@@ -129,7 +147,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				}
 				return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 			}
-			operation := installation.Status.Topology.Operation
+			operation = installation.Status.Topology.Operation
 			if operation == nil {
 				return reconcile.Result{}, errors.New("completed lifecycle has no operation reference")
 			}
@@ -256,6 +274,14 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 	}
+	renderSpec, renderErr := r.lifecycleRenderSpec(ctx, installation)
+	if renderErr != nil {
+		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "Render", renderErr.Error()
+		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
+			return reconcile.Result{}, statusErr
+		}
+		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
 	renderer := r.Renderer
 	if r.RendererFactory != nil {
 		renderer = r.RendererFactory(installation)
@@ -263,7 +289,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	if renderer == nil {
 		renderer = chart.ValuesRenderer{}
 	}
-	rendered, err := renderer.Render(ctx, installation.Spec)
+	rendered, err := renderer.Render(ctx, renderSpec)
 	adoptionObjects := rendered.Objects
 	if err == nil && len(rendered.Objects) > 0 {
 		var probes []*unstructured.Unstructured
@@ -434,7 +460,11 @@ func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Cont
 			if err != nil {
 				return err
 			}
-			request, err = lifecycle.SelectRemoval(centralCtx, r.Lifecycle.Client, installation, retained)
+			if installation.Spec.Central.Replicas > int32(len(retained.Members)) {
+				request, err = lifecycle.SelectAddition(centralCtx, r.Lifecycle.Client, installation, retained)
+			} else {
+				request, err = lifecycle.SelectRemoval(centralCtx, r.Lifecycle.Client, installation, retained)
+			}
 			if err != nil || request == nil {
 				return err
 			}
@@ -702,13 +732,110 @@ func replicaOnlySpecChange(installation *operatorv1alpha1.KubeOVNInstallation, r
 	if installation == nil || installation.Status.ApplyCheckpoint == nil || retainedReplicas < 1 {
 		return false, errors.New("automatic lifecycle selection requires an existing apply checkpoint and retained member count")
 	}
+	data, err := stdjson.Marshal(installation.Spec, stdjson.Deterministic(true))
+	if err != nil {
+		return false, fmt.Errorf("hash current installation spec: %w", err)
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(data)) == installation.Status.ApplyCheckpoint.SpecHash {
+		return true, nil
+	}
 	spec := installation.Spec
 	spec.Central.Replicas = int32(retainedReplicas)
-	data, err := stdjson.Marshal(spec, stdjson.Deterministic(true))
+	data, err = stdjson.Marshal(spec, stdjson.Deterministic(true))
 	if err != nil {
 		return false, fmt.Errorf("hash prior installation spec: %w", err)
 	}
+	if fmt.Sprintf("%x", sha256.Sum256(data)) == installation.Status.ApplyCheckpoint.SpecHash {
+		return true, nil
+	}
+	// Prepared member slots are lifecycle inputs. The first replica increase
+	// commonly adds those slots at the same time as the desired replica count;
+	// the initial Chart checkpoint predates them, so compare once with the
+	// slots omitted. Once the handoff is accepted, the full current spec is
+	// recorded in the checkpoint and the exact hash path above applies again.
+	if len(spec.Central.MemberRequests) == 0 {
+		return false, nil
+	}
+	spec.Central.MemberRequests = nil
+	data, err = stdjson.Marshal(spec, stdjson.Deterministic(true))
+	if err != nil {
+		return false, fmt.Errorf("hash prior installation spec without member requests: %w", err)
+	}
 	return fmt.Sprintf("%x", sha256.Sum256(data)) == installation.Status.ApplyCheckpoint.SpecHash, nil
+}
+
+func validateMemberRequestLifecycle(installation *operatorv1alpha1.KubeOVNInstallation) error {
+	if installation == nil || len(installation.Spec.Central.MemberRequests) == 0 {
+		return nil
+	}
+	if installation.Status.Topology.Inventory == nil {
+		return errors.New("central.memberRequests are additions and require an existing retained topology; remove them for the initial installation and add them after the first topology is recorded")
+	}
+	return nil
+}
+
+func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstallation, request lifecycle.Request) error {
+	if installation == nil || request.Add == nil {
+		return nil
+	}
+	plan := request.Add.Workload.Preparation
+	var northboundAddress, southboundAddress string
+	for _, database := range plan.Databases {
+		switch database.Name {
+		case "OVN_Northbound":
+			northboundAddress = database.LocalAddress
+		case "OVN_Southbound":
+			southboundAddress = database.LocalAddress
+		}
+	}
+	memberName := plan.MemberName
+	for _, member := range installation.Spec.Central.MemberRequests {
+		if member.Name != memberName {
+			continue
+		}
+		if member.NodeName != request.Add.Workload.Node.Name || member.ClaimName != request.Add.Workload.Claim.Name || member.VolumeName != request.Add.Workload.Volume.Name || member.Image != request.Add.Workload.Image || member.NorthboundAddress != northboundAddress || member.SouthboundAddress != southboundAddress || member.NorthboundClientAddress != request.Add.NorthboundAddress || member.SouthboundClientAddress != request.Add.SouthboundAddress {
+			return fmt.Errorf("lifecycle member request %q changed after operation admission; restore the pinned node, storage, image and NB/SB addresses before retrying", memberName)
+		}
+		return nil
+	}
+	return fmt.Errorf("lifecycle member request %q was removed after operation admission; restore the pinned request before retrying", memberName)
+}
+
+// lifecycleRenderSpec keeps the original Chart Deployment at its retained
+// member count while independently managed additions or removals converge.
+// Without this boundary, a successful addition would scale the old Deployment
+// at the same time as the new StatefulSet and create duplicate RAFT members.
+func (r *KubeOVNInstallationReconciler) lifecycleRenderSpec(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (operatorv1alpha1.KubeOVNInstallationSpec, error) {
+	spec := installation.Spec
+	if !localRaft(installation) || !spec.Central.DynamicMembership || installation.Status.Topology.Inventory == nil || r.Topology == nil {
+		return spec, nil
+	}
+	provider, ok := r.Topology.(topology.InventoryProvider)
+	if !ok || r.Leases == nil {
+		return spec, errors.New("dynamic membership rendering requires a retained topology provider and operation leases")
+	}
+	var retained health.CentralTopology
+	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
+			var err error
+			retained, err = provider.Retained(centralCtx, installation)
+			return err
+		})
+	})
+	if err != nil {
+		return spec, fmt.Errorf("read retained topology for dynamic chart rendering: %w", err)
+	}
+	chartReplicas := int32(0)
+	for _, member := range retained.Members {
+		if member.Workload.Kind == "Deployment" {
+			chartReplicas++
+		}
+	}
+	if chartReplicas == 0 {
+		return spec, errors.New("dynamic membership requires at least one retained Chart Deployment member")
+	}
+	spec.Central.Replicas = chartReplicas
+	return spec, nil
 }
 
 func recordLifecycleBackupStatus(installation *operatorv1alpha1.KubeOVNInstallation, recovery *lifecycle.Recovery) {

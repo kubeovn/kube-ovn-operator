@@ -35,9 +35,17 @@ Before the first workload write, status records a spec and manifest digest.
 Repeated reconciliation can repair the same resource set. A changed spec or
 rendered topology is blocked until a lifecycle executor can authorize it.
 This checkpoint also survives an operator restart or a partially applied batch.
-HCP and broader dynamic membership transitions currently require those future
-executors. Adoption is available through an explicit selector and only claims
-ownership of resources that already exist.
+HCP still requires a peer lifecycle executor. Dynamic membership additions use
+`spec.central.memberRequests`: each request must pin a DNS member name, a Ready
+node, an already Bound filesystem PVC/PV, a digest-pinned runtime image, and
+the four NB/SB listener addresses. The default controller selects one unused
+request at a time, records live object UIDs, prepares both native databases,
+and keeps the original Chart Deployment at its retained replica count while
+the independent StatefulSet converges. Replica count alone never selects a
+member. These requests describe additions to an installation with a retained
+topology; the initial Chart install must omit them and add them only after the
+first retained topology is recorded. Adoption is available through an explicit
+selector and only claims ownership of resources that already exist.
 
 `internal/apply` checks ownership with uncached reads, dry-runs the complete
 batch, then creates new resources or uses server-side apply without force for
@@ -169,13 +177,12 @@ startup adapter. `internal/lifecycle` now persists joint operation intent,
 authorizes startup and observes both databases catching up before removal.
 A backup capture and verification adapter is available as described below.
 The durable approval adapter is described below. Default-controller operation
-selection now admits one-step reductions only when the retained topology has
-exactly one independently managed, single-member `OnDelete` StatefulSet that
-can be pinned for retirement. Additions, multi-step changes, ambiguous targets
-and ordinary multi-replica Chart workloads remain blocked until explicit
-lifecycle input and workload handoff are available. Production wiring and
-strict in-flight fencing remain required for broader automatic membership
-changes.
+selection admits one addition at a time from an explicit `memberRequests` entry
+and admits reductions only when the retained topology has exactly one
+independently managed, single-member `OnDelete` StatefulSet that can be pinned
+for retirement. Ordinary multi-replica Chart workloads remain blocked until
+their member handoff is implemented. Production wiring and strict in-flight
+fencing remain required for broader automatic membership changes.
 
 ## New member preparation
 
