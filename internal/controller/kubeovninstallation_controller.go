@@ -166,6 +166,21 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 	}
+	if localRaft(installation) && r.Lifecycle != nil && installation.Status.Topology.Operation == nil && installation.Status.Topology.Inventory != nil && installation.Status.ApplyCheckpoint != nil {
+		started, selectionErr := r.beginAutomaticLifecycle(ctx, installation, plan, now)
+		if selectionErr != nil {
+			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "LifecycleSelection", selectionErr.Error()
+			condition := &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionFalse, Reason: "LifecycleSelectionBlocked", Message: selectionErr.Error()}
+			if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, condition); err != nil {
+				return reconcile.Result{}, err
+			}
+			logger.Info("automatic lifecycle selection blocked", "reason", selectionErr.Error())
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if started {
+			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+	}
 	renderer := r.Renderer
 	if r.RendererFactory != nil {
 		renderer = r.RendererFactory(installation)
@@ -288,6 +303,52 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 	return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now func() time.Time) (bool, error) {
+	provider, ok := r.Topology.(topology.InventoryProvider)
+	if !ok {
+		return false, errors.New("automatic lifecycle selection requires a retained topology provider")
+	}
+	if r.Leases == nil {
+		return false, errors.New("automatic lifecycle selection requires operation leases")
+	}
+	var reference lifecycle.Reference
+	var request *lifecycle.Request
+	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
+			retained, err := provider.Retained(centralCtx, installation)
+			if err != nil {
+				return err
+			}
+			request, err = lifecycle.SelectRemoval(centralCtx, r.Lifecycle.Client, installation, retained)
+			if err != nil || request == nil {
+				return err
+			}
+			verified, err := r.Topology.VerifyRetained(centralCtx, installation)
+			if err != nil {
+				return fmt.Errorf("verify retained topology before automatic selection: %w", err)
+			}
+			if verified == nil || installation.Status.Topology.Inventory == nil || *verified != *installation.Status.Topology.Inventory {
+				return errors.New("automatic lifecycle selection requires a complete fresh topology matching the retained inventory")
+			}
+			reference, err = r.Lifecycle.Begin(centralCtx, installation, *request)
+			return err
+		})
+	})
+	if err != nil {
+		return false, err
+	}
+	if request == nil {
+		return false, nil
+	}
+	installation.Status.Topology.Operation = operationReference(reference, installation.Status.Topology.Inventory)
+	plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "Lifecycle", "automatic central membership operation admitted; durable execution will resume before Chart apply"
+	condition := &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionFalse, Reason: "LifecycleInProgress", Message: plan.Blocking}
+	if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, condition); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, rendered chart.Rendered) error {
@@ -500,12 +561,11 @@ func (r *KubeOVNInstallationReconciler) ensureTopology(ctx context.Context, inst
 }
 
 func newOperationReference(recovery *lifecycle.Recovery, inventory *operatorv1alpha1.CentralTopologyReference) *operatorv1alpha1.CentralOperationReference {
-	result := &operatorv1alpha1.CentralOperationReference{
-		JournalName: recovery.Reference.Journal.Name,
-		JournalUID:  recovery.Reference.Journal.UID,
-		RequestName: recovery.Reference.Request.Name,
-		RequestUID:  recovery.Reference.Request.UID,
-	}
+	return operationReference(recovery.Reference, inventory)
+}
+
+func operationReference(reference lifecycle.Reference, inventory *operatorv1alpha1.CentralTopologyReference) *operatorv1alpha1.CentralOperationReference {
+	result := &operatorv1alpha1.CentralOperationReference{JournalName: reference.Journal.Name, JournalUID: reference.Journal.UID, RequestName: reference.Request.Name, RequestUID: reference.Request.UID}
 	if inventory != nil {
 		result.Inventory = *inventory
 	}

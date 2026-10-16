@@ -35,7 +35,8 @@ Before the first workload write, status records a spec and manifest digest.
 Repeated reconciliation can repair the same resource set. A changed spec or
 rendered topology is blocked until a lifecycle executor can authorize it.
 This checkpoint also survives an operator restart or a partially applied batch.
-HCP, adoption and dynamic membership currently require those future executors.
+HCP, adoption and broader dynamic membership transitions currently require
+those future executors.
 
 `internal/apply` checks ownership with uncached reads, dry-runs the complete
 batch, then creates new resources or uses server-side apply without force for
@@ -156,8 +157,13 @@ startup adapter. `internal/lifecycle` now persists joint operation intent,
 authorizes startup and observes both databases catching up before removal.
 A backup capture and verification adapter is available as described below.
 The durable approval adapter is described below. Default-controller operation
-selection, production wiring and strict in-flight fencing remain required before
-enabling automatic membership changes in the default reconciler.
+selection now admits one-step reductions only when the retained topology has
+exactly one independently managed, single-member `OnDelete` StatefulSet that
+can be pinned for retirement. Additions, multi-step changes, ambiguous targets
+and ordinary multi-replica Chart workloads remain blocked until explicit
+lifecycle input and workload handoff are available. Production wiring and
+strict in-flight fencing remain required for broader automatic membership
+changes.
 
 ## New member preparation
 
@@ -174,7 +180,8 @@ with flock, atomic rename and fsync support. The helper uses no Kubernetes
 credentials, cannot verify remote quorum and does not start servers. The
 operator image includes it, but its distroless runtime has no `ovsdb-tool`;
 a workload provisioner must supply a compatible native execution environment.
-Default dynamic membership is still disabled. See
+Default dynamic membership remains restricted to the safe selector described
+above. See
 [preparation persistence and startup requirements](docs/member-preparation.md).
 
 The Linux `/member-run` launcher validates the recorded preparation result and
