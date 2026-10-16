@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
@@ -40,6 +41,7 @@ type Recovery struct {
 // protects. The database references alone are insufficient because they can
 // otherwise be replayed after a version or topology change.
 type BackupBinding struct {
+	Destination    string
 	Version        string
 	TopologyDigest string
 }
@@ -66,6 +68,7 @@ func (m *Manager) backupPair(ctx context.Context, installation *api.KubeOVNInsta
 	if binding.Version == "" || binding.TopologyDigest == "" {
 		return nil, errors.New("backup pair requires a version and topology digest")
 	}
+	binding.Destination = strings.TrimSpace(binding.Destination)
 	if installation.Status.ObservedVersion != binding.Version || installation.Status.Topology.Inventory == nil || installation.Status.Topology.Inventory.Digest != binding.TopologyDigest {
 		return nil, errors.New("backup pair binding does not match the installation's observed version and retained topology")
 	}
@@ -73,8 +76,8 @@ func (m *Manager) backupPair(ctx context.Context, installation *api.KubeOVNInsta
 		return nil, fmt.Errorf("validate retained topology for backup pair: %w", err)
 	}
 	if existing != nil {
-		if existing.Version != binding.Version || existing.TopologyDigest != binding.TopologyDigest {
-			return nil, errors.New("backup pair binding does not match the requested version and topology")
+		if strings.TrimSpace(existing.Destination) != binding.Destination || existing.Version != binding.Version || existing.TopologyDigest != binding.TopologyDigest {
+			return nil, errors.New("backup pair binding does not match the requested destination, version and topology")
 		}
 		if err := validateBackupReferences(existing); err != nil {
 			return nil, err
@@ -120,7 +123,7 @@ func (m *Manager) backupPair(ctx context.Context, installation *api.KubeOVNInsta
 			}
 			refs[inventories[index].Database] = ref
 		}
-		status = &api.BackupStatus{DatabaseRefs: refs, Version: binding.Version, TopologyDigest: binding.TopologyDigest, CompletedAt: metav1.NewTime(time.Now().UTC())}
+		status = &api.BackupStatus{DatabaseRefs: refs, Destination: binding.Destination, Version: binding.Version, TopologyDigest: binding.TopologyDigest, CompletedAt: metav1.NewTime(time.Now().UTC())}
 		status.ID = backupPairID(refs)
 	}
 	if err := validateBackupReferences(status); err != nil {
@@ -145,6 +148,7 @@ func (m *Manager) backupPair(ctx context.Context, installation *api.KubeOVNInsta
 		}
 	}
 	result := *status
+	result.Destination = binding.Destination
 	result.DatabaseRefs = maps.Clone(status.DatabaseRefs)
 	return &result, nil
 }

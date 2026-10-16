@@ -322,18 +322,20 @@ against an actor who can rewrite both the store and trusted references.
 
 The persistent lifecycle executor now records a verified NB/SB backup pair in
 `status.lastBackup`, including the two immutable references, a pair ID, the
-observed version, retained topology digest and latest capture time. Before a
+observed version, retained topology digest, destination and latest capture time.
+When `spec.upgrade.backup.destination` is set, the built-in backend accepts only
+a local absolute `file://` URL that exactly matches the operator's
+`--backup-dir`; a different path or an `s3://` URL is rejected. Before a
 version-only upgrade, the controller re-verifies a matching pair or captures a
 new one, then authorizes one apply checkpoint for the requested target version.
 The authorization is consumed when the Chart write is accepted and cannot be
-reused after a target or topology change. It is not yet wired to
-`spec.upgrade.backup.destination`. S3, retention, backup scheduling,
-cross-database upgrade checkpoints, recovery execution and product RPO/RTO
-policy remain to be implemented. The provider checks the native file structure
-and provenance, not all OVSDB schema semantics; tests load the stored files into
-fresh OVSDB processes and verify recovered data and row UUIDs for both OVN
-schemas. It does not restore over a live database or authorize a lost-quorum
-recovery.
+reused after a target, destination or topology change. S3/object-store
+credentials, retention, backup scheduling, cross-database upgrade checkpoints,
+recovery execution and product RPO/RTO policy remain to be implemented. The
+provider checks the native file structure and provenance, not all OVSDB schema
+semantics; tests load the stored files into fresh OVSDB processes and verify
+recovered data and row UUIDs for both OVN schemas. It does not restore over a
+live database or authorize a lost-quorum recovery.
 
 ## Development
 
