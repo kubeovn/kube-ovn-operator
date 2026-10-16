@@ -395,7 +395,9 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			if lifecycleHandoffAuthorizesApply(installation) && installation.Status.Topology.Operation != nil {
 				// Consume the lifecycle authorization when the Chart write is
 				// accepted. Later observation failures must not make it reusable.
-				installation.Status.Topology.Operation.HandoffApplied = true
+				if err := r.markLifecycleHandoffApplied(operationCtx, installation); err != nil {
+					return err
+				}
 			}
 			plan.Step = "Observe"
 			if observer, ok := workload.(apply.Observer); ok {
@@ -700,7 +702,13 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		condition.LastTransitionTime = metav1.NewTime(now)
 		setCondition(&status.Conditions, condition)
 	}
-	return r.Status().Update(ctx, installationWithStatus(installation, *status))
+	updated := installationWithStatus(installation, *status)
+	if err := r.Status().Update(ctx, updated); err != nil {
+		return err
+	}
+	installation.ResourceVersion = updated.ResourceVersion
+	installation.Status = updated.Status
+	return nil
 }
 
 func localRaft(installation *operatorv1alpha1.KubeOVNInstallation) bool {
@@ -1271,10 +1279,13 @@ func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Contex
 			}
 			previous := *existing
 			installation.Status.ApplyCheckpoint = &checkpoint
-			if err := r.Status().Update(ctx, installation); err != nil {
+			updated := installation.DeepCopy()
+			if err := r.Status().Update(ctx, updated); err != nil {
 				installation.Status.ApplyCheckpoint = &previous
 				return fmt.Errorf("persist lifecycle-authorized apply checkpoint: %w", err)
 			}
+			installation.ResourceVersion = updated.ResourceVersion
+			installation.Status = updated.Status
 			return nil
 		}
 		return nil
@@ -1282,10 +1293,27 @@ func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Contex
 	installation.Status.ApplyCheckpoint = &checkpoint
 	// Persist before any workload write so a restart or partial apply cannot
 	// turn a topology/version change into a fresh installation.
-	if err := r.Status().Update(ctx, installation); err != nil {
+	updated := installation.DeepCopy()
+	if err := r.Status().Update(ctx, updated); err != nil {
 		installation.Status.ApplyCheckpoint = nil
 		return fmt.Errorf("persist apply checkpoint: %w", err)
 	}
+	installation.ResourceVersion = updated.ResourceVersion
+	installation.Status = updated.Status
+	return nil
+}
+
+func (r *KubeOVNInstallationReconciler) markLifecycleHandoffApplied(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) error {
+	if !lifecycleHandoffAuthorizesApply(installation) || installation.Status.Topology.Operation == nil {
+		return nil
+	}
+	updated := installation.DeepCopy()
+	updated.Status.Topology.Operation.HandoffApplied = true
+	if err := r.Status().Update(ctx, updated); err != nil {
+		return fmt.Errorf("persist lifecycle handoff consumption: %w", err)
+	}
+	installation.ResourceVersion = updated.ResourceVersion
+	installation.Status = updated.Status
 	return nil
 }
 
