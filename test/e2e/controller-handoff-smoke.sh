@@ -87,17 +87,15 @@ docker run --rm --network=none \
     set -eu
     tool=/opt/ovn-native/ovsdb-tool
     schema_dir=/usr/share/ovn
-    old_ifs=${IFS}
-    IFS=,
-    nodes="${MASTER_NODES}"
-    IFS=${old_ifs}
     first_node=${MASTER_NODES%%,*}
     "${tool}" create-cluster /controller-seed/ovnnb-0.db "${schema_dir}/ovn-nb.ovsschema" "tcp:${first_node}:6643" >/dev/null
     "${tool}" create-cluster /controller-seed/ovnsb-0.db "${schema_dir}/ovn-sb.ovsschema" "tcp:${first_node}:6644" >/dev/null
     nb_cid=$("${tool}" db-cid /controller-seed/ovnnb-0.db)
     sb_cid=$("${tool}" db-cid /controller-seed/ovnsb-0.db)
     index=1
-    for node in ${nodes}; do
+    old_ifs=${IFS}
+    IFS=,
+    for node in ${MASTER_NODES}; do
       if [ "${node}" = "${first_node}" ]; then
         continue
       fi
@@ -105,6 +103,11 @@ docker run --rm --network=none \
       "${tool}" --cid="${sb_cid}" join-cluster "/controller-seed/ovnsb-${index}.db" OVN_Southbound "tcp:${node}:6644" "tcp:${first_node}:6644"
       index=$((index + 1))
     done
+    IFS=${old_ifs}
+    if [ "${index}" -ne 3 ]; then
+      echo "expected three seeded members, got ${index}" >&2
+      exit 1
+    fi
     chmod 0644 /controller-seed/*.db
   '
 for index in 0 1 2; do
