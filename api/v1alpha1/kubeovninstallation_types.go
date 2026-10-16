@@ -225,9 +225,12 @@ type CentralDatabaseStatus struct {
 }
 
 type UpgradeStatus struct {
-	PlanID      string `json:"planID,omitempty"`
-	Step        string `json:"step,omitempty"`
-	CanRollback bool   `json:"canRollback,omitempty"`
+	PlanID               string `json:"planID,omitempty"`
+	Step                 string `json:"step,omitempty"`
+	CanRollback          bool   `json:"canRollback,omitempty"`
+	BackupID             string `json:"backupID,omitempty"`
+	TargetVersion        string `json:"targetVersion,omitempty"`
+	CheckpointAuthorized bool   `json:"checkpointAuthorized,omitzero"`
 }
 
 type HCPStatus struct {
@@ -239,9 +242,11 @@ type HCPStatus struct {
 // BackupStatus records a verified pair captured by the durable lifecycle
 // executor. DatabaseRefs are immutable store references, not credentials.
 type BackupStatus struct {
-	ID           string            `json:"id,omitempty"`
-	DatabaseRefs map[string]string `json:"databaseRefs,omitempty"`
-	CompletedAt  metav1.Time       `json:"completedAt,omitempty"`
+	ID             string            `json:"id,omitempty"`
+	DatabaseRefs   map[string]string `json:"databaseRefs,omitempty"`
+	Version        string            `json:"version,omitempty"`
+	TopologyDigest string            `json:"topologyDigest,omitempty"`
+	CompletedAt    metav1.Time       `json:"completedAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

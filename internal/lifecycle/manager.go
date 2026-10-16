@@ -2,13 +2,19 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/sha256"
+	stdjson "encoding/json/v2"
 	"errors"
+	"fmt"
+	"maps"
 	"time"
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
+	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 	"github.com/kubeovn/kube-ovn-operator/internal/workload"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -28,6 +34,134 @@ type Recovery struct {
 	Request    Request
 	State      State
 	Completion *Completion
+}
+
+// BackupBinding identifies the installation state that a verified pair
+// protects. The database references alone are insufficient because they can
+// otherwise be replayed after a version or topology change.
+type BackupBinding struct {
+	Version        string
+	TopologyDigest string
+}
+
+// CaptureBackupPair captures and verifies both OVN database backups against
+// one retained topology. A pair is returned only after both databases have
+// been re-observed with unchanged fences.
+func (m *Manager) CaptureBackupPair(ctx context.Context, installation *api.KubeOVNInstallation, topology health.CentralTopology, binding BackupBinding) (*api.BackupStatus, error) {
+	return m.backupPair(ctx, installation, topology, binding, nil, false)
+}
+
+// VerifyBackupPair revalidates an existing pair against the current retained
+// topology and binding. It performs no capture and rejects stale or foreign
+// references.
+func (m *Manager) VerifyBackupPair(ctx context.Context, installation *api.KubeOVNInstallation, topology health.CentralTopology, binding BackupBinding, status *api.BackupStatus) error {
+	_, err := m.backupPair(ctx, installation, topology, binding, status, true)
+	return err
+}
+
+func (m *Manager) backupPair(ctx context.Context, installation *api.KubeOVNInstallation, topology health.CentralTopology, binding BackupBinding, existing *api.BackupStatus, verifyOnly bool) (*api.BackupStatus, error) {
+	if m == nil || installation == nil {
+		return nil, errors.New("backup pair requires an installation")
+	}
+	if binding.Version == "" || binding.TopologyDigest == "" {
+		return nil, errors.New("backup pair requires a version and topology digest")
+	}
+	if installation.Status.ObservedVersion != binding.Version || installation.Status.Topology.Inventory == nil || installation.Status.Topology.Inventory.Digest != binding.TopologyDigest {
+		return nil, errors.New("backup pair binding does not match the installation's observed version and retained topology")
+	}
+	if err := topology.Validate(); err != nil {
+		return nil, fmt.Errorf("validate retained topology for backup pair: %w", err)
+	}
+	if existing != nil {
+		if existing.Version != binding.Version || existing.TopologyDigest != binding.TopologyDigest {
+			return nil, errors.New("backup pair binding does not match the requested version and topology")
+		}
+		if err := validateBackupReferences(existing); err != nil {
+			return nil, err
+		}
+	}
+	executor, closeStore, err := m.executor(installation)
+	if err != nil {
+		return nil, err
+	}
+	defer closeStore()
+	inventories := inventories(topology)
+	var databases [2]Database
+	for index, inventory := range inventories {
+		database, err := executor.dependencies.Database(ctx, inventory)
+		if err != nil {
+			return nil, fmt.Errorf("open %s backup adapter: %w", inventory.Database, err)
+		}
+		if database == nil {
+			return nil, fmt.Errorf("open %s backup adapter: factory returned nil", inventory.Database)
+		}
+		databases[index] = database
+	}
+	var before [2]ovnadmin.Snapshot
+	for index, database := range databases {
+		before[index], err = database.Observe(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("observe %s before backup: %w", inventories[index].Database, err)
+		}
+		if err := before[index].Validate(); err != nil {
+			return nil, fmt.Errorf("validate %s before backup: %w", inventories[index].Database, err)
+		}
+	}
+	status := existing
+	if !verifyOnly {
+		refs := make(map[string]string, len(databases))
+		for index, database := range databases {
+			ref, err := database.Capture(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("capture %s backup: %w", inventories[index].Database, err)
+			}
+			if ref == "" {
+				return nil, fmt.Errorf("capture %s backup returned an empty reference", inventories[index].Database)
+			}
+			refs[inventories[index].Database] = ref
+		}
+		status = &api.BackupStatus{DatabaseRefs: refs, Version: binding.Version, TopologyDigest: binding.TopologyDigest, CompletedAt: metav1.NewTime(time.Now().UTC())}
+		status.ID = backupPairID(refs)
+	}
+	if err := validateBackupReferences(status); err != nil {
+		return nil, err
+	}
+	for index, database := range databases {
+		if err := database.Verify(ctx, before[index], status.DatabaseRefs[inventories[index].Database]); err != nil {
+			return nil, fmt.Errorf("verify %s backup pair member: %w", inventories[index].Database, err)
+		}
+	}
+	var after [2]ovnadmin.Snapshot
+	for index, database := range databases {
+		after[index], err = database.Observe(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("observe %s after backup verification: %w", inventories[index].Database, err)
+		}
+		if err := after[index].Validate(); err != nil {
+			return nil, fmt.Errorf("validate %s after backup verification: %w", inventories[index].Database, err)
+		}
+		if !sameFence(before[index], after[index]) {
+			return nil, fmt.Errorf("%s database fence changed while verifying the backup pair", inventories[index].Database)
+		}
+	}
+	result := *status
+	result.DatabaseRefs = maps.Clone(status.DatabaseRefs)
+	return &result, nil
+}
+
+func validateBackupReferences(status *api.BackupStatus) error {
+	if status == nil || status.ID == "" || len(status.DatabaseRefs) != 2 || status.DatabaseRefs["OVN_Northbound"] == "" || status.DatabaseRefs["OVN_Southbound"] == "" || status.CompletedAt.IsZero() {
+		return errors.New("backup pair is incomplete")
+	}
+	if expected := backupPairID(status.DatabaseRefs); expected != status.ID {
+		return errors.New("backup pair ID does not match its database references")
+	}
+	return nil
+}
+
+func backupPairID(refs map[string]string) string {
+	data, _ := stdjson.Marshal(refs, stdjson.Deterministic(true))
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(data))
 }
 
 // Begin admits a controller-selected operation into the same durable executor
