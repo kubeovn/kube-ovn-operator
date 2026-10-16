@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 )
 
 func TestConfiguredBackupStoreBindsDestinationToBackupDir(t *testing.T) {
@@ -38,10 +39,28 @@ func TestConfiguredBackupStoreRejectsUnboundDestination(t *testing.T) {
 	}
 }
 
-func TestConfiguredBackupStoreRejectsUnsupportedDestination(t *testing.T) {
+func TestConfiguredBackupStoreAcceptsS3WithExistingCredentials(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "access")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_S3_ENDPOINT", "http://127.0.0.1:19000")
 	installation := &operatorv1alpha1.KubeOVNInstallation{}
 	installation.Spec.Upgrade.Backup.Destination = "s3://bucket/kube-ovn"
-	if _, err := configuredBackupStore(t.TempDir(), installation); err == nil {
-		t.Fatal("accepted unsupported object-store destination")
+	store, err := configuredBackupStore("", installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.(*backup.S3Store); !ok {
+		t.Fatalf("configured store has type %T, want *backup.S3Store", store)
+	}
+}
+
+func TestConfiguredBackupStoreRejectsS3WithoutExistingCredentials(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	installation := &operatorv1alpha1.KubeOVNInstallation{}
+	installation.Spec.Upgrade.Backup.Destination = "s3://bucket/kube-ovn"
+	if _, err := configuredBackupStore("", installation); err == nil || !strings.Contains(err.Error(), "AWS_ACCESS_KEY_ID") {
+		t.Fatalf("S3 credential error = %v", err)
 	}
 }

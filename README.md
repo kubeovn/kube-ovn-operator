@@ -236,10 +236,11 @@ provisioning, TLS Secret identity management and Kubernetes node replacement
 remain separate work. Pod readiness alone does not prove database health. See
 [member workload contract](docs/member-workloads.md).
 
-Lifecycle recovery is enabled only when the operator is started with an
-existing operator-owned `--backup-dir`; `--backup-max-age` and
-`--backup-max-bytes` define the explicit backup policy. The operator never
-creates the directory or changes its permissions.
+Lifecycle recovery uses an existing operator-owned `--backup-dir` for local
+backups, or an `s3://` destination with AWS credentials already available to
+the process. `--backup-max-age` and `--backup-max-bytes` define the explicit
+backup policy. The operator never creates local directories, changes their
+permissions, or creates credentials.
 
 ## Retained central topology
 
@@ -348,15 +349,18 @@ against an actor who can rewrite both the store and trusted references.
 The persistent lifecycle executor now records a verified NB/SB backup pair in
 `status.lastBackup`, including the two immutable references, a pair ID, the
 observed version, retained topology digest, destination and latest capture time.
-When `spec.upgrade.backup.destination` is set, the built-in backend accepts only
-a local absolute `file://` URL that exactly matches the operator's
-`--backup-dir`; a different path or an `s3://` URL is rejected. Before a
-version-only upgrade, the controller re-verifies a matching pair or captures a
-new one, then authorizes one apply checkpoint for the requested target version.
-The authorization is consumed when the Chart write is accepted and cannot be
-reused after a target, destination or topology change. S3/object-store
-credentials, retention, backup scheduling, cross-database upgrade checkpoints,
-recovery execution and product RPO/RTO policy remain to be implemented. The
+When `spec.upgrade.backup.destination` is set, the built-in backend accepts a
+local absolute `file://` URL that exactly matches the operator's `--backup-dir`,
+or an `s3://bucket/prefix` URL signed with credentials already exposed through
+the AWS credential environment. S3 publication uploads immutable digest-keyed
+snapshot and manifest objects and returns a reference only after both succeed;
+failed uploads are not deleted automatically. Before a version-only upgrade,
+the controller re-verifies a matching pair or captures a new one, then
+authorizes one apply checkpoint for the requested target version. The
+authorization is consumed when the Chart write is accepted and cannot be
+reused after a target, destination or topology change. Retention, backup
+scheduling, cross-database upgrade checkpoints, recovery execution and product
+RPO/RTO policy remain to be implemented. The
 provider checks the native file structure and provenance, not all OVSDB schema
 semantics; tests load the stored files into fresh OVSDB processes and verify
 recovered data and row UUIDs for both OVN schemas. It does not restore over a

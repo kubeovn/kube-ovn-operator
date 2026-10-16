@@ -134,12 +134,22 @@ func configuredBackupStore(backupDir string, installation *operatorv1alpha1.Kube
 		return nil, fmt.Errorf("backup store requires an installation")
 	}
 	backupDir = strings.TrimSpace(backupDir)
-	if backupDir == "" {
-		return nil, fmt.Errorf("--backup-dir is required when lifecycle backup execution is used")
-	}
 	destination := strings.TrimSpace(installation.Spec.Upgrade.Backup.Destination)
 	if destination == "" {
+		if backupDir == "" {
+			return nil, fmt.Errorf("--backup-dir is required when lifecycle backup execution is used")
+		}
 		return backup.OpenFileStore(backupDir)
+	}
+	if strings.HasPrefix(destination, "s3://") {
+		credentials, err := backup.CredentialsFromEnvironment()
+		if err != nil {
+			return nil, err
+		}
+		return backup.NewS3Store(destination, credentials, nil)
+	}
+	if backupDir == "" {
+		return nil, fmt.Errorf("--backup-dir is required for a file backup destination")
 	}
 	path, err := backup.FileDestination(destination)
 	if err != nil {
