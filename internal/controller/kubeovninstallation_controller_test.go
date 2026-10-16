@@ -19,6 +19,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/prepare"
 	"github.com/kubeovn/kube-ovn-operator/internal/topology"
 	"github.com/kubeovn/kube-ovn-operator/internal/workload"
+	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -34,6 +35,9 @@ import (
 func TestReconcileWritesPlanWithoutClaimingOperationLeases(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	if err := coordinationv1.AddToScheme(scheme); err != nil {
@@ -434,6 +438,9 @@ func controllerScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	if err := coordinationv1.AddToScheme(scheme); err != nil {
@@ -980,6 +987,93 @@ func TestReconcileSelectsAndPersistsAnAdditionFromLiveMemberObjects(t *testing.T
 	if got.Status.Topology.Operation == nil || got.Status.Topology.Operation.JournalUID != types.UID("journal-uid") || got.Status.Topology.Operation.RequestUID != types.UID("request-uid") {
 		t.Fatalf("addition operation was not durably recorded: %+v", got.Status.Topology.Operation)
 	}
+}
+
+func TestReconcileSelectsAndPersistsExplicitChartDeploymentRetirement(t *testing.T) {
+	installation := &operatorv1alpha1.KubeOVNInstallation{
+		ObjectMeta: metav1.ObjectMeta{Name: "retirement", Namespace: "default", UID: types.UID("retirement-uid"), Generation: 2},
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire-chart", RetireEndpoint: "chart-3-0"}}},
+		},
+	}
+	previous := installation.Spec
+	previous.Central.Replicas = 4
+	previous.Central.MemberRequests = nil
+	previousJSON, err := stdjson.Marshal(previous, stdjson.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := &operatorv1alpha1.CentralTopologyReference{Name: "inventory", UID: types.UID("inventory-uid"), Digest: "sha256:" + strings.Repeat("b", 64)}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(previousJSON)), Version: previous.Version}
+	installation.Status.Topology.Inventory = ref
+
+	retained := deploymentRetirementTopologyFixture()
+	objects := []client.Object{installation}
+	objects = append(objects, deploymentRetirementObjects(installation)...)
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation).WithObjects(objects...).Build()
+	lifecycleFake := &lifecycleCoordinatorFake{reader: kube, reference: lifecycle.Reference{Journal: workload.Reference{Name: "journal", UID: types.UID("journal-uid")}, Request: workload.Reference{Name: "request", UID: types.UID("request-uid")}}}
+	topologyFake := &lifecycleTopologyFake{ref: ref, retained: retained}
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: controllerScheme(t), Leases: lease.New(kube), Topology: topologyFake, Lifecycle: lifecycleFake}
+	result, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: clientKey(installation)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != 10*time.Second || lifecycleFake.begin != 1 || lifecycleFake.request.Add != nil || lifecycleFake.request.RemoveEndpoint != "chart-3-0" || lifecycleFake.request.Retirement == nil || lifecycleFake.request.Retirement.Kind != "Deployment" {
+		t.Fatalf("default controller did not admit the expected Deployment retirement: result=%+v begin=%d request=%+v", result, lifecycleFake.begin, lifecycleFake.request)
+	}
+	retirement := lifecycleFake.request.Retirement
+	if retirement.Endpoint.UID != types.UID("chart-3-pod-0") || retirement.ReplicaSet.UID != types.UID("chart-3-rs-uid") || len(retirement.Survivors) != 1 || retirement.Survivors[0].UID != types.UID("chart-3-pod-1") {
+		t.Fatalf("Deployment retirement did not pin Pod and ReplicaSet identities: %+v", retirement)
+	}
+	got := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), clientKey(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Topology.Operation == nil || got.Status.Topology.Operation.JournalUID != types.UID("journal-uid") || got.Status.Topology.Operation.RequestUID != types.UID("request-uid") {
+		t.Fatalf("retirement operation was not durably recorded: %+v", got.Status.Topology.Operation)
+	}
+}
+
+func deploymentRetirementTopologyFixture() health.CentralTopology {
+	topology := additionTopologyFixture()
+	member := health.CentralIdentity{
+		Node:        health.ObjectIdentity{Name: "node-3", UID: types.UID("node-uid-3")},
+		Workload:    health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: "chart-3", UID: types.UID("chart-3-workload-uid")}, Kind: "Deployment"},
+		Storage:     []health.StorageIdentity{{MountPath: "/var/lib/ovn-member", HostPath: "/var/lib/ovn/3"}},
+		Pod:         health.ObjectIdentity{Name: "chart-3-0", UID: types.UID("chart-3-pod-0")},
+		ContainerID: "containerd://chart-3-0",
+	}
+	for database, name := range []string{"OVN_Northbound", "OVN_Southbound"} {
+		member.Databases[database] = health.DatabaseIdentity{
+			Database: name, ClusterID: fmt.Sprintf("1111111%d-2222-3333-4444-555555555555", database),
+			ServerID: fmt.Sprintf("0000000%d-1111-2222-3333-444444444444", database+4),
+			Address:  fmt.Sprintf("tcp:192.0.2.4:%d", 6643+database), ClientAddress: fmt.Sprintf("tcp:192.0.2.4:%d", 6641+database),
+		}
+	}
+	topology.Members = append(topology.Members, member)
+	return topology
+}
+
+func deploymentRetirementObjects(installation *operatorv1alpha1.KubeOVNInstallation) []client.Object {
+	controller := true
+	labels := map[string]string{"app": "ovn-central"}
+	installationOwner := metav1.OwnerReference{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation", Name: installation.Name, UID: installation.UID, Controller: &controller}
+	deploymentOwner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "Deployment", Name: "chart-3", UID: types.UID("chart-3-workload-uid"), Controller: &controller}
+	template := corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}, Spec: corev1.PodSpec{HostNetwork: true, Containers: []corev1.Container{{Name: "ovn-central", Image: "example/central@sha256:" + strings.Repeat("a", 64)}}}}
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "chart-3", Namespace: installation.Namespace, UID: types.UID("chart-3-workload-uid"), Labels: map[string]string{apply.ManagedByLabel: apply.ManagedByValue, apply.InstallationLabel: installation.Name, apply.InstallationNamespaceLabel: installation.Namespace, apply.InstallationUIDLabel: string(installation.UID)}, OwnerReferences: []metav1.OwnerReference{installationOwner}}, Spec: appsv1.DeploymentSpec{Replicas: new(int32(2)), Selector: &metav1.LabelSelector{MatchLabels: labels}, Template: template}}
+	replicaSet := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "chart-3-rs", Namespace: installation.Namespace, UID: types.UID("chart-3-rs-uid"), OwnerReferences: []metav1.OwnerReference{deploymentOwner}}, Spec: appsv1.ReplicaSetSpec{Replicas: new(int32(2)), Selector: &metav1.LabelSelector{MatchLabels: labels}, Template: template}}
+	podOwner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: replicaSet.Name, UID: replicaSet.UID, Controller: &controller}
+	ready := corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+	pods := []*corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "chart-3-0", Namespace: installation.Namespace, UID: types.UID("chart-3-pod-0"), Labels: labels, OwnerReferences: []metav1.OwnerReference{podOwner}}, Spec: corev1.PodSpec{NodeName: "node-3", HostNetwork: true, Containers: template.Spec.Containers}, Status: ready},
+		{ObjectMeta: metav1.ObjectMeta{Name: "chart-3-1", Namespace: installation.Namespace, UID: types.UID("chart-3-pod-1"), Labels: labels, OwnerReferences: []metav1.OwnerReference{podOwner}}, Spec: corev1.PodSpec{NodeName: "node-4", HostNetwork: true, Containers: template.Spec.Containers}, Status: ready},
+	}
+	objects := []client.Object{deployment, replicaSet}
+	for _, pod := range pods {
+		objects = append(objects, pod)
+	}
+	return objects
 }
 
 func additionTopologyFixture() health.CentralTopology {
