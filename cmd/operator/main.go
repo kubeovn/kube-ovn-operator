@@ -82,9 +82,9 @@ func main() {
 		}
 		reconciler.Topology = &topology.Kubernetes{Client: directClient, Runner: podExecutor}
 		reconciler.Lifecycle = &lifecycle.Manager{Client: directClient, Runner: podExecutor, MaxAge: backupMaxAge, MaxBytes: backupMaxBytes}
-		reconciler.Lifecycle.StoreFactory = func(installation *operatorv1alpha1.KubeOVNInstallation) (backup.Store, error) {
+		reconciler.Lifecycle.SetStoreFactory(func(installation *operatorv1alpha1.KubeOVNInstallation) (backup.Store, error) {
 			return configuredBackupStore(backupDir, installation)
-		}
+		})
 		reconciler.OVN = &health.OVNObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
 		reconciler.Runtime = &health.RuntimeObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
 		reconciler.Network = &health.NetworkObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
