@@ -183,6 +183,12 @@ func (in *KubeOVNInstallationStatus) DeepCopyInto(out *KubeOVNInstallationStatus
 	if in.LastBackup != nil {
 		out.LastBackup = new(BackupStatus)
 		*out.LastBackup = *in.LastBackup
+		if in.LastBackup.DatabaseRefs != nil {
+			out.LastBackup.DatabaseRefs = make(map[string]string, len(in.LastBackup.DatabaseRefs))
+			for key, value := range in.LastBackup.DatabaseRefs {
+				out.LastBackup.DatabaseRefs[key] = value
+			}
+		}
 	}
 	if in.Network != nil {
 		out.Network = new(*in.Network)
@@ -230,7 +236,15 @@ func (in *TopologyStatus) DeepCopyInto(out *TopologyStatus) {
 }
 func (in *UpgradeStatus) DeepCopyInto(out *UpgradeStatus) { *out = *in }
 func (in *HCPStatus) DeepCopyInto(out *HCPStatus)         { *out = *in }
-func (in *BackupStatus) DeepCopyInto(out *BackupStatus)   { *out = *in }
+func (in *BackupStatus) DeepCopyInto(out *BackupStatus) {
+	*out = *in
+	if in.DatabaseRefs != nil {
+		out.DatabaseRefs = make(map[string]string, len(in.DatabaseRefs))
+		for key, value := range in.DatabaseRefs {
+			out.DatabaseRefs[key] = value
+		}
+	}
+}
 func (in *KubeOVNRecoveryRequestSpec) DeepCopyInto(out *KubeOVNRecoveryRequestSpec) {
 	*out = *in
 	out.ExpiresAt = *in.ExpiresAt.DeepCopy()

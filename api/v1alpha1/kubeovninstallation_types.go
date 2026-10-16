@@ -236,9 +236,12 @@ type HCPStatus struct {
 	EndpointReady       bool   `json:"endpointReady,omitempty"`
 }
 
+// BackupStatus records a verified pair captured by the durable lifecycle
+// executor. DatabaseRefs are immutable store references, not credentials.
 type BackupStatus struct {
-	ID          string      `json:"id,omitempty"`
-	CompletedAt metav1.Time `json:"completedAt,omitempty"`
+	ID           string            `json:"id,omitempty"`
+	DatabaseRefs map[string]string `json:"databaseRefs,omitempty"`
+	CompletedAt  metav1.Time       `json:"completedAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

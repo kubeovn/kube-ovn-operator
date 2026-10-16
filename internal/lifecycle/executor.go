@@ -389,6 +389,7 @@ func (e *Executor) backup(ctx context.Context, object *corev1.ConfigMap, request
 			return errors.New("backup provider returned an empty reference")
 		}
 		saved.State.Databases[i].BackupRef = ref
+		saved.State.Databases[i].CapturedAt = time.Now().UTC()
 	}
 	if err := e.save(ctx, object, *saved); err != nil {
 		return err
