@@ -78,8 +78,9 @@ The [launcher contract](member-launch.md) defines process/storage ownership.
 The [Kubernetes workload adapter](member-workloads.md) now provides the durable
 Job/result/StatefulSet handoff with pinned installation, Node and volume
 identities. The [joint lifecycle executor](joint-lifecycle.md) now performs
-joint convergence and exact single-member StatefulSet retirement, while
-default-controller wiring and ordinary Chart Deployment handoff remain open.
+joint convergence and exact single-member StatefulSet retirement, plus explicit
+Chart Deployment Pod retirement and replacement. Broader default-controller
+Deployment migration and automatic target selection remain open.
 
 The status phase distinguishes installing, adopting, upgrading, recovering
 and degraded plans. `Ready` requires successful workload, database, runtime and
@@ -242,10 +243,13 @@ installations skip them; external/HCP verification still awaits peer evidence.
    The default controller now retains and verifies the initial complete local RAFT
    identity inventory and admits explicit `central.memberRequests` additions one
    at a time while retaining the Chart Deployment count; these requests are
-   accepted only after that initial retained topology exists; see [central topology](central-topology.md).
-   Migrate ordinary Chart Deployments to independently controlled members.
-   Validate node replacement and every intermediate quorum state before enabling
-   automatic changes.
+   accepted only after that initial retained topology exists. A request can also
+   set `replaceEndpoint` to replace one pinned independent StatefulSet or Chart
+   Deployment Pod at the same replica count; a reduction can set
+   `retireEndpoint` for an exact Chart Deployment Pod; see [central
+   topology](central-topology.md). Migrate broader Chart Deployment membership
+   to independently controlled members. Validate node replacement and every
+   intermediate quorum state before enabling automatic changes.
 3. Complete backup storage/policy and lifecycle execution providers and verify complete Kube-OVN
    installation/transition networking. A missing health provider keeps
    `Ready=False`. Add transport-level fencing for

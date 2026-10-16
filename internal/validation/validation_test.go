@@ -69,3 +69,34 @@ func TestValidateMemberRequestsRequireDynamicMembershipAndPinnedImage(t *testing
 		t.Fatalf("valid member request was rejected: %v", errors)
 	}
 }
+
+func TestValidateMemberRequestReplacementEndpoint(t *testing.T) {
+	spec := operatorv1alpha1.KubeOVNInstallationSpec{
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
+			Name: "member-replacement", ReplaceEndpoint: "member-0-0", NodeName: "node", ClaimName: "claim", VolumeName: "volume",
+			Image: "example/central@sha256:" + strings.Repeat("a", 64), NorthboundAddress: "tcp:192.0.2.10:6643", SouthboundAddress: "tcp:192.0.2.10:6644", NorthboundClientAddress: "tcp:192.0.2.10:6641", SouthboundClientAddress: "tcp:192.0.2.10:6642",
+		}}},
+	}
+	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
+		t.Fatalf("valid replacement endpoint was rejected: %v", errors)
+	}
+	spec.Central.MemberRequests[0].ReplaceEndpoint = "bad endpoint"
+	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "replaceEndpoint") {
+		t.Fatalf("invalid replacement endpoint was accepted: %v", errors)
+	}
+}
+
+func TestValidateMemberRequestRetirementEndpoint(t *testing.T) {
+	spec := operatorv1alpha1.KubeOVNInstallationSpec{
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire", RetireEndpoint: "ovn-central-abc-0"}}},
+	}
+	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
+		t.Fatalf("valid retirement-only request was rejected: %v", errors)
+	}
+	spec.Central.MemberRequests[0].ReplaceEndpoint = "ovn-central-abc-0"
+	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "both replaceEndpoint and retireEndpoint") {
+		t.Fatalf("conflicting retirement and replacement endpoints were accepted: %v", errors)
+	}
+}

@@ -123,12 +123,8 @@ func (e *Executor) Begin(ctx context.Context, request Request) (Reference, error
 		return Reference{}, fmt.Errorf("admit joint operation: %w", err)
 	}
 	if request.Retirement != nil {
-		set, err := e.retirementTarget(ctx, *request.Retirement)
-		if err != nil {
-			return Reference{}, err
-		}
-		if *set.Spec.Replicas != 1 {
-			return Reference{}, errors.New("retirement workload was scaled before operation admission")
+		if err := e.retirementReadyForConvergence(ctx, *request.Retirement); err != nil {
+			return Reference{}, fmt.Errorf("retirement workload was changed before operation admission: %w", err)
 		}
 	}
 	record, err := e.record(ctx, name, request, true)
@@ -169,12 +165,8 @@ func (e *Executor) Step(ctx context.Context, ref Reference) (State, error) {
 		return *state, errors.New("persisted operation requires its member provider")
 	}
 	if request.Retirement != nil && state.Phase != Retiring {
-		set, err := e.retirementTarget(ctx, *request.Retirement)
-		if err != nil {
+		if err := e.retirementReadyForConvergence(ctx, *request.Retirement); err != nil {
 			return *state, err
-		}
-		if *set.Spec.Replicas != 1 {
-			return *state, errors.New("retirement workload was scaled before joint membership convergence")
 		}
 	}
 	dbs, err := e.open(ctx, request, *state)

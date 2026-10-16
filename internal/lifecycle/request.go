@@ -74,8 +74,33 @@ func canonical(request Request) (Request, string, error) {
 	if (request.RemoveEndpoint == "") != (request.Retirement == nil) {
 		return Request{}, "", errors.New("removal requires an exact workload retirement target")
 	}
-	if request.Retirement != nil && (request.Retirement.Workload.UID == "" || len(validation.IsDNS1123Subdomain(request.Retirement.Workload.Name)) != 0 || request.RemoveEndpoint != request.Retirement.Workload.Name+"-0" || !validDigest(request.Retirement.SpecDigest)) {
-		return Request{}, "", errors.New("retirement must pin the single-member StatefulSet identity and spec")
+	if request.Retirement != nil {
+		if request.Retirement.Kind == "" {
+			request.Retirement.Kind = statefulSetRetirementKind
+		}
+		if request.Retirement.Workload.UID == "" || len(validation.IsDNS1123Subdomain(request.Retirement.Workload.Name)) != 0 || !validDigest(request.Retirement.SpecDigest) {
+			return Request{}, "", errors.New("retirement must pin the workload identity and spec")
+		}
+		switch request.Retirement.Kind {
+		case statefulSetRetirementKind:
+			if request.RemoveEndpoint != request.Retirement.Workload.Name+"-0" || request.Retirement.Endpoint.Name != "" && request.Retirement.Endpoint.Name != request.RemoveEndpoint {
+				return Request{}, "", errors.New("statefulset retirement must pin its exact ordinal endpoint")
+			}
+		case deploymentRetirementKind:
+			retirement := request.Retirement
+			if request.RemoveEndpoint != retirement.Endpoint.Name || retirement.Endpoint.UID == "" || len(validation.IsDNS1123Subdomain(retirement.Endpoint.Name)) != 0 || retirement.ReplicaSet.UID == "" || len(validation.IsDNS1123Subdomain(retirement.ReplicaSet.Name)) != 0 || retirement.Replicas < 2 || len(retirement.Survivors) != int(retirement.Replicas)-1 {
+				return Request{}, "", errors.New("deployment retirement must pin the target Pod, ReplicaSet and all surviving Pods")
+			}
+			seen := map[string]bool{retirement.Endpoint.Name: true}
+			for _, survivor := range retirement.Survivors {
+				if survivor.UID == "" || len(validation.IsDNS1123Subdomain(survivor.Name)) != 0 || seen[survivor.Name] {
+					return Request{}, "", errors.New("deployment retirement survivors must be unique, named and UID-pinned")
+				}
+				seen[survivor.Name] = true
+			}
+		default:
+			return Request{}, "", errors.New("unsupported retirement workload kind")
+		}
 	}
 	slices.SortFunc(request.Databases, func(a, b Inventory) int { return cmp.Compare(a.Database, b.Database) })
 	for i := range request.Databases {

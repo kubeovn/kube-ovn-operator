@@ -46,6 +46,19 @@ func SelectRemoval(ctx context.Context, kube client.Reader, installation *api.Ku
 	case current-desired != 1:
 		return nil, fmt.Errorf("automatic central membership removal supports one member per transition; current=%d desired=%d", current, desired)
 	}
+	retireEndpoint := ""
+	for _, member := range installation.Spec.Central.MemberRequests {
+		if member.RetireEndpoint == "" {
+			continue
+		}
+		if retireEndpoint != "" && retireEndpoint != member.RetireEndpoint {
+			return nil, errors.New("central member retirement requires one explicit retireEndpoint")
+		}
+		retireEndpoint = member.RetireEndpoint
+	}
+	if retireEndpoint != "" && !installation.Spec.Central.DynamicMembership {
+		return nil, errors.New("explicit Deployment retirement requires central dynamicMembership=true")
+	}
 
 	type candidate struct {
 		endpoint   string
@@ -53,17 +66,36 @@ func SelectRemoval(ctx context.Context, kube client.Reader, installation *api.Ku
 	}
 	candidates := make([]candidate, 0, len(topology.Members))
 	for _, member := range topology.Members {
-		if member.Workload.Kind != "StatefulSet" || member.Pod.Name != member.Workload.Name+"-0" {
+		if retireEndpoint != "" && member.Pod.Name != retireEndpoint {
 			continue
 		}
-		retirement, err := PinRetirement(ctx, kube, installation, workload.Reference{Name: member.Workload.Name, UID: member.Workload.UID})
+		if retireEndpoint != "" && member.Workload.Kind == "StatefulSet" && member.Pod.Name != member.Workload.Name+"-0" {
+			return nil, errors.New("explicit retirement must identify the ordinal Pod of an independent StatefulSet")
+		}
+		if retireEndpoint == "" && (member.Workload.Kind != "StatefulSet" || member.Pod.Name != member.Workload.Name+"-0") {
+			continue
+		}
+		workloadRef := workload.Reference{Name: member.Workload.Name, UID: member.Workload.UID}
+		var retirement Retirement
+		var err error
+		switch member.Workload.Kind {
+		case "StatefulSet":
+			retirement, err = PinRetirement(ctx, kube, installation, workloadRef)
+		case "Deployment":
+			retirement, err = PinDeploymentRetirement(ctx, kube, installation, workloadRef, workload.Reference{Name: member.Pod.Name, UID: member.Pod.UID})
+		default:
+			err = errors.New("unsupported retained central workload kind")
+		}
 		if err != nil {
 			return nil, fmt.Errorf("cannot pin central member %s for retirement: %w", member.Workload.Name, err)
 		}
 		candidates = append(candidates, candidate{endpoint: member.Pod.Name, retirement: retirement})
 	}
 	if len(candidates) == 0 {
-		return nil, errors.New("central replica decrease is unsafe: no independently managed one-member StatefulSet can be retired; ordinary Chart multi-replica workloads are not selectable")
+		if retireEndpoint != "" {
+			return nil, fmt.Errorf("central replica decrease cannot find the requested retained endpoint %q", retireEndpoint)
+		}
+		return nil, errors.New("central replica decrease is unsafe: no independently managed one-member StatefulSet can be retired; ordinary Chart multi-replica workloads require an explicit retireEndpoint")
 	}
 	if len(candidates) != 1 {
 		return nil, fmt.Errorf("central replica decrease is ambiguous: %d independently managed members are eligible; an explicit retirement selection is required", len(candidates))
@@ -94,14 +126,16 @@ func SelectAddition(ctx context.Context, kube client.Reader, installation *api.K
 	if err := topology.Validate(); err != nil {
 		return nil, fmt.Errorf("retained topology is not selectable: %w", err)
 	}
+	if !installation.Spec.Central.DynamicMembership {
+		return nil, errors.New("central dynamicMembership must be enabled for automatic member addition or replacement")
+	}
 	desired, current := int(installation.Spec.Central.Replicas), len(topology.Members)
 	switch {
 	case desired == current:
-		return nil, nil
+		// A same-size transition is an explicit replacement. It must name the
+		// old endpoint because replica count cannot identify a member to retire.
 	case desired < current:
 		return nil, errors.New("automatic membership addition cannot reduce the retained member count")
-	case !installation.Spec.Central.DynamicMembership:
-		return nil, errors.New("central dynamicMembership must be enabled for automatic member addition")
 	}
 
 	existing := make(map[string]bool, len(topology.Members))
@@ -113,15 +147,60 @@ func SelectAddition(ctx context.Context, kube client.Reader, installation *api.K
 		if existing[workload.RecordName(string(installation.UID), member.Name)] {
 			continue
 		}
+		// Retirement-only entries select an existing Chart Pod for scale-in;
+		// they do not describe a workload that can be prepared and started.
+		if member.RetireEndpoint != "" {
+			continue
+		}
+		if desired == current && member.ReplaceEndpoint == "" {
+			continue
+		}
 		available = append(available, member)
 	}
 	if len(available) == 0 {
+		if desired == current {
+			return nil, nil
+		}
 		return nil, errors.New("central membership increase requires one explicit unused memberRequest")
 	}
 	slices.SortFunc(available, func(a, b api.CentralMemberSpec) int { return cmp.Compare(a.Name, b.Name) })
 	member := available[0]
 	if err := validateMemberSpec(member); err != nil {
 		return nil, err
+	}
+	if desired > current && member.ReplaceEndpoint != "" {
+		return nil, errors.New("memberRequest.replaceEndpoint requires a same-size central replacement")
+	}
+	var retirement *Retirement
+	if member.ReplaceEndpoint != "" {
+		if desired != current {
+			return nil, errors.New("memberRequest.replaceEndpoint requires replicas to match the retained member count")
+		}
+		index := slices.IndexFunc(topology.Members, func(retained health.CentralIdentity) bool {
+			return retained.Pod.Name == member.ReplaceEndpoint
+		})
+		if index < 0 {
+			return nil, errors.New("memberRequest.replaceEndpoint must identify a retained central Pod")
+		}
+		retained := topology.Members[index]
+		workloadRef := workload.Reference{Name: retained.Workload.Name, UID: retained.Workload.UID}
+		var pinned Retirement
+		var err error
+		switch retained.Workload.Kind {
+		case "StatefulSet":
+			if retained.Pod.Name != retained.Workload.Name+"-0" {
+				return nil, errors.New("memberRequest.replaceEndpoint must identify the ordinal Pod of an independent StatefulSet")
+			}
+			pinned, err = PinRetirement(ctx, kube, installation, workloadRef)
+		case "Deployment":
+			pinned, err = PinDeploymentRetirement(ctx, kube, installation, workloadRef, workload.Reference{Name: retained.Pod.Name, UID: retained.Pod.UID})
+		default:
+			return nil, errors.New("memberRequest.replaceEndpoint must identify an owned Deployment or independent StatefulSet")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("cannot pin central member %s for replacement: %w", retained.Workload.Name, err)
+		}
+		retirement = &pinned
 	}
 
 	node := new(corev1.Node)
@@ -172,6 +251,10 @@ func SelectAddition(ctx context.Context, kube client.Reader, installation *api.K
 		Workload:          workload.Request{InstallationGeneration: installation.Generation, Preparation: canonicalPlan, Node: workload.Reference{Name: node.Name, UID: node.UID}, Claim: workload.Reference{Name: claim.Name, UID: claim.UID}, Volume: workload.Reference{Name: volume.Name, UID: volume.UID}, Image: member.Image},
 		NorthboundAddress: member.NorthboundClientAddress, SouthboundAddress: member.SouthboundClientAddress,
 	}}
+	if retirement != nil {
+		request.RemoveEndpoint = member.ReplaceEndpoint
+		request.Retirement = retirement
+	}
 	if err := request.launch(prepare.Result{}).Validate(); err != nil {
 		return nil, fmt.Errorf("validate member launch addresses: %w", err)
 	}
@@ -181,6 +264,9 @@ func SelectAddition(ctx context.Context, kube client.Reader, installation *api.K
 func validateMemberSpec(member api.CentralMemberSpec) error {
 	if len(validation.IsDNS1123Label(member.Name)) != 0 {
 		return errors.New("memberRequest.name must be a DNS label")
+	}
+	if member.ReplaceEndpoint != "" && len(validation.IsDNS1123Subdomain(member.ReplaceEndpoint)) != 0 {
+		return errors.New("memberRequest.replaceEndpoint must be a DNS subdomain")
 	}
 	for _, value := range []string{member.NodeName, member.ClaimName, member.VolumeName, member.Image, member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
 		if strings.TrimSpace(value) == "" {

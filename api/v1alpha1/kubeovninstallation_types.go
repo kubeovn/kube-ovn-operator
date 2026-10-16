@@ -76,19 +76,25 @@ type CentralSpec struct {
 	MemberRequests []CentralMemberSpec `json:"memberRequests,omitempty"`
 }
 
-// CentralMemberSpec is an explicit, pre-provisioned member slot. The claim
-// and volume must already be Bound to the selected node; the operator records
-// their live UIDs before creating a preparation Job or StatefulSet.
+// CentralMemberSpec is an explicit member slot. Addition and replacement
+// entries must identify a pre-provisioned claim, volume, node, image and all
+// listener addresses; the operator records their live UIDs before creating a
+// preparation Job or StatefulSet. When replaceEndpoint is set, the slot is a
+// same-size replacement for the pinned old endpoint. A retirement-only entry
+// may set retireEndpoint to select one retained Chart Deployment Pod for a
+// one-member scale-in transition.
 type CentralMemberSpec struct {
 	Name                    string `json:"name"`
-	NodeName                string `json:"nodeName"`
-	ClaimName               string `json:"claimName"`
-	VolumeName              string `json:"volumeName"`
-	Image                   string `json:"image"`
-	NorthboundAddress       string `json:"northboundAddress"`
-	SouthboundAddress       string `json:"southboundAddress"`
-	NorthboundClientAddress string `json:"northboundClientAddress"`
-	SouthboundClientAddress string `json:"southboundClientAddress"`
+	ReplaceEndpoint         string `json:"replaceEndpoint,omitempty"`
+	RetireEndpoint          string `json:"retireEndpoint,omitempty"`
+	NodeName                string `json:"nodeName,omitempty"`
+	ClaimName               string `json:"claimName,omitempty"`
+	VolumeName              string `json:"volumeName,omitempty"`
+	Image                   string `json:"image,omitempty"`
+	NorthboundAddress       string `json:"northboundAddress,omitempty"`
+	SouthboundAddress       string `json:"southboundAddress,omitempty"`
+	NorthboundClientAddress string `json:"northboundClientAddress,omitempty"`
+	SouthboundClientAddress string `json:"southboundClientAddress,omitempty"`
 }
 
 type PlacementSpec struct {
