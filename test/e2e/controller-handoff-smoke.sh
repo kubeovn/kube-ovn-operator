@@ -110,8 +110,15 @@ docker run --rm --network=none \
 for index in 0 1 2; do
   node=${control_plane_nodes[${index}]}
   docker exec "${node}" mkdir -p /tmp/kube-ovn-operator-controller-fixture
-  docker cp "${seed_dir}/ovnnb-${index}.db" "${node}:/tmp/kube-ovn-operator-controller-fixture/ovnnb.db"
-  docker cp "${seed_dir}/ovnsb-${index}.db" "${node}:/tmp/kube-ovn-operator-controller-fixture/ovnsb.db"
+  # Copy into the node's existing /tmp first. Docker's cp implementation can
+  # reject a nested destination even after docker exec created its parent.
+  docker cp "${seed_dir}/ovnnb-${index}.db" "${node}:/tmp/"
+  docker cp "${seed_dir}/ovnsb-${index}.db" "${node}:/tmp/"
+  docker exec "${node}" sh -ec "
+    mkdir -p /tmp/kube-ovn-operator-controller-fixture
+    mv /tmp/ovnnb-${index}.db /tmp/kube-ovn-operator-controller-fixture/ovnnb.db
+    mv /tmp/ovnsb-${index}.db /tmp/kube-ovn-operator-controller-fixture/ovnsb.db
+  "
 done
 
 helm package test/e2e/controller-chart --destination "${test_dir}" >/dev/null
