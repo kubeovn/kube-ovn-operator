@@ -125,6 +125,19 @@ func (in *CentralSpec) DeepCopyInto(out *CentralSpec) {
 	*out = *in
 	in.Placement.DeepCopyInto(&out.Placement)
 	in.Storage.DeepCopyInto(&out.Storage)
+	if in.MemberRequests != nil {
+		out.MemberRequests = make([]CentralMemberSpec, len(in.MemberRequests))
+		copy(out.MemberRequests, in.MemberRequests)
+	}
+}
+func (in *CentralMemberSpec) DeepCopyInto(out *CentralMemberSpec) { *out = *in }
+func (in *CentralMemberSpec) DeepCopy() *CentralMemberSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(CentralMemberSpec)
+	in.DeepCopyInto(out)
+	return out
 }
 func (in *PlacementSpec) DeepCopyInto(out *PlacementSpec) {
 	*out = *in

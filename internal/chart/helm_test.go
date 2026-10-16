@@ -125,7 +125,6 @@ func TestHelmRendererRejectsUnverifiedAndUnsupportedInputs(t *testing.T) {
 		{"old Kubernetes", func(r *HelmRenderer, _ *operatorv1alpha1.KubeOVNInstallationSpec) {
 			r.Capabilities.KubeVersion.Version = "v1.28.0"
 		}, "kubeVersion"},
-		{"dynamic membership", func(_ *HelmRenderer, s *operatorv1alpha1.KubeOVNInstallationSpec) { s.Central.DynamicMembership = true }, "lifecycle executors"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {

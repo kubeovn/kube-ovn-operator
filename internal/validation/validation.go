@@ -93,6 +93,42 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 	if spec.Central.Mode == operatorv1alpha1.CentralModeRaft && spec.Central.DynamicMembership && spec.Upgrade.Backup.Required && spec.Upgrade.Backup.Destination == "" {
 		errs = append(errs, fmt.Errorf("dynamic membership cannot be enabled without a backup destination"))
 	}
+	if len(spec.Central.MemberRequests) != 0 {
+		if spec.Central.Mode != operatorv1alpha1.CentralModeRaft || spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
+			errs = append(errs, fmt.Errorf("central.memberRequests requires a local raft installation"))
+		}
+		if !spec.Central.DynamicMembership {
+			errs = append(errs, fmt.Errorf("central.memberRequests requires central.dynamicMembership=true"))
+		}
+		seen := make(map[string]struct{}, len(spec.Central.MemberRequests))
+		for _, member := range spec.Central.MemberRequests {
+			if _, exists := seen[member.Name]; exists {
+				errs = append(errs, fmt.Errorf("central.memberRequests contains duplicate name %q", member.Name))
+			}
+			seen[member.Name] = struct{}{}
+			if len(kvalidation.IsDNS1123Label(member.Name)) != 0 {
+				errs = append(errs, fmt.Errorf("central.memberRequests name %q must be a DNS label", member.Name))
+			}
+			for field, value := range map[string]string{
+				"nodeName":                member.NodeName,
+				"claimName":               member.ClaimName,
+				"volumeName":              member.VolumeName,
+				"image":                   member.Image,
+				"northboundAddress":       member.NorthboundAddress,
+				"southboundAddress":       member.SouthboundAddress,
+				"northboundClientAddress": member.NorthboundClientAddress,
+				"southboundClientAddress": member.SouthboundClientAddress,
+			} {
+				if strings.TrimSpace(value) == "" {
+					errs = append(errs, fmt.Errorf("central.memberRequests[%q].%s is required", member.Name, field))
+				}
+			}
+			image, digest, pinned := strings.Cut(member.Image, "@sha256:")
+			if !pinned || image == "" || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
+				errs = append(errs, fmt.Errorf("central.memberRequests[%q].image must be pinned to a sha256 digest", member.Name))
+			}
+		}
+	}
 	return errs
 }
 

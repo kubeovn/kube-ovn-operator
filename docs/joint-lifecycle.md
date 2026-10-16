@@ -11,12 +11,15 @@ operation journal before Chart rendering. It holds both operation Leases, checks
 the status-pinned original topology reference and immutable completion receipt,
 and fences ordinary Apply while the operation is incomplete. After completion,
 the controller performs a fresh final discovery and writes a new immutable
-topology baseline while retaining the old record. It also admits a single-step
-replica reduction when the retained inventory contains exactly one independently
-managed, owned one-member `OnDelete` StatefulSet and pins that workload before
-calling `Begin`. Additions, reductions requiring multiple operations, ambiguous
-retirement candidates and ordinary multi-replica Chart Deployments are blocked
-with an explicit safety status; they cannot silently reapply the Chart.
+topology baseline while retaining the old record. It admits one addition at a
+time when an unused `spec.central.memberRequests` entry pins the node, bound
+PVC/PV, digest-pinned image and NB/SB listener addresses. The original Chart
+Deployment remains at its retained count while the new member is prepared and
+started as an independently managed StatefulSet. Replica reductions still
+require exactly one independently managed, owned one-member `OnDelete`
+StatefulSet. Ambiguous retirement candidates and ordinary multi-replica Chart
+Deployments remain blocked with an explicit safety status; they cannot silently
+reapply the Chart.
 
 ## Durable contract
 
@@ -80,9 +83,11 @@ replica decrease removes. Migrating those workloads to independently managed
 members remains a prerequisite for their retirement through this executor.
 The default selector requires one and only one eligible independent member; it
 does not infer a target from replica ordering or pod names. A desired increase
-also requires a complete prepared member request, including node, bound PVC/PV,
-runtime image and native preparation result, and is therefore not synthesized
-from Chart values.
+requires a complete explicit member request, including node, bound PVC/PV,
+runtime image and listener addresses, and is therefore not synthesized from
+Chart values. Member requests are additions to an installation with a retained
+topology; the initial Chart install must establish that baseline first. The
+provisioner creates the native preparation result during the durable `Preparing` phase; callers do not inject generated server IDs.
 Runtime image publication/selection, automatic storage and TLS Secret lifecycle,
 node placement/changes, lifecycle-authorized inventory transitions and generation transitions,
 broader Chart workload handoff and post-transition network checks remain part of

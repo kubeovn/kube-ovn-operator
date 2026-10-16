@@ -7,6 +7,7 @@ import (
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
+	"github.com/kubeovn/kube-ovn-operator/internal/workload"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,6 +64,86 @@ func TestSelectRemovalReturnsNoRequestWhenTopologyAlreadyMatches(t *testing.T) {
 	request, err := SelectRemoval(t.Context(), selectionClient(t, objects), installation, topology)
 	if err != nil || request != nil {
 		t.Fatalf("matching topology selected an operation: request=%+v err=%v", request, err)
+	}
+}
+
+func TestSelectAdditionRequiresPinnedMemberObjectsAndBuildsBothDatabasePlan(t *testing.T) {
+	installation, topology, objects := selectionFixture(t, 1)
+	installation.Spec.Central.Replicas = 5
+	installation.Spec.Central.DynamicMembership = true
+	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{{
+		Name:                    "member-new",
+		NodeName:                "node-new",
+		ClaimName:               "claim-new",
+		VolumeName:              "volume-new",
+		Image:                   "example/central@sha256:" + strings.Repeat("a", 64),
+		NorthboundAddress:       "tcp:192.0.2.99:6643",
+		SouthboundAddress:       "tcp:192.0.2.99:6644",
+		NorthboundClientAddress: "tcp:192.0.2.99:6641",
+		SouthboundClientAddress: "tcp:192.0.2.99:6642",
+	}}
+	objects = append(objects,
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-new", UID: types.UID("node-new-uid")}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}, Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "192.0.2.99"}}}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim-new", Namespace: installation.Namespace, UID: types.UID("claim-new-uid")}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "volume-new"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
+		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "volume-new", UID: types.UID("volume-new-uid")}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Name: "claim-new", Namespace: installation.Namespace, UID: types.UID("claim-new-uid")}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}},
+	)
+	request, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request == nil || request.Add == nil || request.Add.Workload.Preparation.MemberName != "member-new" || len(request.Databases) != 2 || len(request.Databases[0].Peers) != 4 || len(request.Databases[1].Peers) != 4 {
+		t.Fatalf("unexpected addition request: %+v", request)
+	}
+	if request.Add.Workload.Node.UID != types.UID("node-new-uid") || request.Add.Workload.Claim.UID != types.UID("claim-new-uid") || request.Add.Workload.Volume.UID != types.UID("volume-new-uid") {
+		t.Fatalf("request did not pin live object identities: %+v", request.Add.Workload)
+	}
+}
+
+func TestSelectAdditionRejectsUnpinnedSlots(t *testing.T) {
+	installation, topology, objects := selectionFixture(t, 1)
+	installation.Spec.Central.Replicas = 5
+	installation.Spec.Central.DynamicMembership = true
+	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{{Name: "first"}}
+	if _, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology); err == nil || !strings.Contains(err.Error(), "requires node") {
+		t.Fatalf("expected incomplete member request to be rejected, got %v", err)
+	}
+}
+
+func TestSelectAdditionSkipsACompletedMemberRecord(t *testing.T) {
+	installation, topology, objects := selectionFixture(t, 1)
+	installation.Spec.Central.Replicas = 5
+	installation.Spec.Central.DynamicMembership = true
+	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{
+		memberRequest("first", "node-first", "claim-first", "volume-first", "192.0.2.98"),
+		memberRequest("second", "node-second", "claim-second", "volume-second", "192.0.2.99"),
+	}
+	// The first request already has the stable workload slot that the
+	// provisioner would create. It must not be selected again after a restart.
+	topology.Members[0].Workload.Name = workload.RecordName(string(installation.UID), "first")
+	objects = append(objects, memberObjects(installation, "node-second", "claim-second", "volume-second", "192.0.2.99")...)
+	request, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request == nil || request.Add == nil || request.Add.Workload.Preparation.MemberName != "second" {
+		t.Fatalf("completed member record was selected again: %+v", request)
+	}
+}
+
+func memberRequest(name, node, claim, volume, address string) api.CentralMemberSpec {
+	return api.CentralMemberSpec{
+		Name: name, NodeName: node, ClaimName: claim, VolumeName: volume,
+		Image:             "example/central@sha256:" + strings.Repeat("a", 64),
+		NorthboundAddress: "tcp:" + address + ":6643", SouthboundAddress: "tcp:" + address + ":6644",
+		NorthboundClientAddress: "tcp:" + address + ":6641", SouthboundClientAddress: "tcp:" + address + ":6642",
+	}
+}
+
+func memberObjects(installation *api.KubeOVNInstallation, nodeName, claimName, volumeName, address string) []client.Object {
+	return []client.Object{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName, UID: types.UID(nodeName + "-uid")}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}, Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: address}}}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: installation.Namespace, UID: types.UID(claimName + "-uid")}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: volumeName}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
+		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: volumeName, UID: types.UID(volumeName + "-uid")}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Name: claimName, Namespace: installation.Namespace, UID: types.UID(claimName + "-uid")}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}},
 	}
 }
 

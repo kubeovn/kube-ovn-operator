@@ -51,11 +51,11 @@ func (r *HelmRenderer) Render(ctx context.Context, spec operatorv1alpha1.KubeOVN
 	if r.Name == "" || r.Namespace == "" || r.Mapper == nil {
 		return Rendered{}, errors.New("chart release identity and REST mapper are required")
 	}
-	// HCP and dynamic membership need execution and observation across lifecycle
-	// steps. Adoption is handled by the controller after rendering and before
-	// the regular workload apply.
-	if spec.HCP.Enabled || spec.Central.DynamicMembership {
-		return Rendered{}, errors.New("HCP and dynamic membership require lifecycle executors")
+	// HCP still needs a peer transport that is outside this local renderer.
+	// Dynamic membership is gated by the controller and may render the retained
+	// Chart Deployment replica count while independent members converge.
+	if spec.HCP.Enabled {
+		return Rendered{}, errors.New("HCP requires a peer lifecycle executor")
 	}
 	if spec.Central.Placement.TopologyKey != "" && spec.Central.Placement.TopologyKey != "kubernetes.io/hostname" {
 		return Rendered{}, errors.New("the upstream chart supports central anti-affinity by kubernetes.io/hostname only")
@@ -213,9 +213,18 @@ func (r *HelmRenderer) bootstrapNodes(ctx context.Context, spec operatorv1alpha1
 	if err := r.Reader.List(ctx, nodes, client.MatchingLabels(selector)); err != nil {
 		return fmt.Errorf("read central nodes: %w", err)
 	}
+	memberNodes := make(map[string]struct{}, len(spec.Central.MemberRequests))
+	if spec.Central.DynamicMembership {
+		for _, member := range spec.Central.MemberRequests {
+			memberNodes[member.NodeName] = struct{}{}
+		}
+	}
 	var addresses []string
 	for _, node := range nodes.Items {
 		if node.DeletionTimestamp != nil {
+			continue
+		}
+		if _, reserved := memberNodes[node.Name]; reserved {
 			continue
 		}
 		for _, address := range node.Status.Addresses {

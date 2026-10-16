@@ -58,6 +58,24 @@ spec:
                         className: {type: string}
                         size: {type: string}
                     dynamicMembership: {type: boolean}
+                    memberRequests:
+                      type: array
+                      maxItems: 4
+                      x-kubernetes-list-type: map
+                      x-kubernetes-list-map-keys: [name]
+                      items:
+                        type: object
+                        required: [name, nodeName, claimName, volumeName, image, northboundAddress, southboundAddress, northboundClientAddress, southboundClientAddress]
+                        properties:
+                          name: {type: string, minLength: 1}
+                          nodeName: {type: string, minLength: 1}
+                          claimName: {type: string, minLength: 1}
+                          volumeName: {type: string, minLength: 1}
+                          image: {type: string, minLength: 1}
+                          northboundAddress: {type: string, minLength: 1}
+                          southboundAddress: {type: string, minLength: 1}
+                          northboundClientAddress: {type: string, minLength: 1}
+                          southboundClientAddress: {type: string, minLength: 1}
                 dataPlane:
                   type: object
                   properties:
