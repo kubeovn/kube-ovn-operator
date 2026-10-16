@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
@@ -655,7 +656,7 @@ func recordLifecycleBackupStatus(installation *operatorv1alpha1.KubeOVNInstallat
 	if err != nil {
 		return
 	}
-	backup := &operatorv1alpha1.BackupStatus{ID: fmt.Sprintf("sha256:%x", sha256.Sum256(data)), DatabaseRefs: refs, Version: installation.Status.ObservedVersion, CompletedAt: metav1.NewTime(latest)}
+	backup := &operatorv1alpha1.BackupStatus{ID: fmt.Sprintf("sha256:%x", sha256.Sum256(data)), DatabaseRefs: refs, Destination: backupDestination(installation), Version: installation.Status.ObservedVersion, CompletedAt: metav1.NewTime(latest)}
 	if installation.Status.Topology.Inventory != nil {
 		backup.TopologyDigest = installation.Status.Topology.Inventory.Digest
 	}
@@ -680,7 +681,7 @@ func (r *KubeOVNInstallationReconciler) ensureUpgradeBackup(ctx context.Context,
 	if ref == nil || ref.Name == "" || ref.UID == "" || ref.Digest == "" {
 		return false, errors.New("upgrade requires a complete retained topology reference")
 	}
-	binding := lifecycle.BackupBinding{Version: installation.Status.ObservedVersion, TopologyDigest: ref.Digest}
+	binding := lifecycle.BackupBinding{Destination: backupDestination(installation), Version: installation.Status.ObservedVersion, TopologyDigest: ref.Digest}
 	var retained health.CentralTopology
 	var captured *operatorv1alpha1.BackupStatus
 	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
@@ -691,7 +692,7 @@ func (r *KubeOVNInstallationReconciler) ensureUpgradeBackup(ctx context.Context,
 				return fmt.Errorf("verify retained topology before upgrade backup: %w", err)
 			}
 			current := installation.Status.LastBackup
-			if current != nil && current.Version == binding.Version && current.TopologyDigest == binding.TopologyDigest {
+			if current != nil && strings.TrimSpace(current.Destination) == binding.Destination && current.Version == binding.Version && current.TopologyDigest == binding.TopologyDigest {
 				if err := r.Lifecycle.VerifyBackupPair(centralCtx, installation, retained, binding, current); err != nil {
 					installation.Status.Upgrade.CheckpointAuthorized = false
 					return fmt.Errorf("verify retained upgrade backup pair: %w", err)
@@ -785,7 +786,14 @@ func upgradeAuthorizesApply(installation *operatorv1alpha1.KubeOVNInstallation) 
 	}
 	backup := installation.Status.LastBackup
 	ref := installation.Status.Topology.Inventory
-	return installation.Status.Upgrade.CheckpointAuthorized && installation.Status.Upgrade.TargetVersion == installation.Spec.Version && installation.Status.Upgrade.BackupID != "" && backup != nil && backup.ID == installation.Status.Upgrade.BackupID && backup.Version == installation.Status.ObservedVersion && ref != nil && backup.TopologyDigest == ref.Digest && installation.Status.ApplyCheckpoint.Version == installation.Status.ObservedVersion
+	return installation.Status.Upgrade.CheckpointAuthorized && installation.Status.Upgrade.TargetVersion == installation.Spec.Version && installation.Status.Upgrade.BackupID != "" && backup != nil && backup.ID == installation.Status.Upgrade.BackupID && strings.TrimSpace(backup.Destination) == backupDestination(installation) && backup.Version == installation.Status.ObservedVersion && ref != nil && backup.TopologyDigest == ref.Digest && installation.Status.ApplyCheckpoint.Version == installation.Status.ObservedVersion
+}
+
+func backupDestination(installation *operatorv1alpha1.KubeOVNInstallation) string {
+	if installation == nil {
+		return ""
+	}
+	return strings.TrimSpace(installation.Spec.Upgrade.Backup.Destination)
 }
 
 func installationWithStatus(in *operatorv1alpha1.KubeOVNInstallation, status operatorv1alpha1.KubeOVNInstallationStatus) *operatorv1alpha1.KubeOVNInstallation {

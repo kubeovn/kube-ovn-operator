@@ -244,6 +244,7 @@ type HCPStatus struct {
 type BackupStatus struct {
 	ID             string            `json:"id,omitempty"`
 	DatabaseRefs   map[string]string `json:"databaseRefs,omitempty"`
+	Destination    string            `json:"destination,omitempty"`
 	Version        string            `json:"version,omitempty"`
 	TopologyDigest string            `json:"topologyDigest,omitempty"`
 	CompletedAt    metav1.Time       `json:"completedAt,omitempty"`

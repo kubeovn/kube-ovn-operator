@@ -508,6 +508,7 @@ func TestUpgradeAuthorizationBindsTheCurrentVersionAndTopology(t *testing.T) {
 		Version: "v1.18.0", Mode: operatorv1alpha1.InstallationModeFull,
 		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
 	}}
+	installation.Spec.Upgrade.Backup.Destination = "file:///var/lib/kube-ovn/backups"
 	installation.Status.ObservedVersion = "v1.17.0"
 	previous := installation.Spec
 	previous.Version = installation.Status.ObservedVersion
@@ -519,6 +520,7 @@ func TestUpgradeAuthorizationBindsTheCurrentVersionAndTopology(t *testing.T) {
 	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fmt.Sprintf("%x", sha256.Sum256(previousJSON)), Version: previous.Version}
 	installation.Status.Topology.Inventory = ref
 	installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{ID: "pair-id", Version: previous.Version, TopologyDigest: ref.Digest}
+	installation.Status.LastBackup.Destination = installation.Spec.Upgrade.Backup.Destination
 	installation.Status.Upgrade = operatorv1alpha1.UpgradeStatus{BackupID: "pair-id", TargetVersion: installation.Spec.Version, CheckpointAuthorized: true}
 	if !upgradeAuthorizesApply(installation) {
 		t.Fatal("valid upgrade backup pair did not authorize the version checkpoint")
@@ -529,6 +531,11 @@ func TestUpgradeAuthorizationBindsTheCurrentVersionAndTopology(t *testing.T) {
 		t.Fatal("authorization was reused for a different target version")
 	}
 	installation.Status.Upgrade.TargetVersion = installation.Spec.Version
+	installation.Spec.Upgrade.Backup.Destination = "file:///var/lib/kube-ovn/other"
+	if upgradeAuthorizesApply(installation) {
+		t.Fatal("authorization was reused for a different backup destination")
+	}
+	installation.Spec.Upgrade.Backup.Destination = " file:///var/lib/kube-ovn/backups "
 	installation.Status.LastBackup.TopologyDigest = "sha256:" + strings.Repeat("b", 64)
 	if upgradeAuthorizesApply(installation) {
 		t.Fatal("authorization was reused for a different retained topology")

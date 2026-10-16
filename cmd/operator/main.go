@@ -2,7 +2,10 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
@@ -46,7 +49,7 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true, "Enable leader election for controller manager.")
 	flag.BoolVar(&planOnly, "plan-only", false, "Only serialize installation plans; never apply workloads.")
-	flag.StringVar(&backupDir, "backup-dir", "", "Existing operator-owned directory for lifecycle backups; empty disables lifecycle execution.")
+	flag.StringVar(&backupDir, "backup-dir", "", "Existing operator-owned directory for lifecycle backups; required when lifecycle execution is used.")
 	flag.DurationVar(&backupMaxAge, "backup-max-age", 24*time.Hour, "Maximum age accepted for lifecycle backups.")
 	flag.Int64Var(&backupMaxBytes, "backup-max-bytes", 1<<30, "Maximum size accepted for one lifecycle backup.")
 	flag.Parse()
@@ -79,10 +82,8 @@ func main() {
 		}
 		reconciler.Topology = &topology.Kubernetes{Client: directClient, Runner: podExecutor}
 		reconciler.Lifecycle = &lifecycle.Manager{Client: directClient, Runner: podExecutor, MaxAge: backupMaxAge, MaxBytes: backupMaxBytes}
-		if backupDir != "" {
-			reconciler.Lifecycle.StoreFactory = func(_ *operatorv1alpha1.KubeOVNInstallation) (backup.Store, error) {
-				return backup.OpenFileStore(backupDir)
-			}
+		reconciler.Lifecycle.StoreFactory = func(installation *operatorv1alpha1.KubeOVNInstallation) (backup.Store, error) {
+			return configuredBackupStore(backupDir, installation)
 		}
 		reconciler.OVN = &health.OVNObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
 		reconciler.Runtime = &health.RuntimeObserver{Reader: mgr.GetAPIReader(), Runner: podExecutor}
@@ -126,4 +127,30 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		os.Exit(1)
 	}
+}
+
+func configuredBackupStore(backupDir string, installation *operatorv1alpha1.KubeOVNInstallation) (backup.Store, error) {
+	if installation == nil {
+		return nil, fmt.Errorf("backup store requires an installation")
+	}
+	backupDir = strings.TrimSpace(backupDir)
+	if backupDir == "" {
+		return nil, fmt.Errorf("--backup-dir is required when lifecycle backup execution is used")
+	}
+	destination := strings.TrimSpace(installation.Spec.Upgrade.Backup.Destination)
+	if destination == "" {
+		return backup.OpenFileStore(backupDir)
+	}
+	path, err := backup.FileDestination(destination)
+	if err != nil {
+		return nil, err
+	}
+	configured, err := filepath.Abs(backupDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve --backup-dir: %w", err)
+	}
+	if filepath.Clean(configured) != path {
+		return nil, fmt.Errorf("backup destination %q does not match the operator --backup-dir %q", destination, backupDir)
+	}
+	return backup.OpenFileStore(backupDir)
 }

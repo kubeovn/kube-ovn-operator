@@ -116,15 +116,18 @@ failure, cancellation and stale process identity cannot yield a usable reference
 The store is a trusted, operator-owned boundary; content hashes are not human
 approval signatures. No published backup is automatically deleted. The lifecycle
 controller records a verified pair of references, its pair ID, observed version
-and retained topology digest in `status.lastBackup`. A version-only upgrade
-re-verifies a matching pair or captures a new pair and authorizes one target
-apply checkpoint; the authorization is consumed when the Chart write is
-accepted. The default controller does not yet connect this provider to
-`spec.upgrade.backup.destination`. S3, retention/scheduling, NB/SB upgrade
-checkpoint coordination, RPO/RTO policy and the restore/recovery executor
-remain part of the full lifecycle goal. Native OVSDB
-restore tests verify schema/data loading and preserved row UUIDs, but runtime
-format validation does not reimplement the OVSDB semantic type checker.
+and retained topology digest in `status.lastBackup`, together with the
+configured destination. When the destination is set, the built-in backend
+accepts only a local absolute `file://` URL that exactly matches the operator's
+`--backup-dir`; unsupported object-store schemes are rejected. A version-only
+upgrade re-verifies a matching pair or captures a new pair and authorizes one
+target apply checkpoint; the authorization is consumed when the Chart write is
+accepted and is bound to the destination as well as the version and topology.
+S3/object-store credentials, retention/scheduling, NB/SB upgrade checkpoint
+coordination, RPO/RTO policy and the restore/recovery executor remain part of
+the full lifecycle goal. Native OVSDB restore tests verify schema/data loading
+and preserved row UUIDs, but runtime format validation does not reimplement the
+OVSDB semantic type checker.
 
 ## Kubernetes workload apply contract
 
