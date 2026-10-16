@@ -251,6 +251,11 @@ func (in *KubeOVNRecoveryRequestSpec) DeepCopyInto(out *KubeOVNRecoveryRequestSp
 }
 func (in *KubeOVNRecoveryRequestStatus) DeepCopyInto(out *KubeOVNRecoveryRequestStatus) {
 	*out = *in
+	if in.Plan != nil {
+		out.Plan = new(RecoveryPlanStatus)
+		*out.Plan = *in.Plan
+		out.Plan.ExpiresAt = *in.Plan.ExpiresAt.DeepCopy()
+	}
 	if in.Conditions != nil {
 		out.Conditions = make([]metav1.Condition, len(in.Conditions))
 		copy(out.Conditions, in.Conditions)

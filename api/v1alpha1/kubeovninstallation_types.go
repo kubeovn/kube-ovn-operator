@@ -286,10 +286,36 @@ type KubeOVNRecoveryRequestSpec struct {
 	ExpiresAt       metav1.Time  `json:"expiresAt"`
 }
 
+type RecoveryPhase string
+
+const (
+	RecoveryPhasePending           RecoveryPhase = "Pending"
+	RecoveryPhaseAwaitingExecution RecoveryPhase = "AwaitingExecution"
+	RecoveryPhaseExecuting         RecoveryPhase = "Executing"
+	RecoveryPhaseSucceeded         RecoveryPhase = "Succeeded"
+	RecoveryPhaseFailed            RecoveryPhase = "Failed"
+	RecoveryPhaseExpired           RecoveryPhase = "Expired"
+)
+
+// RecoveryPlanStatus pins the installation and request identities validated
+// before an external recovery executor may be called. The digest covers the
+// complete request, including the self-reported approver; that field is never
+// treated as authority by the operator.
+type RecoveryPlanStatus struct {
+	Digest                 string       `json:"digest"`
+	InstallationUID        types.UID    `json:"installationUID"`
+	InstallationGeneration int64        `json:"installationGeneration"`
+	RequestGeneration      int64        `json:"requestGeneration"`
+	Mode                   RecoveryMode `json:"mode"`
+	BackupRef              string       `json:"backupRef,omitempty"`
+	ExpiresAt              metav1.Time  `json:"expiresAt"`
+}
+
 type KubeOVNRecoveryRequestStatus struct {
-	Phase       string             `json:"phase,omitempty"`
-	Conditions  []metav1.Condition `json:"conditions,omitempty"`
-	CompletedAt *metav1.Time       `json:"completedAt,omitempty"`
+	Phase       RecoveryPhase       `json:"phase,omitempty"`
+	Plan        *RecoveryPlanStatus `json:"plan,omitempty"`
+	Conditions  []metav1.Condition  `json:"conditions,omitempty"`
+	CompletedAt *metav1.Time        `json:"completedAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

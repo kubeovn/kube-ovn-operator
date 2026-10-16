@@ -86,9 +86,17 @@ configured network verification from the current reconciliation. Missing or
 failed verification keeps it false. `WorkloadsReady` reports Kubernetes rollout; only
 a complete observed rollout updates `observedVersion`. A serialized plan alone
 never populates ready replica counts, peer state or the observed version.
-The `KubeOVNRecoveryRequest` API stores recovery intent; its self-reported
-`approvedBy` string alone is not proof of authority and cannot authorize a kick.
-It does not perform a database wipe automatically. The independent
+The `KubeOVNRecoveryRequest` API resolves and pins a namespaced installation
+identity before it records an immutable recovery plan. The plan digest covers
+the request generation, installation UID/generation, mode, backup reference,
+reason, expiry and self-reported `approvedBy`; the latter is audit input and is
+never proof of authority. Rejoin requests may omit a backup, while reconvert
+and fresh-bootstrap requests must name the installation's verified backup pair.
+Expired, changed, recreated, HCP-targeted or backup-mismatched requests become
+terminal failures. A valid request is persisted as `AwaitingExecution`.
+Only an explicitly injected `RecoveryExecutor` can advance it to `Executing`
+and `Succeeded`; the default operator does not wipe or restore a database or
+storage. The independent
 `KubeOVNMemberRemovalApproval` API and provider reserve an immutable decision
 under the installation Leases and record completion for every approved database.
 The transport rechecks that decision after final observation and bounds dispatch

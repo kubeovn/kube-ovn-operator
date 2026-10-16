@@ -6,6 +6,7 @@ import (
 	stdjson "encoding/json/v2"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -829,9 +831,38 @@ func setCondition(conditions *[]metav1.Condition, condition metav1.Condition) {
 	*conditions = append(*conditions, condition)
 }
 
+// RecoveryPlan is the immutable, identity-bound input supplied to an explicit
+// recovery executor. The reconciler never constructs one from an approver
+// string alone and never performs a database wipe itself.
+type RecoveryPlan struct {
+	RequestNamespace       string
+	RequestName            string
+	RequestUID             types.UID
+	InstallationNamespace  string
+	InstallationName       string
+	InstallationUID        types.UID
+	InstallationGeneration int64
+	RequestGeneration      int64
+	Reason                 string
+	Mode                   operatorv1alpha1.RecoveryMode
+	BackupRef              string
+	Approver               string
+	ExpiresAt              time.Time
+	Digest                 string
+}
+
+// RecoveryExecutor is an explicit integration boundary for a future central
+// admin adapter. The default operator leaves it nil, so a RecoveryRequest can
+// be validated and durably queued without mutating a database or storage.
+type RecoveryExecutor interface {
+	Execute(context.Context, RecoveryPlan) error
+}
+
 type RecoveryRequestReconciler struct {
 	client.Client
-	Scheme *apiruntime.Scheme
+	Scheme   *apiruntime.Scheme
+	Clock    func() time.Time
+	Executor RecoveryExecutor
 }
 
 func (r *RecoveryRequestReconciler) SetupWithManager(mgr manager.Manager) error {
@@ -843,16 +874,217 @@ func (r *RecoveryRequestReconciler) Reconcile(ctx context.Context, req reconcile
 	if err := r.Get(ctx, req.NamespacedName, request); err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
-	condition := metav1.Condition{Type: "Accepted", Status: metav1.ConditionFalse, Reason: "AwaitingSafetyReview", Message: "Recovery requests are recorded for an explicit central admin adapter; no database is wiped automatically.", ObservedGeneration: request.Generation, LastTransitionTime: metav1.Now()}
-	request.Status.Phase = "Pending"
-	request.Status.Conditions = []metav1.Condition{condition}
-	if err := r.Status().Update(ctx, request); err != nil {
-		if apierrors.IsConflict(err) {
-			return reconcile.Result{}, nil
+	if !request.DeletionTimestamp.IsZero() {
+		return reconcile.Result{}, nil
+	}
+	now := time.Now().UTC()
+	if r.Clock != nil {
+		now = r.Clock().UTC()
+	}
+	if request.Status.Phase == operatorv1alpha1.RecoveryPhaseSucceeded || request.Status.Phase == operatorv1alpha1.RecoveryPhaseFailed || request.Status.Phase == operatorv1alpha1.RecoveryPhaseExpired {
+		return reconcile.Result{}, nil
+	}
+	installationName := strings.TrimSpace(request.Spec.InstallationRef)
+	if installationName == "" {
+		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "InvalidRequest", "spec.installationRef is required", now, false)
+	}
+	installation := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := r.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: installationName}, installation); err != nil {
+		reason := "InstallationLookupFailed"
+		message := fmt.Sprintf("cannot read referenced installation: %v", err)
+		if apierrors.IsNotFound(err) {
+			reason = "InstallationNotFound"
+			message = fmt.Sprintf("referenced installation %q was not found", installationName)
 		}
+		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, reason, message, now, false)
+	}
+	if request.Status.Plan != nil && request.Status.Plan.RequestGeneration != request.Generation {
+		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "PlanChanged", "RecoveryRequest spec changed after its immutable plan was recorded", now, false)
+	}
+	plan, reason, err := buildRecoveryPlan(request, installation, now)
+	if err != nil {
+		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, reason, err.Error(), now, reason == "Expired")
+	}
+	planStatus := recoveryPlanStatus(plan)
+	if request.Status.Plan != nil && !sameRecoveryPlan(request.Status.Plan, planStatus) {
+		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "PlanChanged", "installation identity or RecoveryRequest inputs changed after the immutable plan was recorded", now, false)
+	}
+	if request.Status.Plan == nil {
+		request.Status.Plan = planStatus
+	}
+	if r.Executor == nil {
+		if err := r.setRecoveryAwaiting(ctx, request, now); err != nil {
+			return reconcile.Result{}, err
+		}
+		return reconcile.Result{}, nil
+	}
+	if request.Status.Phase != operatorv1alpha1.RecoveryPhaseExecuting {
+		if err := r.setRecoveryExecuting(ctx, request, now); err != nil {
+			return reconcile.Result{}, err
+		}
+		return reconcile.Result{RequeueAfter: time.Second}, nil
+	}
+	if err := r.Executor.Execute(ctx, plan); err != nil {
+		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "ExecutionFailed", err.Error(), now, false)
+	}
+	completed := metav1.NewTime(now)
+	request.Status.Phase = operatorv1alpha1.RecoveryPhaseSucceeded
+	request.Status.CompletedAt = &completed
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "ExecutionComplete", "recovery executor completed the explicitly admitted plan", now))
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionTrue, "ExecutionComplete", "recovery executor completed the explicitly admitted plan", now))
+	if err := r.updateRecoveryStatus(ctx, request); err != nil {
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{}, nil
+}
+
+func buildRecoveryPlan(request *operatorv1alpha1.KubeOVNRecoveryRequest, installation *operatorv1alpha1.KubeOVNInstallation, now time.Time) (RecoveryPlan, string, error) {
+	if request == nil || installation == nil {
+		return RecoveryPlan{}, "InvalidRequest", errors.New("recovery plan requires a request and installation")
+	}
+	if request.Name == "" || request.Namespace == "" || request.UID == "" || request.Generation < 1 {
+		return RecoveryPlan{}, "InvalidRequest", errors.New("recovery request requires a stable UID, namespace, name and generation")
+	}
+	if installation.UID == "" || installation.Generation < 1 {
+		return RecoveryPlan{}, "InstallationIdentityInvalid", errors.New("referenced installation has no stable UID or generation")
+	}
+	if request.Namespace != installation.Namespace || strings.TrimSpace(request.Spec.InstallationRef) != installation.Name {
+		return RecoveryPlan{}, "InstallationMismatch", errors.New("recovery request does not reference the installation in its namespace")
+	}
+	reason := strings.TrimSpace(request.Spec.Reason)
+	if reason == "" || len(reason) > 1024 {
+		return RecoveryPlan{}, "InvalidRequest", errors.New("spec.reason must contain 1 to 1024 non-space characters")
+	}
+	approver := strings.TrimSpace(request.Spec.ApprovedBy)
+	if approver == "" || len(approver) > 256 {
+		return RecoveryPlan{}, "InvalidRequest", errors.New("spec.approvedBy must contain 1 to 256 non-space characters")
+	}
+	switch request.Spec.Mode {
+	case operatorv1alpha1.RecoveryModeRejoin:
+	case operatorv1alpha1.RecoveryModeReconvert, operatorv1alpha1.RecoveryModeFreshBootstrap:
+		if strings.TrimSpace(request.Spec.BackupRef) == "" {
+			return RecoveryPlan{}, "BackupRequired", fmt.Errorf("mode %q requires spec.backupRef bound to a verified backup pair", request.Spec.Mode)
+		}
+	default:
+		return RecoveryPlan{}, "InvalidRequest", fmt.Errorf("unsupported recovery mode %q", request.Spec.Mode)
+	}
+	expiresAt := request.Spec.ExpiresAt.UTC()
+	if expiresAt.IsZero() || !expiresAt.After(now) {
+		return RecoveryPlan{}, "Expired", errors.New("recovery request has expired")
+	}
+	backupRef := strings.TrimSpace(request.Spec.BackupRef)
+	if backupRef != "" {
+		if !matchesVerifiedBackup(installation, backupRef) {
+			return RecoveryPlan{}, "BackupMismatch", errors.New("backupRef does not match the installation's current verified backup pair")
+		}
+	}
+	if installation.Spec.HCP.Enabled {
+		return RecoveryPlan{}, "HCPUnsupported", errors.New("local recovery requests cannot target an HCP installation")
+	}
+	plan := RecoveryPlan{
+		RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID,
+		InstallationNamespace: installation.Namespace, InstallationName: installation.Name, InstallationUID: installation.UID,
+		InstallationGeneration: installation.Generation, RequestGeneration: request.Generation,
+		Reason: reason, Mode: request.Spec.Mode, BackupRef: backupRef, Approver: approver, ExpiresAt: expiresAt,
+	}
+	plan.Digest = recoveryPlanDigest(plan)
+	return plan, "", nil
+}
+
+func matchesVerifiedBackup(installation *operatorv1alpha1.KubeOVNInstallation, reference string) bool {
+	if installation == nil || strings.TrimSpace(reference) == "" || installation.Status.LastBackup == nil {
+		return false
+	}
+	backup := installation.Status.LastBackup
+	if backup.ID != reference || backup.ID == "" || backup.Version == "" || backup.Version != installation.Status.ObservedVersion || backup.TopologyDigest == "" || installation.Status.Topology.Inventory == nil || backup.TopologyDigest != installation.Status.Topology.Inventory.Digest || backup.CompletedAt.IsZero() {
+		return false
+	}
+	return len(backup.DatabaseRefs) == 2 && backup.DatabaseRefs["OVN_Northbound"] != "" && backup.DatabaseRefs["OVN_Southbound"] != ""
+}
+
+func recoveryPlanDigest(plan RecoveryPlan) string {
+	data, err := stdjson.Marshal(struct {
+		RequestNamespace       string
+		RequestName            string
+		RequestUID             types.UID
+		InstallationNamespace  string
+		InstallationName       string
+		InstallationUID        types.UID
+		InstallationGeneration int64
+		RequestGeneration      int64
+		Reason                 string
+		Mode                   operatorv1alpha1.RecoveryMode
+		BackupRef              string
+		Approver               string
+		ExpiresAt              string
+	}{
+		RequestNamespace: plan.RequestNamespace, RequestName: plan.RequestName, RequestUID: plan.RequestUID,
+		InstallationNamespace: plan.InstallationNamespace, InstallationName: plan.InstallationName, InstallationUID: plan.InstallationUID,
+		InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration,
+		Reason: plan.Reason, Mode: plan.Mode, BackupRef: plan.BackupRef, Approver: plan.Approver,
+		ExpiresAt: plan.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	}, stdjson.Deterministic(true))
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+}
+
+func recoveryPlanStatus(plan RecoveryPlan) *operatorv1alpha1.RecoveryPlanStatus {
+	return &operatorv1alpha1.RecoveryPlanStatus{Digest: plan.Digest, InstallationUID: plan.InstallationUID, InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration, Mode: plan.Mode, BackupRef: plan.BackupRef, ExpiresAt: metav1.NewTime(plan.ExpiresAt)}
+}
+
+func sameRecoveryPlan(left, right *operatorv1alpha1.RecoveryPlanStatus) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Digest == right.Digest && left.InstallationUID == right.InstallationUID && left.InstallationGeneration == right.InstallationGeneration && left.RequestGeneration == right.RequestGeneration && left.Mode == right.Mode && left.BackupRef == right.BackupRef && left.ExpiresAt.Time.Equal(right.ExpiresAt.Time)
+}
+
+func recoveryCondition(generation int64, conditionType string, status metav1.ConditionStatus, reason, message string, now time.Time) metav1.Condition {
+	return metav1.Condition{Type: conditionType, Status: status, Reason: reason, Message: message, ObservedGeneration: generation, LastTransitionTime: metav1.NewTime(now)}
+}
+
+func (r *RecoveryRequestReconciler) setRecoveryAwaiting(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, now time.Time) error {
+	request.Status.Phase = operatorv1alpha1.RecoveryPhaseAwaitingExecution
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; approvedBy is self-reported and does not authorize execution", now))
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionFalse, "ExternalExecutorRequired", "no explicit central recovery executor is configured; no database or storage mutation was attempted", now))
+	return r.updateRecoveryStatus(ctx, request)
+}
+
+func (r *RecoveryRequestReconciler) setRecoveryExecuting(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, now time.Time) error {
+	request.Status.Phase = operatorv1alpha1.RecoveryPhaseExecuting
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; approvedBy is self-reported and does not authorize execution", now))
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionTrue, "ExecutionStarted", "explicit recovery executor was admitted to execute the persisted plan", now))
+	return r.updateRecoveryStatus(ctx, request)
+}
+
+func (r *RecoveryRequestReconciler) setRecoveryFailure(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, reason, message string, now time.Time, expired bool) error {
+	if expired {
+		request.Status.Phase = operatorv1alpha1.RecoveryPhaseExpired
+	} else {
+		request.Status.Phase = operatorv1alpha1.RecoveryPhaseFailed
+	}
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionFalse, reason, message, now))
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionFalse, reason, message, now))
+	return r.updateRecoveryStatus(ctx, request)
+}
+
+func (r *RecoveryRequestReconciler) updateRecoveryStatus(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest) error {
+	if request == nil {
+		return errors.New("recovery status update requires a request")
+	}
+	current := new(operatorv1alpha1.KubeOVNRecoveryRequest)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(request), current); err == nil && reflect.DeepEqual(current.Status, request.Status) {
+		return nil
+	}
+	if err := r.Status().Update(ctx, request); err != nil {
+		if apierrors.IsConflict(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 var _ reconcile.Reconciler = (*KubeOVNInstallationReconciler)(nil)

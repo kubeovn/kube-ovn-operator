@@ -31,4 +31,24 @@ spec:
                 expiresAt: {type: string, format: date-time}
             status:
               type: object
-              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, AwaitingExecution, Executing, Succeeded, Failed, Expired]
+                plan:
+                  type: object
+                  required: [digest, installationUID, installationGeneration, requestGeneration, mode, expiresAt]
+                  properties:
+                    digest: {type: string}
+                    installationUID: {type: string}
+                    installationGeneration: {type: integer, format: int64}
+                    requestGeneration: {type: integer, format: int64}
+                    mode: {type: string, enum: [rejoin, reconvert, freshBootstrap]}
+                    backupRef: {type: string}
+                    expiresAt: {type: string, format: date-time}
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                completedAt: {type: string, format: date-time}
