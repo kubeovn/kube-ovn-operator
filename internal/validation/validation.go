@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -42,6 +43,17 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 	}
 	if spec.Upgrade.Backup.Required && strings.TrimSpace(spec.Upgrade.Backup.Destination) == "" {
 		errs = append(errs, fmt.Errorf("spec.upgrade.backup.destination is required when backup.required is true"))
+	}
+	if strings.TrimSpace(spec.Upgrade.Backup.Schedule) != "" {
+		if err := backup.ValidateSchedule(spec.Upgrade.Backup.Schedule); err != nil {
+			errs = append(errs, fmt.Errorf("spec.upgrade.backup.schedule: %w", err))
+		}
+		if !spec.Upgrade.Backup.Required {
+			errs = append(errs, fmt.Errorf("spec.upgrade.backup.required must be true when backup.schedule is configured"))
+		}
+		if strings.TrimSpace(spec.Upgrade.Backup.Destination) == "" {
+			errs = append(errs, fmt.Errorf("spec.upgrade.backup.destination is required when backup.schedule is configured"))
+		}
 	}
 	if spec.Adoption.Enabled {
 		if len(spec.Adoption.Selector) == 0 {

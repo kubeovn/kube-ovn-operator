@@ -24,3 +24,4 @@ spec:
     backup:
       required: true
       destination: s3://example/kube-ovn
+      schedule: 6h

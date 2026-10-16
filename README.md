@@ -358,9 +358,16 @@ failed uploads are not deleted automatically. Before a version-only upgrade,
 the controller re-verifies a matching pair or captures a new one, then
 authorizes one apply checkpoint for the requested target version. The
 authorization is consumed when the Chart write is accepted and cannot be
-reused after a target, destination or topology change. Retention, backup
-scheduling, cross-database upgrade checkpoints, recovery execution and product
-RPO/RTO policy remain to be implemented. The
+reused after a target, destination or topology change. Set
+`spec.upgrade.backup.schedule` to a duration between one minute and thirty days
+to request periodic verified NB/SB captures. A due scheduled capture runs under
+both operation Leases, requires the retained topology and current observed
+version, persists `status.lastBackup`, and returns before Chart rendering; it
+does not change `status.applyCheckpoint` or authorize a Chart write. Scheduling
+is skipped while a lifecycle operation or version-only upgrade is in flight,
+and for HCP or data-plane-only installations. Retention, cross-database upgrade
+checkpoints, recovery execution and product RPO/RTO policy remain to be
+implemented. The
 provider checks the native file structure and provenance, not all OVSDB schema
 semantics; tests load the stored files into fresh OVSDB processes and verify
 recovered data and row UUIDs for both OVN schemas. It does not restore over a

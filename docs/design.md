@@ -134,7 +134,14 @@ partial uploads are not deleted automatically. A version-only upgrade
 re-verifies a matching pair or captures a new pair and authorizes one target
 apply checkpoint; the authorization is consumed when the Chart write is
 accepted and is bound to the destination as well as the version and topology.
-Retention/scheduling, NB/SB upgrade checkpoint coordination, RPO/RTO policy and
+`spec.upgrade.backup.schedule` accepts an interval duration between one minute
+and thirty days. Once due, the controller captures a verified NB/SB pair under
+both operation Leases, using the retained topology and observed version as the
+binding. The scheduler persists `status.lastBackup` and exits before Chart
+rendering; it never changes `status.applyCheckpoint` or grants apply
+authorization. It skips HCP/data-plane-only installations, active lifecycle
+operations, version-only upgrades and installations without retained topology.
+Retention, NB/SB upgrade checkpoint coordination, RPO/RTO policy and
 the restore/recovery executor remain part of the full lifecycle goal. Native OVSDB restore tests verify schema/data loading
 and preserved row UUIDs, but runtime format validation does not reimplement the
 OVSDB semantic type checker.

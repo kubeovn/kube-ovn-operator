@@ -93,6 +93,7 @@ spec:
                       properties:
                         required: {type: boolean}
                         destination: {type: string}
+                        schedule: {type: string}
                 adoption:
                   type: object
                   x-kubernetes-validations:
