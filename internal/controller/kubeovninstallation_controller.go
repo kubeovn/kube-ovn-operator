@@ -201,7 +201,6 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				operation.HandoffInventory = next
 				operation.HandoffApplied = false
 				installation.Status.Topology.Inventory = next
-				logger.Info("[DEBUG-handoff] publishing topology handoff", "inventory", installation.Status.Topology.Inventory, "handoffInventory", operation.HandoffInventory)
 				plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "WorkloadHandoff", "central topology handed off; apply checkpoint authorization is pending"
 				condition := &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionTrue, Reason: "LifecycleComplete", Message: plan.Blocking}
 				if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, condition); err != nil {
@@ -210,7 +209,6 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 			}
 			if installation.Status.Topology.Inventory == nil || *installation.Status.Topology.Inventory != *operation.HandoffInventory {
-				logger.Info("[DEBUG-handoff] retained topology differs from handoff", "inventory", installation.Status.Topology.Inventory, "handoffInventory", operation.HandoffInventory)
 				return reconcile.Result{}, errors.New("completed lifecycle handoff does not match the retained topology")
 			}
 			if !operation.HandoffApplied {
@@ -291,9 +289,8 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 	}
-	renderSpec, renderErr := r.lifecycleRenderSpec(ctx, installation)
+	renderSpec, retainedTopology, renderErr := r.lifecycleRenderSpec(ctx, installation)
 	if renderErr != nil {
-		logger.Info("[DEBUG-handoff] lifecycle render spec failed", "reason", renderErr.Error())
 		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "Render", renderErr.Error()
 		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
 			return reconcile.Result{}, statusErr
@@ -309,13 +306,15 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	}
 	rendered, err := renderer.Render(ctx, renderSpec)
 	adoptionObjects := rendered.Objects
+	if err == nil && retainedTopology != nil && len(rendered.Objects) > 0 {
+		err = applyRetainedChartDeploymentReplicas(rendered.Objects, *retainedTopology)
+	}
 	if err == nil && len(rendered.Objects) > 0 {
 		var probes []*unstructured.Unstructured
 		probes, err = chart.NetworkProbeObjects(installation, rendered.Objects)
 		rendered.Objects = append(rendered.Objects, probes...)
 	}
 	if err != nil {
-		logger.Info("[DEBUG-handoff] chart render failed", "reason", err.Error())
 		plan.Phase = operatorv1alpha1.PhaseDegraded
 		plan.Step = "Render"
 		plan.Blocking = err.Error()
@@ -331,7 +330,6 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	var observation *apply.Observation
 	var topologyCondition *metav1.Condition
 	if workload == nil || len(rendered.Objects) == 0 {
-		logger.Info("[DEBUG-handoff] workload apply skipped", "workloadNil", workload == nil, "renderedObjects", len(rendered.Objects), "authorized", lifecycleHandoffAuthorizesApply(installation))
 		if err := r.ensurePlanConfigMap(ctx, installation, plan, rendered); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -379,9 +377,6 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				}
 			}
 			plan.Step = "Apply"
-			authorized := lifecycleHandoffAuthorizesApply(installation)
-			operation := installation.Status.Topology.Operation
-			logger.Info("[DEBUG-handoff] before workload apply", "authorized", authorized, "renderedObjects", len(rendered.Objects), "operationNil", operation == nil, "handoffApplied", operation != nil && operation.HandoffApplied, "completionDigest", operation != nil && operation.CompletionDigest != "", "handoffInventory", operation != nil && operation.HandoffInventory != nil, "inventory", installation.Status.Topology.Inventory != nil, "inventoryEqual", operation != nil && operation.HandoffInventory != nil && installation.Status.Topology.Inventory != nil && *operation.HandoffInventory == *installation.Status.Topology.Inventory)
 			if err := lease.CheckAll(operationCtx); err != nil {
 				return err
 			}
@@ -391,7 +386,6 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				}
 				return err
 			}
-			logger.Info("[DEBUG-handoff] workload apply accepted", "authorized", lifecycleHandoffAuthorizesApply(installation))
 			if upgradeAuthorized {
 				// Persist the accepted target before observing it. If the process
 				// exits after Chart Apply, the next reconciliation can retry this
@@ -711,9 +705,6 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		condition.LastTransitionTime = metav1.NewTime(now)
 		setCondition(&status.Conditions, condition)
 	}
-	if status.Topology.Operation != nil && status.Topology.Operation.HandoffInventory != nil {
-		log.FromContext(ctx).Info("[DEBUG-handoff] status payload", "inventory", status.Topology.Inventory, "handoffInventory", status.Topology.Operation.HandoffInventory, "handoffApplied", status.Topology.Operation.HandoffApplied)
-	}
 	updated := installationWithStatus(installation, *status)
 	if err := r.Status().Update(ctx, updated); err != nil {
 		return err
@@ -865,29 +856,29 @@ func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstal
 	return fmt.Errorf("lifecycle member request %q was removed after operation admission; restore the pinned request before retrying", memberName)
 }
 
-// lifecycleRenderSpec keeps the original Chart Deployment at its retained
-// member count while independently managed additions or removals converge.
-// Without this boundary, a successful addition would scale the old Deployment
+// lifecycleRenderSpec returns the legal Raft input plus the retained topology
+// used to patch the rendered Chart Deployment after template evaluation.
+// Without that boundary, a successful addition would scale the old Deployment
 // at the same time as the new StatefulSet and create duplicate RAFT members.
-func (r *KubeOVNInstallationReconciler) lifecycleRenderSpec(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (operatorv1alpha1.KubeOVNInstallationSpec, error) {
+func (r *KubeOVNInstallationReconciler) lifecycleRenderSpec(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (operatorv1alpha1.KubeOVNInstallationSpec, *health.CentralTopology, error) {
 	spec := installation.Spec
 	if !localRaft(installation) || !spec.Central.DynamicMembership || installation.Status.Topology.Inventory == nil || r.Topology == nil {
-		return spec, nil
+		return spec, nil, nil
 	}
 	provider, ok := r.Topology.(topology.InventoryProvider)
 	if !ok || r.Leases == nil {
-		return spec, errors.New("dynamic membership rendering requires a retained topology provider and operation leases")
+		return spec, nil, errors.New("dynamic membership rendering requires a retained topology provider and operation leases")
 	}
-	var retained health.CentralTopology
+	retained := new(health.CentralTopology)
 	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
 			var err error
-			retained, err = provider.Retained(centralCtx, installation)
+			*retained, err = provider.Retained(centralCtx, installation)
 			return err
 		})
 	})
 	if err != nil {
-		return spec, fmt.Errorf("read retained topology for dynamic chart rendering: %w", err)
+		return spec, nil, fmt.Errorf("read retained topology for dynamic chart rendering: %w", err)
 	}
 	chartReplicas := int32(0)
 	for _, member := range retained.Members {
@@ -896,10 +887,50 @@ func (r *KubeOVNInstallationReconciler) lifecycleRenderSpec(ctx context.Context,
 		}
 	}
 	if chartReplicas == 0 {
-		return spec, errors.New("dynamic membership requires at least one retained Chart Deployment member")
+		return spec, nil, errors.New("dynamic membership requires at least one retained Chart Deployment member")
 	}
-	spec.Central.Replicas = chartReplicas
-	return spec, nil
+	// Keep the legal Raft member count as the renderer input. The rendered
+	// Deployment is patched separately to the retained member count so the
+	// independently managed replacement members do not get duplicated.
+	return spec, retained, nil
+}
+
+func applyRetainedChartDeploymentReplicas(objects []*unstructured.Unstructured, retained health.CentralTopology) error {
+	deploymentReplicas := make(map[string]int64)
+	for _, member := range retained.Members {
+		if member.Workload.Kind != "Deployment" || member.Workload.Name == "" {
+			continue
+		}
+		deploymentReplicas[member.Workload.Name]++
+	}
+	if len(deploymentReplicas) == 0 {
+		return errors.New("dynamic membership requires at least one retained Chart Deployment member")
+	}
+	matched := make(map[string]struct{}, len(deploymentReplicas))
+	for _, object := range objects {
+		if object.GetKind() != "Deployment" {
+			continue
+		}
+		replicas, ok := deploymentReplicas[object.GetName()]
+		if !ok {
+			continue
+		}
+		if err := unstructured.SetNestedField(object.Object, replicas, "spec", "replicas"); err != nil {
+			return fmt.Errorf("set retained Chart Deployment %q replicas: %w", object.GetName(), err)
+		}
+		matched[object.GetName()] = struct{}{}
+	}
+	if len(matched) != len(deploymentReplicas) {
+		missing := make([]string, 0, len(deploymentReplicas)-len(matched))
+		for name := range deploymentReplicas {
+			if _, ok := matched[name]; !ok {
+				missing = append(missing, name)
+			}
+		}
+		slices.Sort(missing)
+		return fmt.Errorf("rendered Chart omitted retained Deployment(s): %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func recordLifecycleBackupStatus(installation *operatorv1alpha1.KubeOVNInstallation, recovery *lifecycle.Recovery) {
@@ -1322,7 +1353,6 @@ func (r *KubeOVNInstallationReconciler) markLifecycleHandoffApplied(ctx context.
 	if !lifecycleHandoffAuthorizesApply(installation) || installation.Status.Topology.Operation == nil {
 		return nil
 	}
-	log.FromContext(ctx).Info("[DEBUG-handoff] consuming lifecycle handoff")
 	updated := installation.DeepCopy()
 	updated.Status.Topology.Operation.HandoffApplied = true
 	if err := r.Status().Update(ctx, updated); err != nil {
