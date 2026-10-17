@@ -377,7 +377,9 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				}
 			}
 			plan.Step = "Apply"
-			logger.Info("[DEBUG-handoff] before workload apply", "authorized", lifecycleHandoffAuthorizesApply(installation), "renderedObjects", len(rendered.Objects))
+			authorized := lifecycleHandoffAuthorizesApply(installation)
+			operation := installation.Status.Topology.Operation
+			logger.Info("[DEBUG-handoff] before workload apply", "authorized", authorized, "renderedObjects", len(rendered.Objects), "operationNil", operation == nil, "handoffApplied", operation != nil && operation.HandoffApplied, "completionDigest", operation != nil && operation.CompletionDigest != "", "handoffInventory", operation != nil && operation.HandoffInventory != nil, "inventory", installation.Status.Topology.Inventory != nil, "inventoryEqual", operation != nil && operation.HandoffInventory != nil && installation.Status.Topology.Inventory != nil && *operation.HandoffInventory == *installation.Status.Topology.Inventory)
 			if err := lease.CheckAll(operationCtx); err != nil {
 				return err
 			}
