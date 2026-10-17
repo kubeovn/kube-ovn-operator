@@ -293,6 +293,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	}
 	renderSpec, renderErr := r.lifecycleRenderSpec(ctx, installation)
 	if renderErr != nil {
+		logger.Info("[DEBUG-handoff] lifecycle render spec failed", "reason", renderErr.Error())
 		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "Render", renderErr.Error()
 		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
 			return reconcile.Result{}, statusErr
@@ -314,6 +315,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		rendered.Objects = append(rendered.Objects, probes...)
 	}
 	if err != nil {
+		logger.Info("[DEBUG-handoff] chart render failed", "reason", err.Error())
 		plan.Phase = operatorv1alpha1.PhaseDegraded
 		plan.Step = "Render"
 		plan.Blocking = err.Error()
