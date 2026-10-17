@@ -414,6 +414,6 @@ if [[ "$final_request_json" != "$request_json" ]]; then
 fi
 journal_json=$(kubectl get configmap "$journal_name" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
 printf '%s\n' "$journal_json" | grep -Fq '"phase":"Complete"'
-printf '%s\n' "$journal_json" | grep -Fq "$replacement_pod"
+printf '%s\n' "$journal_json" | grep -Fq "$replacement_set"
 echo "immutable request and completion journal verified"
 echo "default controller completed native Deployment replacement: $target_pod -> $replacement_pod; StatefulSet=$replacement_set; inventory=$final_inventory"
