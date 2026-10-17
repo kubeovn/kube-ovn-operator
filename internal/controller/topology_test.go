@@ -10,6 +10,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -43,17 +44,46 @@ func (p retainedTopologyProvider) Retained(context.Context, *api.KubeOVNInstalla
 	return p.retained, nil
 }
 
-func TestLifecycleRenderSpecKeepsChartDeploymentAtItsRetainedCount(t *testing.T) {
+func TestLifecycleRenderSpecKeepsLegalRaftInputAndReturnsRetainedChartTopology(t *testing.T) {
 	scheme := controllerScheme(t)
-	installation := &api.KubeOVNInstallation{Name: "dynamic", Namespace: "default", UID: "installation", Generation: 2, Spec: api.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 5, DynamicMembership: true}}, Status: api.KubeOVNInstallationStatus{Topology: api.TopologyStatus{Inventory: &api.CentralTopologyReference{Name: "inventory", UID: "inventory-uid", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}
+	installation := &api.KubeOVNInstallation{Name: "dynamic", Namespace: "default", UID: "installation", Generation: 2, Spec: api.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3, DynamicMembership: true}}, Status: api.KubeOVNInstallationStatus{Topology: api.TopologyStatus{Inventory: &api.CentralTopologyReference{Name: "inventory", UID: "inventory-uid", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
-	retained := health.CentralTopology{Members: []health.CentralIdentity{{Workload: health.WorkloadIdentity{Kind: "Deployment"}}, {Workload: health.WorkloadIdentity{Kind: "Deployment"}}, {Workload: health.WorkloadIdentity{Kind: "Deployment"}}, {Workload: health.WorkloadIdentity{Kind: "StatefulSet"}}, {Workload: health.WorkloadIdentity{Kind: "StatefulSet"}}}}
-	rendered, err := (&KubeOVNInstallationReconciler{Client: kube, Leases: lease.New(kube), Topology: retainedTopologyProvider{retained: retained}}).lifecycleRenderSpec(t.Context(), installation)
+	retained := health.CentralTopology{Members: []health.CentralIdentity{{Workload: health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: "controller-retirement"}, Kind: "Deployment"}}, {Workload: health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: "controller-retirement"}, Kind: "Deployment"}}, {Workload: health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: "replacement"}, Kind: "StatefulSet"}}}}
+	rendered, retainedTopology, err := (&KubeOVNInstallationReconciler{Client: kube, Leases: lease.New(kube), Topology: retainedTopologyProvider{retained: retained}}).lifecycleRenderSpec(t.Context(), installation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rendered.Central.Replicas != 3 {
-		t.Fatalf("dynamic rendering would scale the Chart Deployment to %d replicas", rendered.Central.Replicas)
+	if rendered.Central.Replicas != 3 || retainedTopology == nil {
+		t.Fatalf("dynamic rendering lost the legal Raft input or retained topology: replicas=%d topology=%v", rendered.Central.Replicas, retainedTopology)
+	}
+}
+
+func TestApplyRetainedChartDeploymentReplicas(t *testing.T) {
+	deployment := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]any{"name": "controller-retirement"},
+		"spec":       map[string]any{"replicas": int64(3)},
+	}}
+	retained := health.CentralTopology{Members: []health.CentralIdentity{
+		{Workload: health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: "controller-retirement"}, Kind: "Deployment"}},
+		{Workload: health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: "controller-retirement"}, Kind: "Deployment"}},
+		{Workload: health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: "replacement"}, Kind: "StatefulSet"}},
+	}}
+	if err := applyRetainedChartDeploymentReplicas([]*unstructured.Unstructured{deployment}, retained); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := unstructured.NestedInt64(deployment.Object, "spec", "replicas")
+	if err != nil || !found || got != 2 {
+		t.Fatalf("retained Chart Deployment replicas=%d found=%t err=%v", got, found, err)
+	}
+}
+
+func TestLifecycleRenderSpecLeavesNonDynamicInstallationUnchanged(t *testing.T) {
+	installation := &api.KubeOVNInstallation{Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 5}}}
+	rendered, retained, err := (&KubeOVNInstallationReconciler{}).lifecycleRenderSpec(t.Context(), installation)
+	if err != nil || retained != nil || rendered.Central.Replicas != 5 || rendered.Central.DynamicMembership {
+		t.Fatalf("non-dynamic installation changed during lifecycle rendering: spec=%+v retained=%v err=%v", rendered.Central, retained, err)
 	}
 }
 

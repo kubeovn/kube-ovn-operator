@@ -289,7 +289,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 	}
-	renderSpec, renderErr := r.lifecycleRenderSpec(ctx, installation)
+	renderSpec, retainedTopology, renderErr := r.lifecycleRenderSpec(ctx, installation)
 	if renderErr != nil {
 		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "Render", renderErr.Error()
 		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
@@ -306,6 +306,9 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	}
 	rendered, err := renderer.Render(ctx, renderSpec)
 	adoptionObjects := rendered.Objects
+	if err == nil && retainedTopology != nil && len(rendered.Objects) > 0 {
+		err = applyRetainedChartDeploymentReplicas(rendered.Objects, *retainedTopology)
+	}
 	if err == nil && len(rendered.Objects) > 0 {
 		var probes []*unstructured.Unstructured
 		probes, err = chart.NetworkProbeObjects(installation, rendered.Objects)
@@ -395,7 +398,9 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			if lifecycleHandoffAuthorizesApply(installation) && installation.Status.Topology.Operation != nil {
 				// Consume the lifecycle authorization when the Chart write is
 				// accepted. Later observation failures must not make it reusable.
-				installation.Status.Topology.Operation.HandoffApplied = true
+				if err := r.markLifecycleHandoffApplied(operationCtx, installation); err != nil {
+					return err
+				}
 			}
 			plan.Step = "Observe"
 			if observer, ok := workload.(apply.Observer); ok {
@@ -700,7 +705,13 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		condition.LastTransitionTime = metav1.NewTime(now)
 		setCondition(&status.Conditions, condition)
 	}
-	return r.Status().Update(ctx, installationWithStatus(installation, *status))
+	updated := installationWithStatus(installation, *status)
+	if err := r.Status().Update(ctx, updated); err != nil {
+		return err
+	}
+	installation.ResourceVersion = updated.ResourceVersion
+	installation.Status = updated.Status
+	return nil
 }
 
 func localRaft(installation *operatorv1alpha1.KubeOVNInstallation) bool {
@@ -737,10 +748,13 @@ func (r *KubeOVNInstallationReconciler) ensureTopology(ctx context.Context, inst
 		return err
 	}
 	installation.Status.Topology.Inventory = ref
-	if err := r.Status().Update(ctx, installation); err != nil {
+	updated := installation.DeepCopy()
+	if err := r.Status().Update(ctx, updated); err != nil {
 		installation.Status.Topology.Inventory = nil
 		return fmt.Errorf("persist central topology reference: %w", err)
 	}
+	installation.ResourceVersion = updated.ResourceVersion
+	installation.Status = updated.Status
 	return observationErr
 }
 
@@ -842,29 +856,29 @@ func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstal
 	return fmt.Errorf("lifecycle member request %q was removed after operation admission; restore the pinned request before retrying", memberName)
 }
 
-// lifecycleRenderSpec keeps the original Chart Deployment at its retained
-// member count while independently managed additions or removals converge.
-// Without this boundary, a successful addition would scale the old Deployment
+// lifecycleRenderSpec returns the legal Raft input plus the retained topology
+// used to patch the rendered Chart Deployment after template evaluation.
+// Without that boundary, a successful addition would scale the old Deployment
 // at the same time as the new StatefulSet and create duplicate RAFT members.
-func (r *KubeOVNInstallationReconciler) lifecycleRenderSpec(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (operatorv1alpha1.KubeOVNInstallationSpec, error) {
+func (r *KubeOVNInstallationReconciler) lifecycleRenderSpec(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (operatorv1alpha1.KubeOVNInstallationSpec, *health.CentralTopology, error) {
 	spec := installation.Spec
 	if !localRaft(installation) || !spec.Central.DynamicMembership || installation.Status.Topology.Inventory == nil || r.Topology == nil {
-		return spec, nil
+		return spec, nil, nil
 	}
 	provider, ok := r.Topology.(topology.InventoryProvider)
 	if !ok || r.Leases == nil {
-		return spec, errors.New("dynamic membership rendering requires a retained topology provider and operation leases")
+		return spec, nil, errors.New("dynamic membership rendering requires a retained topology provider and operation leases")
 	}
-	var retained health.CentralTopology
+	retained := new(health.CentralTopology)
 	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
 			var err error
-			retained, err = provider.Retained(centralCtx, installation)
+			*retained, err = provider.Retained(centralCtx, installation)
 			return err
 		})
 	})
 	if err != nil {
-		return spec, fmt.Errorf("read retained topology for dynamic chart rendering: %w", err)
+		return spec, nil, fmt.Errorf("read retained topology for dynamic chart rendering: %w", err)
 	}
 	chartReplicas := int32(0)
 	for _, member := range retained.Members {
@@ -873,10 +887,50 @@ func (r *KubeOVNInstallationReconciler) lifecycleRenderSpec(ctx context.Context,
 		}
 	}
 	if chartReplicas == 0 {
-		return spec, errors.New("dynamic membership requires at least one retained Chart Deployment member")
+		return spec, nil, errors.New("dynamic membership requires at least one retained Chart Deployment member")
 	}
-	spec.Central.Replicas = chartReplicas
-	return spec, nil
+	// Keep the legal Raft member count as the renderer input. The rendered
+	// Deployment is patched separately to the retained member count so the
+	// independently managed replacement members do not get duplicated.
+	return spec, retained, nil
+}
+
+func applyRetainedChartDeploymentReplicas(objects []*unstructured.Unstructured, retained health.CentralTopology) error {
+	deploymentReplicas := make(map[string]int64)
+	for _, member := range retained.Members {
+		if member.Workload.Kind != "Deployment" || member.Workload.Name == "" {
+			continue
+		}
+		deploymentReplicas[member.Workload.Name]++
+	}
+	if len(deploymentReplicas) == 0 {
+		return errors.New("dynamic membership requires at least one retained Chart Deployment member")
+	}
+	matched := make(map[string]struct{}, len(deploymentReplicas))
+	for _, object := range objects {
+		if object.GetKind() != "Deployment" {
+			continue
+		}
+		replicas, ok := deploymentReplicas[object.GetName()]
+		if !ok {
+			continue
+		}
+		if err := unstructured.SetNestedField(object.Object, replicas, "spec", "replicas"); err != nil {
+			return fmt.Errorf("set retained Chart Deployment %q replicas: %w", object.GetName(), err)
+		}
+		matched[object.GetName()] = struct{}{}
+	}
+	if len(matched) != len(deploymentReplicas) {
+		missing := make([]string, 0, len(deploymentReplicas)-len(matched))
+		for name := range deploymentReplicas {
+			if _, ok := matched[name]; !ok {
+				missing = append(missing, name)
+			}
+		}
+		slices.Sort(missing)
+		return fmt.Errorf("rendered Chart omitted retained Deployment(s): %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func recordLifecycleBackupStatus(installation *operatorv1alpha1.KubeOVNInstallation, recovery *lifecycle.Recovery) {
@@ -1271,10 +1325,13 @@ func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Contex
 			}
 			previous := *existing
 			installation.Status.ApplyCheckpoint = &checkpoint
-			if err := r.Status().Update(ctx, installation); err != nil {
+			updated := installation.DeepCopy()
+			if err := r.Status().Update(ctx, updated); err != nil {
 				installation.Status.ApplyCheckpoint = &previous
 				return fmt.Errorf("persist lifecycle-authorized apply checkpoint: %w", err)
 			}
+			installation.ResourceVersion = updated.ResourceVersion
+			installation.Status = updated.Status
 			return nil
 		}
 		return nil
@@ -1282,10 +1339,27 @@ func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Contex
 	installation.Status.ApplyCheckpoint = &checkpoint
 	// Persist before any workload write so a restart or partial apply cannot
 	// turn a topology/version change into a fresh installation.
-	if err := r.Status().Update(ctx, installation); err != nil {
+	updated := installation.DeepCopy()
+	if err := r.Status().Update(ctx, updated); err != nil {
 		installation.Status.ApplyCheckpoint = nil
 		return fmt.Errorf("persist apply checkpoint: %w", err)
 	}
+	installation.ResourceVersion = updated.ResourceVersion
+	installation.Status = updated.Status
+	return nil
+}
+
+func (r *KubeOVNInstallationReconciler) markLifecycleHandoffApplied(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) error {
+	if !lifecycleHandoffAuthorizesApply(installation) || installation.Status.Topology.Operation == nil {
+		return nil
+	}
+	updated := installation.DeepCopy()
+	updated.Status.Topology.Operation.HandoffApplied = true
+	if err := r.Status().Update(ctx, updated); err != nil {
+		return fmt.Errorf("persist lifecycle handoff consumption: %w", err)
+	}
+	installation.ResourceVersion = updated.ResourceVersion
+	installation.Status = updated.Status
 	return nil
 }
 

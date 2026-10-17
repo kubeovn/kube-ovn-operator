@@ -15,6 +15,22 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      initContainers:
+        - name: prepare-ovn-storage
+          image: kube-ovn-central-fixture:e2e
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - mkdir -p /etc/ovn /var/run/ovn && chmod 0700 /etc/ovn /var/run/ovn && chown -R 65532:65532 /etc/ovn /var/run/ovn
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: ovn-data
+              mountPath: /etc/ovn
+            - name: ovn-run
+              mountPath: /var/run/ovn
       nodeSelector:
         node-role.kubernetes.io/control-plane: ""
       tolerations:
@@ -32,8 +48,7 @@ spec:
         - name: ovn-central
           image: kube-ovn-central-fixture:e2e
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-ec"]
-          args: ["exec sleep 3600"]
+          command: ["/fixture/start.sh"]
           env:
             - name: MASTER_NODES
               value: {{ .Values.MASTER_NODES | quote }}
@@ -45,8 +60,12 @@ spec:
           volumeMounts:
             - name: ovn-data
               mountPath: /etc/ovn
+            - name: ovn-run
+              mountPath: /var/run/ovn
       volumes:
         - name: ovn-data
           hostPath:
             path: /tmp/kube-ovn-operator-controller-fixture
             type: DirectoryOrCreate
+        - name: ovn-run
+          emptyDir: {}

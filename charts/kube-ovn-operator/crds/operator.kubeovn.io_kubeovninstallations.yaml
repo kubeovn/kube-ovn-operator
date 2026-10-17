@@ -159,6 +159,30 @@ spec:
                         name: {type: string, minLength: 1}
                         uid: {type: string, minLength: 1}
                         digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                    operation:
+                      type: object
+                      required: [journalName, journalUID, requestName, requestUID, inventory, handoffApplied]
+                      properties:
+                        journalName: {type: string}
+                        journalUID: {type: string}
+                        requestName: {type: string}
+                        requestUID: {type: string}
+                        inventory:
+                          type: object
+                          required: [name, uid, digest]
+                          properties:
+                            name: {type: string, minLength: 1}
+                            uid: {type: string, minLength: 1}
+                            digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                        handoffInventory:
+                          type: object
+                          required: [name, uid, digest]
+                          properties:
+                            name: {type: string, minLength: 1}
+                            uid: {type: string, minLength: 1}
+                            digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                        completionDigest: {type: string}
+                        handoffApplied: {type: boolean}
                 upgrade:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true

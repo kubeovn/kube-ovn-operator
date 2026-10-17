@@ -209,7 +209,7 @@ type CentralOperationReference struct {
 	Inventory        CentralTopologyReference  `json:"inventory"`
 	HandoffInventory *CentralTopologyReference `json:"handoffInventory,omitempty"`
 	CompletionDigest string                    `json:"completionDigest,omitempty"`
-	HandoffApplied   bool                      `json:"handoffApplied,omitzero"`
+	HandoffApplied   bool                      `json:"handoffApplied"`
 }
 
 type TopologyStatus struct {
