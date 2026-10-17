@@ -747,10 +747,13 @@ func (r *KubeOVNInstallationReconciler) ensureTopology(ctx context.Context, inst
 		return err
 	}
 	installation.Status.Topology.Inventory = ref
-	if err := r.Status().Update(ctx, installation); err != nil {
+	updated := installation.DeepCopy()
+	if err := r.Status().Update(ctx, updated); err != nil {
 		installation.Status.Topology.Inventory = nil
 		return fmt.Errorf("persist central topology reference: %w", err)
 	}
+	installation.ResourceVersion = updated.ResourceVersion
+	installation.Status = updated.Status
 	return observationErr
 }
 
