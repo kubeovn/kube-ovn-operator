@@ -201,6 +201,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				operation.HandoffInventory = next
 				operation.HandoffApplied = false
 				installation.Status.Topology.Inventory = next
+				logger.Info("[DEBUG-handoff] publishing topology handoff", "inventory", installation.Status.Topology.Inventory, "handoffInventory", operation.HandoffInventory)
 				plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseRecovering, "WorkloadHandoff", "central topology handed off; apply checkpoint authorization is pending"
 				condition := &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionTrue, Reason: "LifecycleComplete", Message: plan.Blocking}
 				if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, condition); err != nil {
@@ -209,6 +210,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 			}
 			if installation.Status.Topology.Inventory == nil || *installation.Status.Topology.Inventory != *operation.HandoffInventory {
+				logger.Info("[DEBUG-handoff] retained topology differs from handoff", "inventory", installation.Status.Topology.Inventory, "handoffInventory", operation.HandoffInventory)
 				return reconcile.Result{}, errors.New("completed lifecycle handoff does not match the retained topology")
 			}
 			if !operation.HandoffApplied {

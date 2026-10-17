@@ -361,6 +361,7 @@ if [[ "$operation_handoff" != true ]]; then
 	kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.handoffInventory}{"\n"}' >&2 || true
   kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation}' >&2 || true
   printf '\n' >&2
+	cat "${test_dir}/operator.log" >&2 || true
   echo "lifecycle apply checkpoint was not consumed: $operation_handoff" >&2
   exit 1
 fi
