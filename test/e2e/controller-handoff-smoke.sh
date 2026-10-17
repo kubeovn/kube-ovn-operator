@@ -315,6 +315,7 @@ kubectl get configmap "$complete_name" -n kube-ovn-operator-system >/dev/null
 complete_json=$(kubectl get configmap "$complete_name" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
 printf '%s\n' "$complete_json" | grep -Fq '"phase":"Complete"'
 printf '%s\n' "$complete_json" | grep -Fq "$request_name"
+echo "lifecycle completion receipt verified: ${complete_name}"
 
 # The completion receipt and journal must retain the same immutable request,
 # while the old Deployment has exactly two survivors and the new member is an
@@ -324,10 +325,12 @@ if [[ "$final_replicas" != 2 ]]; then
   echo "expected the retained Chart Deployment to converge to two replicas, got $final_replicas" >&2
   exit 1
 fi
+echo "retained Chart Deployment scaled to two replicas"
 if kubectl get pod "$target_pod" -n kube-ovn-operator-system >/dev/null 2>&1; then
   echo "retired Deployment Pod $target_pod still exists" >&2
   exit 1
 fi
+echo "retired Deployment Pod removed: ${target_pod}"
 
 replacement_set=""
 replacement_pod=""
@@ -349,6 +352,7 @@ if [[ -z "$replacement_set" || -z "$replacement_pod" || -z "$replacement_uid" ]]
   kubectl get statefulsets,pods -n kube-ovn-operator-system -l 'operator.kubeovn.io/member-record' -o yaml || true
   exit 1
 fi
+echo "replacement StatefulSet ready: ${replacement_set}/${replacement_pod}"
 sleep 5
 if [[ "$(kubectl get pod "$replacement_pod" -n kube-ovn-operator-system -o jsonpath='{.metadata.uid}')" != "$replacement_uid" ]]; then
   echo 'replacement Pod identity changed after lifecycle completion' >&2
@@ -372,12 +376,14 @@ if [[ "$operation_handoff" != true ]]; then
   echo "lifecycle apply checkpoint was not consumed: $operation_handoff" >&2
   exit 1
 fi
+echo "lifecycle handoff authorization consumed"
 
 final_inventory=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.inventory.name}')
 if [[ -z "$final_inventory" ]]; then
   echo 'final topology inventory was not retained' >&2
   exit 1
 fi
+echo "final topology inventory retained: ${final_inventory}"
 topology_json=$(kubectl get configmap "$final_inventory" -n kube-ovn-operator-system -o jsonpath='{.data.topology\.json}')
 TOPOLOGY_JSON="$topology_json" TARGET_POD="$target_pod" REPLACEMENT_POD="$replacement_pod" python3 - <<'PYTHON'
 import json
@@ -397,6 +403,7 @@ for member in topology:
     if any(not database["serverID"] for database in member["databases"]):
         raise SystemExit("final topology contains an incomplete NB/SB identity")
 PYTHON
+echo "final topology identity checks passed"
 
 # Request and journal references remain durable after the controller has
 # consumed the handoff authorization.
@@ -408,4 +415,5 @@ fi
 journal_json=$(kubectl get configmap "$journal_name" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
 printf '%s\n' "$journal_json" | grep -Fq '"phase":"Complete"'
 printf '%s\n' "$journal_json" | grep -Fq "$replacement_pod"
+echo "immutable request and completion journal verified"
 echo "default controller completed native Deployment replacement: $target_pod -> $replacement_pod; StatefulSet=$replacement_set; inventory=$final_inventory"
