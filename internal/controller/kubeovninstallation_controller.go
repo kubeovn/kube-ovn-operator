@@ -329,6 +329,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 	var observation *apply.Observation
 	var topologyCondition *metav1.Condition
 	if workload == nil || len(rendered.Objects) == 0 {
+		logger.Info("[DEBUG-handoff] workload apply skipped", "workloadNil", workload == nil, "renderedObjects", len(rendered.Objects), "authorized", lifecycleHandoffAuthorizesApply(installation))
 		if err := r.ensurePlanConfigMap(ctx, installation, plan, rendered); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -376,6 +377,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				}
 			}
 			plan.Step = "Apply"
+			logger.Info("[DEBUG-handoff] before workload apply", "authorized", lifecycleHandoffAuthorizesApply(installation), "renderedObjects", len(rendered.Objects))
 			if err := lease.CheckAll(operationCtx); err != nil {
 				return err
 			}
@@ -385,6 +387,7 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				}
 				return err
 			}
+			logger.Info("[DEBUG-handoff] workload apply accepted", "authorized", lifecycleHandoffAuthorizesApply(installation))
 			if upgradeAuthorized {
 				// Persist the accepted target before observing it. If the process
 				// exits after Chart Apply, the next reconciliation can retry this
@@ -1315,6 +1318,7 @@ func (r *KubeOVNInstallationReconciler) markLifecycleHandoffApplied(ctx context.
 	if !lifecycleHandoffAuthorizesApply(installation) || installation.Status.Topology.Operation == nil {
 		return nil
 	}
+	log.FromContext(ctx).Info("[DEBUG-handoff] consuming lifecycle handoff")
 	updated := installation.DeepCopy()
 	updated.Status.Topology.Operation.HandoffApplied = true
 	if err := r.Status().Update(ctx, updated); err != nil {
