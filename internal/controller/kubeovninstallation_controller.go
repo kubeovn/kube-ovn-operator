@@ -704,6 +704,9 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		condition.LastTransitionTime = metav1.NewTime(now)
 		setCondition(&status.Conditions, condition)
 	}
+	if status.Topology.Operation != nil && status.Topology.Operation.HandoffInventory != nil {
+		log.FromContext(ctx).Info("[DEBUG-handoff] status payload", "inventory", status.Topology.Inventory, "handoffInventory", status.Topology.Operation.HandoffInventory, "handoffApplied", status.Topology.Operation.HandoffApplied)
+	}
 	updated := installationWithStatus(installation, *status)
 	if err := r.Status().Update(ctx, updated); err != nil {
 		return err

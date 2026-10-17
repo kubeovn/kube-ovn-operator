@@ -355,7 +355,14 @@ if [[ "$(kubectl get pod "$replacement_pod" -n kube-ovn-operator-system -o jsonp
   exit 1
 fi
 
-operation_handoff=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.handoffApplied}')
+operation_handoff=""
+for _ in $(seq 1 30); do
+  operation_handoff=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.handoffApplied}' 2>/dev/null || true)
+  if [[ "$operation_handoff" == true ]]; then
+    break
+  fi
+  sleep 2
+done
 if [[ "$operation_handoff" != true ]]; then
 	kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.inventory}{"\n"}' >&2 || true
 	kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.handoffInventory}{"\n"}' >&2 || true
