@@ -49,7 +49,17 @@ func main() {
 	flag.StringVar(&clientCAFile, "tls-client-ca-file", "", "CA bundle used to authenticate operator clients")
 	flag.DurationVar(&pollInterval, "lease-poll-interval", time.Second, "Lease observation interval")
 	flag.DurationVar(&commandTimeout, "command-timeout", 10*time.Second, "Maximum native command duration")
-	flag.Parse()
+	// The standard FlagSet returns ErrHelp after printing usage. Handle it
+	// explicitly so the container smoke check (and operators inspecting the
+	// image) can request help without falling through to runtime validation or
+	// Kubernetes client initialization.
+	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		slog.Error("parse fence-agent flags", "error", err)
+		os.Exit(2)
+	}
 	if err := validateFlags(leaseNamespace, leaseName, installationUID, certificateFile, keyFile, clientCAFile, pollInterval, commandTimeout); err != nil {
 		slog.Error("invalid fence-agent configuration", "error", err)
 		os.Exit(2)
