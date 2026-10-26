@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   kind-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -61,7 +61,7 @@ jobs:
           kubectl logs -n kube-ovn-operator-system -l app=ovn-central --all-containers --tail=100 || true
 
   controller-deployment-handoff:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
