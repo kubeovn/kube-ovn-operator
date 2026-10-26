@@ -104,7 +104,7 @@ jobs:
           FENCE_AGENT_IMAGE: ghcr.io/kubeovn/kube-ovn-operator:fence-agent-${{ github.sha }}
         run: |
           test "$(docker image inspect --format '{{.Config.User}}' "$FENCE_AGENT_IMAGE")" = "65532:65532"
-          docker run --rm --entrypoint /fence-agent "$FENCE_AGENT_IMAGE" --help >/tmp/fence-agent-help.txt
+          docker run --rm --entrypoint /fence-agent "$FENCE_AGENT_IMAGE" --help >/tmp/fence-agent-help.txt 2>&1
           grep -q -- '--lease-name' /tmp/fence-agent-help.txt
 
   central-runtime:
