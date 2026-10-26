@@ -121,7 +121,7 @@ func TestFenceAgentMTLSHandshakeRequiresClientCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mTLS client could not reach health endpoint: %v", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("mTLS health status = %d, want %d", response.StatusCode, http.StatusOK)
 	}
@@ -140,7 +140,7 @@ func TestFenceAgentMTLSHandshakeRequiresClientCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mTLS client could not execute a fenced command: %v", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("mTLS fenced command status = %d, want %d", response.StatusCode, http.StatusOK)
 	}
@@ -416,7 +416,7 @@ func sendFenceMutation(t *testing.T, endpoint string, token lease.FenceToken) in
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	return response.StatusCode
 }
 
@@ -436,6 +436,6 @@ func sendFenceRestore(t *testing.T, endpoint string, token lease.FenceToken) int
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	return response.StatusCode
 }

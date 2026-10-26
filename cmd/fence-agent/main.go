@@ -124,10 +124,9 @@ func serverTLSConfig(clientCAFile string) (*tls.Config, error) {
 		return nil, errors.New("TLS client CA file contains no PEM certificates")
 	}
 	return &tls.Config{
-		MinVersion:               tls.VersionTLS13,
-		ClientAuth:               tls.RequireAndVerifyClientCert,
-		ClientCAs:                pool,
-		PreferServerCipherSuites: true,
+		MinVersion: tls.VersionTLS13,
+		ClientAuth: tls.RequireAndVerifyClientCert,
+		ClientCAs:  pool,
 	}, nil
 }
 
@@ -149,7 +148,7 @@ func observeLease(ctx context.Context, leases coordinationclient.LeaseInterface,
 
 func observeLeaseStream(ctx context.Context, leases coordinationclient.LeaseInterface, name string, installationUID types.UID, gate *fencing.Gate) error {
 	if leases == nil || strings.TrimSpace(name) == "" || installationUID == "" || gate == nil {
-		return errors.New("Lease observer requires a client, name, installation UID and gate")
+		return errors.New("lease observer requires a client, name, installation UID and gate")
 	}
 	record, err := leases.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -217,18 +216,6 @@ func observeLeaseStream(ctx context.Context, leases coordinationclient.LeaseInte
 	}
 }
 
-func armFromLease(ctx context.Context, leases coordinationclient.LeaseInterface, name string, installationUID types.UID, gate *fencing.Gate) error {
-	if leases == nil {
-		return errors.New("Lease client is required")
-	}
-	record, err := leases.Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		gate.Clear()
-		return err
-	}
-	return armFromRecord(record, name, installationUID, gate)
-}
-
 func armFromRecord(record *coordinationv1.Lease, name string, installationUID types.UID, gate *fencing.Gate) error {
 	if record == nil || record.Name != name {
 		return errors.New("central operation Lease identity does not match the configured name")
@@ -285,13 +272,13 @@ func leaseHeld(record *coordinationv1.Lease, now time.Time) bool {
 	if record == nil || record.Spec.HolderIdentity == nil || strings.TrimSpace(*record.Spec.HolderIdentity) == "" || record.Spec.LeaseDurationSeconds == nil || *record.Spec.LeaseDurationSeconds <= 0 || record.Spec.RenewTime == nil {
 		return false
 	}
-	return now.Before(record.Spec.RenewTime.Time.Add(time.Duration(*record.Spec.LeaseDurationSeconds) * time.Second))
+	return now.Before(record.Spec.RenewTime.Add(time.Duration(*record.Spec.LeaseDurationSeconds) * time.Second))
 }
 
 func leaseExpiryTimer(record *coordinationv1.Lease) *time.Timer {
 	duration := time.Nanosecond
 	if record != nil && record.Spec.RenewTime != nil && record.Spec.LeaseDurationSeconds != nil && *record.Spec.LeaseDurationSeconds > 0 {
-		duration = time.Until(record.Spec.RenewTime.Time.Add(time.Duration(*record.Spec.LeaseDurationSeconds) * time.Second))
+		duration = time.Until(record.Spec.RenewTime.Add(time.Duration(*record.Spec.LeaseDurationSeconds) * time.Second))
 		if duration < 0 {
 			duration = 0
 		}
@@ -311,7 +298,7 @@ func resetLeaseExpiry(timer *time.Timer, record *coordinationv1.Lease) {
 	}
 	duration := time.Nanosecond
 	if record != nil && record.Spec.RenewTime != nil && record.Spec.LeaseDurationSeconds != nil && *record.Spec.LeaseDurationSeconds > 0 {
-		duration = time.Until(record.Spec.RenewTime.Time.Add(time.Duration(*record.Spec.LeaseDurationSeconds) * time.Second))
+		duration = time.Until(record.Spec.RenewTime.Add(time.Duration(*record.Spec.LeaseDurationSeconds) * time.Second))
 		if duration < 0 {
 			duration = 0
 		}

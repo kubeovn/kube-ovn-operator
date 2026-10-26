@@ -294,10 +294,6 @@ func (c *FenceHTTPClient) doAt(ctx context.Context, endpoint, namespace, node, c
 	return decodeFenceResponse(response, "fenced command")
 }
 
-func (c *FenceHTTPClient) endpointURLFor(namespace, endpoint, container, path string) (string, error) {
-	return c.endpointURLForAt(namespace, endpoint, "", container, path)
-}
-
 func (c *FenceHTTPClient) usesNodePlaceholder() bool {
 	return c != nil && strings.Contains(c.endpointTemplate, "{node}")
 }
@@ -481,5 +477,5 @@ func (e *FencedPodExecutor) podAddress(ctx context.Context, namespace, pod strin
 			return parsed.String(), nil
 		}
 	}
-	return "", fmt.Errorf("Node %s has no valid InternalIP", current.Spec.NodeName)
+	return "", fmt.Errorf("node %s has no valid InternalIP", current.Spec.NodeName)
 }

@@ -347,7 +347,7 @@ func validSHA256Digest(value string) bool {
 		return false
 	}
 	for _, char := range value[len(prefix):] {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
 			return false
 		}
 	}

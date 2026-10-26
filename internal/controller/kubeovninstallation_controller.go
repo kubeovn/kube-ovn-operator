@@ -726,7 +726,7 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 				observation = &observed
 			}
 			if observation != nil && observation.Ready && localRaft(installation) && r.Topology != nil {
-				if !(upgradeAuthorized && (upgradePhase == upgrade.RolloutDataPlane || upgradePhase == upgrade.RolloutVerify)) {
+				if !upgradeAuthorized || (upgradePhase != upgrade.RolloutDataPlane && upgradePhase != upgrade.RolloutVerify) {
 					plan.Step = "RecordTopology"
 				}
 				condition := metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionTrue, Reason: "IdentityVerified", Message: "Live central identities match the retained topology"}
@@ -2696,10 +2696,6 @@ func backupPairIDMatches(status *operatorv1alpha1.BackupStatus) bool {
 	}
 	refs, err := stdjson.Marshal(status.DatabaseRefs, stdjson.Deterministic(true))
 	return err == nil && status.ID == fmt.Sprintf("sha256:%x", sha256.Sum256(refs))
-}
-
-func matchesVerifiedBackup(installation *operatorv1alpha1.KubeOVNInstallation, reference string) bool {
-	return verifiedRecoveryBackup(installation, reference) != nil
 }
 
 func recoveryPlanDigest(plan RecoveryPlan) string {

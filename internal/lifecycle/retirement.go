@@ -384,7 +384,7 @@ func (e *Executor) retirementTarget(ctx context.Context, target Retirement) (*re
 		if target.EndpointMissing && state.endpointPresent {
 			return nil, errors.New("retirement endpoint unexpectedly reappeared")
 		}
-		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == target.Replicas && len(pods) != int(target.Replicas) && !(target.EndpointMissing && len(pods) == int(target.Replicas)-1) {
+		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == target.Replicas && len(pods) != int(target.Replicas) && (!target.EndpointMissing || len(pods) != int(target.Replicas)-1) {
 			return nil, errors.New("retirement Deployment has an unexpected Pod count")
 		}
 		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == target.Replicas-1 {

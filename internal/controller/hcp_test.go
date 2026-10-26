@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -16,12 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
-
-type hcpProviderFunc func(context.Context, hcp.PeerRequest) (hcp.PeerReport, error)
-
-func (f hcpProviderFunc) Observe(ctx context.Context, request hcp.PeerRequest) (hcp.PeerReport, error) {
-	return f(ctx, request)
-}
 
 func TestHCPProviderIsRequiredBeforeWorkloadApply(t *testing.T) {
 	scheme := controllerScheme(t)
