@@ -31,6 +31,8 @@ import (
 )
 
 func main() {
+	flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	flags.SetOutput(os.Stdout)
 	var listenAddress string
 	var leaseNamespace string
 	var leaseName string
@@ -40,20 +42,20 @@ func main() {
 	var clientCAFile string
 	var pollInterval time.Duration
 	var commandTimeout time.Duration
-	flag.StringVar(&listenAddress, "listen-address", ":8443", "HTTPS listen address")
-	flag.StringVar(&leaseNamespace, "lease-namespace", "", "Namespace containing the central operation Lease")
-	flag.StringVar(&leaseName, "lease-name", "", "Name of the central operation Lease")
-	flag.StringVar(&installationUID, "installation-uid", "", "UID of the bound KubeOVNInstallation; when omitted, derive it from the Lease owner reference")
-	flag.StringVar(&certificateFile, "tls-cert-file", "", "TLS certificate file")
-	flag.StringVar(&keyFile, "tls-key-file", "", "TLS private key file")
-	flag.StringVar(&clientCAFile, "tls-client-ca-file", "", "CA bundle used to authenticate operator clients")
-	flag.DurationVar(&pollInterval, "lease-poll-interval", time.Second, "Lease observation interval")
-	flag.DurationVar(&commandTimeout, "command-timeout", 10*time.Second, "Maximum native command duration")
+	flags.StringVar(&listenAddress, "listen-address", ":8443", "HTTPS listen address")
+	flags.StringVar(&leaseNamespace, "lease-namespace", "", "Namespace containing the central operation Lease")
+	flags.StringVar(&leaseName, "lease-name", "", "Name of the central operation Lease")
+	flags.StringVar(&installationUID, "installation-uid", "", "UID of the bound KubeOVNInstallation; when omitted, derive it from the Lease owner reference")
+	flags.StringVar(&certificateFile, "tls-cert-file", "", "TLS certificate file")
+	flags.StringVar(&keyFile, "tls-key-file", "", "TLS private key file")
+	flags.StringVar(&clientCAFile, "tls-client-ca-file", "", "CA bundle used to authenticate operator clients")
+	flags.DurationVar(&pollInterval, "lease-poll-interval", time.Second, "Lease observation interval")
+	flags.DurationVar(&commandTimeout, "command-timeout", 10*time.Second, "Maximum native command duration")
 	// The standard FlagSet returns ErrHelp after printing usage. Handle it
 	// explicitly so the container smoke check (and operators inspecting the
 	// image) can request help without falling through to runtime validation or
 	// Kubernetes client initialization.
-	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+	if err := flags.Parse(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
