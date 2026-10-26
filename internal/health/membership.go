@@ -55,11 +55,44 @@ func (r *membershipRunner) Run(ctx context.Context, endpoint string, command []s
 		return nil, fmt.Errorf("unsupported membership command")
 	}
 	if command[4] != "cluster/status" {
-		if err := lease.CheckFor(ctx, lease.Central, r.installation.UID); err != nil {
-			return nil, err
-		}
+		return nil, fmt.Errorf("%w: use RunFenced for membership mutations", ovnadmin.ErrFencingUnavailable)
 	}
 	data, err := r.runner.Run(ctx, r.installation.Namespace, endpoint, "ovn-central", command)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.validate(ctx, endpoint); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// RunFenced forwards a mutation only when the underlying Pod transport
+// advertises the same server-side fencing contract. The identity checks before
+// and after the stream remain useful race detection, but are not substitutes
+// for the remote atomic fence.
+func (r *membershipRunner) RunFenced(ctx context.Context, endpoint string, command []string, token lease.FenceToken) ([]byte, error) {
+	if err := r.validate(ctx, endpoint); err != nil {
+		return nil, err
+	}
+	if len(command) < 6 || command[0] != "ovs-appctl" || command[4] == "cluster/status" {
+		return nil, fmt.Errorf("unsupported fenced membership command")
+	}
+	if err := lease.CheckFor(ctx, lease.Central, r.installation.UID); err != nil {
+		return nil, err
+	}
+	current, err := lease.Token(ctx, lease.Central)
+	if err != nil {
+		return nil, err
+	}
+	if token != current || token.Scope != lease.Central || token.InstallationUID != r.installation.UID {
+		return nil, fmt.Errorf("membership fence token is stale or not bound to this installation")
+	}
+	fenced, ok := r.runner.(FencedCommandRunner)
+	if !ok {
+		return nil, fmt.Errorf("%w: pod exec transport has no atomic remote fence", ovnadmin.ErrFencingUnavailable)
+	}
+	data, err := fenced.RunFenced(ctx, r.installation.Namespace, endpoint, "ovn-central", command, token)
 	if err != nil {
 		return nil, err
 	}

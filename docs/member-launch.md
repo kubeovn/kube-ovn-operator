@@ -144,7 +144,8 @@ that crash. Tests also cover missing/changed preparation records and files,
 invalid launch inputs, partial process startup and SIGKILL escalation.
 
 The workload adapter now binds Node/volume/workload identities and creates the
-Job/StatefulSet. Runtime image publication/selection, automatic storage provisioning,
-probe configuration, live startup authorization and the persistent joint NB/SB
-replacement state machine remain open. These native tests do not exercise Kubernetes node replacement,
-TLS, a complete Kube-OVN installation or packet delivery after a transition.
+Job/StatefulSet. Runtime image publication/selection, automatic storage
+provisioning and live startup in a real installation still require deployment
+evidence. The persistent joint NB/SB replacement state machine is implemented,
+but these native tests do not exercise Kubernetes node replacement, TLS, a
+complete Kube-OVN installation or packet delivery after a transition.

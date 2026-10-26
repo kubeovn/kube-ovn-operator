@@ -58,6 +58,40 @@ type CentralIdentity struct {
 	ContainerID string              `json:"containerID"`
 }
 
+// EndpointDriftError identifies a RAFT endpoint that is no longer advertised
+// by its retained Kubernetes node. A replacement request may acknowledge this
+// narrow condition for its exact target; every other topology check remains
+// strict so an address change cannot silently become a new baseline.
+type EndpointDriftError struct {
+	NodeName string
+	Address  string
+}
+
+func (e *EndpointDriftError) Error() string {
+	return fmt.Sprintf("RAFT address %s is not an observed InternalIP of node %s", e.Address, e.NodeName)
+}
+
+// NodeLifecycleError identifies a retained central member whose Kubernetes
+// node cannot safely remain the operation target. A cordoned node is admitted
+// only for its exact explicit replacement request; a deleting or not-ready
+// node always blocks discovery.
+type NodeLifecycleError struct {
+	NodeName      string
+	Unschedulable bool
+	Deleting      bool
+}
+
+func (e *NodeLifecycleError) Error() string {
+	switch {
+	case e.Deleting:
+		return fmt.Sprintf("central node %s is being deleted", e.NodeName)
+	case e.Unschedulable:
+		return fmt.Sprintf("central node %s is cordoned without an explicit replacement", e.NodeName)
+	default:
+		return fmt.Sprintf("central node %s is not ready or has no stable identity", e.NodeName)
+	}
+}
+
 var topologyDatabases = [2]string{"OVN_Northbound", "OVN_Southbound"}
 
 // SameIdentity ignores the originally sampled process endpoint. Pod replacement
@@ -69,6 +103,42 @@ func (t CentralTopology) SameIdentity(other CentralTopology) bool {
 		a.ContainerID, b.ContainerID = "", ""
 		return reflect.DeepEqual(a, b)
 	})
+}
+
+// SameIdentityExceptEndpoints verifies that one exact retained member keeps
+// every Kubernetes and native database identity while allowing its two RAFT
+// and two client addresses to change. The target Pod identity and container
+// identity remain pinned; this observation is only for a healthy Node whose
+// advertised address has drifted.
+func (t CentralTopology) SameIdentityExceptEndpoints(other CentralTopology, targetPod string) (changed bool, same bool) {
+	if strings.TrimSpace(targetPod) == "" || len(t.Members) != len(other.Members) {
+		return false, false
+	}
+	targets := 0
+	for index := range t.Members {
+		expected, observed := t.Members[index], other.Members[index]
+		if expected.Pod.Name != observed.Pod.Name || expected.Pod.Name == "" {
+			return false, false
+		}
+		if expected.Pod.Name != targetPod {
+			if !reflect.DeepEqual(expected, observed) {
+				return false, false
+			}
+			continue
+		}
+		targets++
+		if !reflect.DeepEqual(expected.Node, observed.Node) || !reflect.DeepEqual(expected.Workload, observed.Workload) || !reflect.DeepEqual(expected.Storage, observed.Storage) || expected.Pod != observed.Pod || expected.ContainerID != observed.ContainerID {
+			return false, false
+		}
+		for database := range expected.Databases {
+			oldDB, newDB := expected.Databases[database], observed.Databases[database]
+			if oldDB.Database != newDB.Database || oldDB.ClusterID != newDB.ClusterID || oldDB.ServerID != newDB.ServerID {
+				return false, false
+			}
+			changed = changed || oldDB.Address != newDB.Address || oldDB.ClientAddress != newDB.ClientAddress
+		}
+	}
+	return changed, targets == 1
 }
 
 // DiscoverCentralTopology requires all desired local RAFT members to be live.
@@ -84,6 +154,22 @@ func DiscoverCentralTopology(ctx context.Context, reader client.Reader, runner C
 // for lifecycle authorization; final handoff uses the installation's desired
 // count through DiscoverCentralTopology.
 func DiscoverCentralTopologyWithExpectedReplicas(ctx context.Context, reader client.Reader, runner CommandRunner, installation *api.KubeOVNInstallation, expectedReplicas int) (CentralTopology, error) {
+	return discoverCentralTopology(ctx, reader, runner, installation, expectedReplicas, "")
+}
+
+// DiscoverCentralTopologyWithExpectedReplicasForReplacement observes a retained
+// topology while allowing endpoint address drift for exactly one named Pod.
+// Every other endpoint remains subject to the normal node InternalIP check.
+// Callers must compare the result with the retained baseline before admitting
+// a lifecycle operation.
+func DiscoverCentralTopologyWithExpectedReplicasForReplacement(ctx context.Context, reader client.Reader, runner CommandRunner, installation *api.KubeOVNInstallation, expectedReplicas int, targetPod string) (CentralTopology, error) {
+	if strings.TrimSpace(targetPod) == "" {
+		return CentralTopology{}, errors.New("central replacement observation requires a target Pod")
+	}
+	return discoverCentralTopology(ctx, reader, runner, installation, expectedReplicas, targetPod)
+}
+
+func discoverCentralTopology(ctx context.Context, reader client.Reader, runner CommandRunner, installation *api.KubeOVNInstallation, expectedReplicas int, endpointDriftTarget string) (CentralTopology, error) {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	bound, err := newMembershipRunner(ctx, reader, runner, installation)
@@ -117,7 +203,11 @@ func DiscoverCentralTopologyWithExpectedReplicas(ctx context.Context, reader cli
 				}
 				leaders[i] = pod.Name
 			}
-			if err := addressOnNode(ctx, reader, member.Node, status.Address); err != nil {
+			allowDrift := endpointDriftAllowed(installation, pod.Name)
+			if endpointDriftTarget != "" {
+				allowDrift = pod.Name == endpointDriftTarget
+			}
+			if err := addressOnNode(ctx, reader, member.Node, status.Address, allowDrift); err != nil {
 				return CentralTopology{}, err
 			}
 			address, err := bound.clientAddress(ctx, pod.Name, i, status.Address)
@@ -159,7 +249,11 @@ func DiscoverCentralTopologyWithExpectedReplicas(ctx context.Context, reader cli
 			return CentralTopology{}, errors.New("central node, workload or storage changed during discovery")
 		}
 		for i, db := range member.Databases {
-			if err := addressOnNode(ctx, reader, member.Node, db.Address); err != nil {
+			allowDrift := endpointDriftAllowed(installation, member.Pod.Name)
+			if endpointDriftTarget != "" {
+				allowDrift = member.Pod.Name == endpointDriftTarget
+			}
+			if err := addressOnNode(ctx, reader, member.Node, db.Address, allowDrift); err != nil {
 				return CentralTopology{}, err
 			}
 			address, err := bound.clientAddress(ctx, member.Pod.Name, i, db.Address)
@@ -243,7 +337,10 @@ func centralKubernetesIdentity(ctx context.Context, reader client.Reader, instal
 	if node.UID == "" || node.DeletionTimestamp != nil || !slices.ContainsFunc(node.Status.Conditions, func(c corev1.NodeCondition) bool {
 		return c.Type == corev1.NodeReady && c.Status == corev1.ConditionTrue
 	}) {
-		return result, errors.New("central node is not ready or has no stable identity")
+		return result, &NodeLifecycleError{NodeName: node.Name, Deleting: node.DeletionTimestamp != nil}
+	}
+	if node.Spec.Unschedulable && !replacementTargetAllowed(installation, pod.Name) {
+		return result, &NodeLifecycleError{NodeName: node.Name, Unschedulable: true}
 	}
 	result.Node = ObjectIdentity{Name: node.Name, UID: node.UID}
 	for _, status := range pod.Status.ContainerStatuses {
@@ -309,7 +406,7 @@ func centralKubernetesIdentity(ctx context.Context, reader client.Reader, instal
 	return result, nil
 }
 
-func addressOnNode(ctx context.Context, reader client.Reader, identity ObjectIdentity, address string) error {
+func addressOnNode(ctx context.Context, reader client.Reader, identity ObjectIdentity, address string, allowDrift bool) error {
 	_, endpoint, _ := strings.Cut(address, ":")
 	host, _, err := net.SplitHostPort(endpoint)
 	if err != nil {
@@ -331,7 +428,30 @@ func addressOnNode(ctx context.Context, reader client.Reader, identity ObjectIde
 			return nil
 		}
 	}
-	return fmt.Errorf("RAFT address is not an observed InternalIP of node %s", identity.Name)
+	if allowDrift {
+		return nil
+	}
+	return &EndpointDriftError{NodeName: identity.Name, Address: address}
+}
+
+// replacementTargetAllowed is deliberately tied to one explicit replacement
+// request. Replica changes alone must never turn a changed Node address into a
+// trusted topology observation, and multiple replacement targets are rejected
+// by API validation before reconciliation.
+func replacementTargetAllowed(installation *api.KubeOVNInstallation, podName string) bool {
+	if installation == nil || installation.Status.Topology.Inventory == nil || !installation.Spec.Central.DynamicMembership || podName == "" {
+		return false
+	}
+	for _, request := range installation.Spec.Central.MemberRequests {
+		if request.ReplaceEndpoint == podName {
+			return true
+		}
+	}
+	return false
+}
+
+func endpointDriftAllowed(installation *api.KubeOVNInstallation, podName string) bool {
+	return replacementTargetAllowed(installation, podName)
 }
 
 // Validate checks retained data before it can become an identity reference.

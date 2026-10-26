@@ -20,6 +20,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&KubeOVNInstallationList{},
 		&KubeOVNRecoveryRequest{},
 		&KubeOVNRecoveryRequestList{},
+		&KubeOVNRecoveryApproval{},
+		&KubeOVNRecoveryApprovalList{},
 		&KubeOVNMemberRemovalApproval{},
 		&KubeOVNMemberRemovalApprovalList{},
 	)

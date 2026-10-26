@@ -10,6 +10,7 @@ import (
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/central"
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
 	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 	"github.com/kubeovn/kube-ovn-operator/internal/workload"
@@ -25,6 +26,29 @@ type Database interface {
 	Capture(context.Context) (string, error)
 	Verify(context.Context, ovnadmin.Snapshot, string) error
 	Remove(context.Context, membership.Change, func(context.Context, ovnadmin.Snapshot) error) error
+}
+
+// DatabaseRestorer is a generic destructive capability for adapters that have
+// an independent admission boundary. Keeping it out of Database means a
+// read-only lifecycle adapter cannot accidentally be used for recovery or
+// rollback; production recovery uses FencedDatabaseRestorer below.
+type DatabaseRestorer interface {
+	Restore(context.Context, string) error
+}
+
+// FencedDatabaseRestorer is required for destructive recovery. The supplied
+// token must reach a server-side fence before native restore input is accepted.
+type FencedDatabaseRestorer interface {
+	RestoreFenced(context.Context, string, lease.FenceToken) error
+}
+
+// RestoreFence is the destructive restore admission boundary. Implementations
+// must atomically admit the callback against the current server-side fence;
+// checking a Kubernetes Lease before invoking the callback is insufficient
+// because a takeover can happen before the native restore starts.
+type RestoreFence interface {
+	Ready() error
+	Restore(context.Context, *api.KubeOVNInstallation, string, func(context.Context) error) error
 }
 
 type Members interface {

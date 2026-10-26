@@ -188,6 +188,80 @@ func TestPrepareThenExplicitStartSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestTLSSecretIsMountedAndGenerationPinned(t *testing.T) {
+	f := setup(t, nil)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "member-tls", Namespace: "test", UID: types.UID("secret-uid")}, Data: map[string][]byte{"tls.key": []byte("key"), "tls.crt": []byte("cert"), "ca.crt": []byte("ca")}}
+	if err := f.kube.Create(t.Context(), secret); err != nil {
+		t.Fatal(err)
+	}
+	storedSecret := new(corev1.Secret)
+	if err := f.kube.Get(t.Context(), client.ObjectKeyFromObject(secret), storedSecret); err != nil {
+		t.Fatal(err)
+	}
+	secret = storedSecret
+	if secret.ResourceVersion == "" {
+		t.Fatal("fake Secret did not provide a resourceVersion")
+	}
+	for index := range f.request.Preparation.Databases {
+		f.request.Preparation.Databases[index].LocalAddress = strings.Replace(f.request.Preparation.Databases[index].LocalAddress, "tcp:", "ssl:", 1)
+		for remoteIndex := range f.request.Preparation.Databases[index].RemoteAddresses {
+			f.request.Preparation.Databases[index].RemoteAddresses[remoteIndex] = strings.Replace(f.request.Preparation.Databases[index].RemoteAddresses[remoteIndex], "tcp:", "ssl:", 1)
+		}
+	}
+	f.request.TLSSecret = &TLSSecretReference{Name: secret.Name, UID: secret.UID, ResourceVersion: secret.ResourceVersion, PrivateKeyKey: "tls.key", CertificateKey: "tls.crt", CAKey: "ca.crt"}
+	first := f.prepare(t)
+	job := new(batchv1.Job)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: first.Record.Name + "-prepare"}, job); err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Spec.Template.Annotations["operator.kubeovn.io/tls-secret-resource-version"]; got != secret.ResourceVersion {
+		t.Fatalf("preparation Job did not pin Secret resourceVersion: %q", got)
+	}
+	if len(job.Spec.Template.Spec.Volumes) != 3 || len(job.Spec.Template.Spec.Containers[0].VolumeMounts) != 3 {
+		t.Fatalf("preparation TLS volume was not mounted: volumes=%v mounts=%v", job.Spec.Template.Spec.Volumes, job.Spec.Template.Spec.Containers[0].VolumeMounts)
+	}
+	tlsVolume := job.Spec.Template.Spec.Volumes[2]
+	if tlsVolume.Secret == nil || tlsVolume.Secret.SecretName != secret.Name || len(tlsVolume.Secret.Items) != 3 || tlsVolume.Secret.Items[0].Key != "tls.key" {
+		t.Fatalf("unexpected TLS Secret volume: %+v", tlsVolume)
+	}
+	result := f.complete(t, first.Record)
+	if accepted := f.prepare(t); accepted.Result == nil {
+		t.Fatal("preparation result was not durably accepted")
+	}
+	launch := f.launch(result)
+	launch.NorthboundAddress = strings.Replace(launch.NorthboundAddress, "tcp:", "ssl:", 1)
+	launch.SouthboundAddress = strings.Replace(launch.SouthboundAddress, "tcp:", "ssl:", 1)
+	for index := range launch.NorthboundRemotes {
+		launch.NorthboundRemotes[index] = strings.Replace(launch.NorthboundRemotes[index], "tcp:", "ssl:", 1)
+	}
+	for index := range launch.SouthboundRemotes {
+		launch.SouthboundRemotes[index] = strings.Replace(launch.SouthboundRemotes[index], "tcp:", "ssl:", 1)
+	}
+	launch.TLS = &central.TLSFiles{PrivateKey: central.TLSMountPath + "/key", Certificate: central.TLSMountPath + "/cert", CA: central.TLSMountPath + "/ca"}
+	if err := f.guarded(t, func(ctx context.Context) error { _, err := f.p.Start(ctx, first.Record, launch); return err }); err != nil {
+		t.Fatal(err)
+	}
+	set := new(appsv1.StatefulSet)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: first.Record.Name}, set); err != nil {
+		t.Fatal(err)
+	}
+	if got := set.Spec.Template.Annotations["operator.kubeovn.io/tls-secret-resource-version"]; got != secret.ResourceVersion {
+		t.Fatalf("StatefulSet did not pin Secret resourceVersion: %q", got)
+	}
+	if mount := set.Spec.Template.Spec.Containers[0].VolumeMounts[2]; mount.MountPath != central.TLSMountPath || !mount.ReadOnly {
+		t.Fatalf("unexpected TLS mount: %+v", mount)
+	}
+	if err := f.kube.Delete(t.Context(), secret); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kube.Create(t.Context(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secret.Name, Namespace: secret.Namespace, UID: types.UID("replacement-secret-uid")}, Data: secret.Data}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.guarded(t, func(ctx context.Context) error { _, err := f.p.Start(ctx, first.Record, launch); return err }); err == nil || !strings.Contains(err.Error(), "TLS Secret") {
+		t.Fatalf("Secret rotation was accepted: %v", err)
+	}
+}
+
 func TestNoStartWithoutDurableResult(t *testing.T) {
 	f := setup(t, nil)
 	ref := f.prepare(t).Record

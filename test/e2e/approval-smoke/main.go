@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 	"uuid"
 
@@ -20,6 +21,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -211,18 +213,143 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := runRecoveryApprovalSmoke(ctx, kube, installation, manager); err != nil {
+		return err
+	}
 	for _, verb := range []string{"create", "update", "delete"} {
-		review := &authorizationv1.SubjectAccessReview{Spec: authorizationv1.SubjectAccessReviewSpec{
-			User:               "system:serviceaccount:kube-ovn-operator-system:kube-ovn-operator",
-			Groups:             []string{"system:serviceaccounts", "system:serviceaccounts:kube-ovn-operator-system", "system:authenticated"},
-			ResourceAttributes: &authorizationv1.ResourceAttributes{Namespace: installation.Namespace, Group: api.GroupVersion.Group, Resource: "kubeovnmemberremovalapprovals", Verb: verb},
-		}}
-		if err := kube.Create(ctx, review); err != nil {
-			return err
-		}
-		if review.Status.Allowed || review.Status.EvaluationError != "" {
-			return fmt.Errorf("operator approval %s permission was not denied: %+v", verb, review.Status)
+		for _, resource := range []string{"kubeovnmemberremovalapprovals", "kubeovnrecoveryapprovals"} {
+			review := &authorizationv1.SubjectAccessReview{Spec: authorizationv1.SubjectAccessReviewSpec{
+				User:               "system:serviceaccount:kube-ovn-operator-system:kube-ovn-operator",
+				Groups:             []string{"system:serviceaccounts", "system:serviceaccounts:kube-ovn-operator-system", "system:authenticated"},
+				ResourceAttributes: &authorizationv1.ResourceAttributes{Namespace: installation.Namespace, Group: api.GroupVersion.Group, Resource: resource, Verb: verb},
+			}}
+			if err := kube.Create(ctx, review); err != nil {
+				return err
+			}
+			if review.Status.Allowed || review.Status.EvaluationError != "" {
+				return fmt.Errorf("operator %s permission for %s was not denied: %+v", verb, resource, review.Status)
+			}
 		}
 	}
+	statusReview := &authorizationv1.SubjectAccessReview{Spec: authorizationv1.SubjectAccessReviewSpec{
+		User:               "system:serviceaccount:kube-ovn-operator-system:kube-ovn-operator",
+		Groups:             []string{"system:serviceaccounts", "system:serviceaccounts:kube-ovn-operator-system", "system:authenticated"},
+		ResourceAttributes: &authorizationv1.ResourceAttributes{Namespace: installation.Namespace, Group: api.GroupVersion.Group, Resource: "kubeovnrecoveryapprovals", Subresource: "status", Verb: "update"},
+	}}
+	if err := kube.Create(ctx, statusReview); err != nil {
+		return err
+	}
+	if !statusReview.Status.Allowed || statusReview.Status.EvaluationError != "" {
+		return fmt.Errorf("operator recovery approval status update permission was not granted: %+v", statusReview.Status)
+	}
 	return nil
+}
+
+func runRecoveryApprovalSmoke(ctx context.Context, kube client.Client, installation *api.KubeOVNInstallation, manager *lease.Manager) error {
+	if installation == nil || manager == nil {
+		return errors.New("recovery approval smoke requires an installation and lease manager")
+	}
+	generation := installation.Generation
+	if generation < 1 {
+		generation = 1
+	}
+	sourceVersion := installation.Status.ObservedVersion
+	if sourceVersion == "" {
+		sourceVersion = installation.Spec.Version
+	}
+	chartDigest := installation.Spec.Chart.Digest
+	if !validSHA256Digest(chartDigest) {
+		chartDigest = "sha256:" + strings.Repeat("c", 64)
+	}
+	backupRef := "sha256:" + strings.Repeat("a", 64)
+	topologyDigest := "sha256:" + strings.Repeat("b", 64)
+	record := &api.KubeOVNRecoveryApproval{
+		ObjectMeta: metav1.ObjectMeta{Name: "recovery-smoke-" + uuid.New().String(), Namespace: installation.Namespace},
+		Spec: api.RecoveryApprovalSpec{
+			InstallationRef: api.InstallationReference{Name: installation.Name, UID: installation.UID}, InstallationGeneration: generation,
+			RequestRef: &api.RecoveryRequestReference{Name: "recovery-smoke-request", UID: types.UID("recovery-smoke-request-uid"), Generation: 1},
+			Mode:       "reconvert", SourceVersion: sourceVersion, TargetVersion: sourceVersion, BackupRef: backupRef,
+			TopologyDigest: topologyDigest, ChartDigest: chartDigest, Reason: "synthetic recovery approval smoke test",
+			ExpiresAt: metav1.NewTime(time.Now().Add(time.Hour)),
+		},
+	}
+	if err := kube.Create(ctx, record); err != nil {
+		return err
+	}
+	key := client.ObjectKeyFromObject(record)
+	read := func() (*api.KubeOVNRecoveryApproval, error) {
+		current := new(api.KubeOVNRecoveryApproval)
+		return current, kube.Get(ctx, key, current)
+	}
+	changed := record.DeepCopy()
+	changed.Spec.Mode = "rollback"
+	if err := kube.Update(ctx, changed); !apierrors.IsInvalid(err) {
+		return fmt.Errorf("recovery approval decision was not immutable: %v", err)
+	}
+	provider, err := approval.NewRecovery(kube, installation)
+	if err != nil {
+		return err
+	}
+	binding := approval.RecoveryBinding{
+		InstallationName: installation.Name, InstallationUID: installation.UID, InstallationGeneration: generation,
+		RequestName: "recovery-smoke-request", RequestUID: types.UID("recovery-smoke-request-uid"), RequestGeneration: 1,
+		Mode: "reconvert", SourceVersion: sourceVersion, TargetVersion: sourceVersion, BackupRef: backupRef,
+		TopologyDigest: topologyDigest, ChartDigest: chartDigest,
+	}
+	ref := api.RecoveryApprovalReference{Name: record.Name, UID: record.UID}
+	return manager.With(ctx, installation, lease.Installation, func(ctx context.Context) error {
+		return manager.With(ctx, installation, lease.Central, func(ctx context.Context) error {
+			if err := provider.Reserve(ctx, ref, binding); err != nil {
+				return err
+			}
+			reserved, err := read()
+			if err != nil {
+				return err
+			}
+			if reserved.Status.Phase != api.RecoveryApprovalReserved || reserved.Status.DecisionDigest == "" {
+				return fmt.Errorf("recovery approval reservation was not recorded: %+v", reserved.Status)
+			}
+			if err := provider.Reserve(ctx, ref, binding); err != nil {
+				return err
+			}
+			if err := provider.Complete(ctx, ref, binding); err != nil {
+				return err
+			}
+			completed, err := read()
+			if err != nil {
+				return err
+			}
+			if completed.Status.Phase != api.RecoveryApprovalCompleted || completed.Status.CompletedAt == nil {
+				return fmt.Errorf("recovery approval completion was not recorded: %+v", completed.Status)
+			}
+			resourceVersion := completed.ResourceVersion
+			if err := provider.Complete(ctx, ref, binding); err != nil {
+				return err
+			}
+			current, err := read()
+			if err != nil {
+				return err
+			}
+			if current.ResourceVersion != resourceVersion {
+				return errors.New("idempotent recovery approval completion changed resource version")
+			}
+			if err := provider.Reserve(ctx, ref, binding); err == nil {
+				return errors.New("completed recovery approval was recycled")
+			}
+			return nil
+		})
+	})
+}
+
+func validSHA256Digest(value string) bool {
+	const prefix = "sha256:"
+	if len(value) != len(prefix)+64 || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	for _, char := range value[len(prefix):] {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+			return false
+		}
+	}
+	return true
 }

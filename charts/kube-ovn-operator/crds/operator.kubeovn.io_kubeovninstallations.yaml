@@ -70,6 +70,17 @@ spec:
                           name: {type: string, minLength: 1}
                           replaceEndpoint: {type: string, minLength: 1}
                           retireEndpoint: {type: string, minLength: 1}
+                          removalApprovalRef:
+                            type: object
+                            required: [name, uid]
+                            properties:
+                              name: {type: string, minLength: 1}
+                              uid: {type: string, minLength: 1}
+                          tlsSecretRef:
+                            type: object
+                            required: [name]
+                            properties:
+                              name: {type: string, minLength: 1, maxLength: 253}
                           nodeName: {type: string, minLength: 1}
                           claimName: {type: string, minLength: 1}
                           volumeName: {type: string, minLength: 1}
@@ -96,18 +107,25 @@ spec:
                     enabled: {type: boolean}
                     role: {type: string, enum: [none, management, dataPlane]}
                     pairRef: {type: string}
-                    centralNamespace: {type: string}
-                    nbEndpoint: {type: string}
-                    sbEndpoint: {type: string}
+                    centralNamespace: {type: string, minLength: 1}
+                    nbEndpoint: {type: string, minLength: 1}
+                    sbEndpoint: {type: string, minLength: 1}
                     tlsSecretRef:
                       type: object
-                      properties: {name: {type: string}}
+                      required: [name]
+                      properties: {name: {type: string, minLength: 1}}
                 upgrade:
                   type: object
                   properties:
                     strategy: {type: string}
                     pauseOnDegraded: {type: boolean}
                     allowRollback: {type: boolean}
+                    rollbackApprovalRef:
+                      type: object
+                      required: [name, uid]
+                      properties:
+                        name: {type: string, minLength: 1, maxLength: 253}
+                        uid: {type: string, minLength: 1, maxLength: 128}
                     backup:
                       type: object
                       properties:
@@ -140,6 +158,7 @@ spec:
                   required: [specHash, manifestHash, version]
                   properties:
                     specHash: {type: string}
+                    baseSpecHash: {type: string}
                     manifestHash: {type: string}
                     version: {type: string}
                 observedVersion: {type: string}
@@ -205,6 +224,26 @@ spec:
                         capturedAt: {type: string, format: date-time}
                         appliedAt: {type: string, format: date-time}
                         phase: {type: string, enum: [Capturing, Verified, Applying, Applied, Failed]}
+                        reason: {type: string}
+                    rollback:
+                      type: object
+                      properties:
+                        phase: {type: string, enum: [Blocked, Quiescing, Restoring, Workloads, Verifying, Succeeded, Failed]}
+                        sourceVersion: {type: string}
+                        targetVersion: {type: string}
+                        backupID: {type: string}
+                        topologyDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                        chartDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                        approvalRef:
+                          type: object
+                          required: [name, uid]
+                          properties:
+                            name: {type: string, minLength: 1, maxLength: 253}
+                            uid: {type: string, minLength: 1, maxLength: 128}
+                        startedAt: {type: string, format: date-time}
+                        completedAt: {type: string, format: date-time}
+                        rpoSeconds: {type: integer, format: int64}
+                        rtoSeconds: {type: integer, format: int64}
                         reason: {type: string}
                 hcp: {type: object, x-kubernetes-preserve-unknown-fields: true}
                 lastBackup: {type: object, x-kubernetes-preserve-unknown-fields: true}

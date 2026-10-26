@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -20,8 +21,32 @@ type CommandRunner interface {
 	Run(context.Context, string, string, string, []string) ([]byte, error)
 }
 
+// FencedCommandRunner is implemented only by a remote executor that can
+// atomically validate the supplied lease fence before starting a mutating
+// command. A plain PodExecutor intentionally does not implement it: cancelling
+// a pods/exec stream cannot revoke a command already accepted by the container.
+type FencedCommandRunner interface {
+	CommandRunner
+	RunFenced(context.Context, string, string, string, []string, lease.FenceToken) ([]byte, error)
+}
+
 type StreamingCommandRunner interface {
 	Stream(context.Context, string, string, string, []string, io.Writer) error
+}
+
+// InputStreamingCommandRunner is the explicit destructive transport used by
+// native OVSDB restore. A normal pods/exec reader cannot be upgraded into this
+// capability merely by adding arguments to a command.
+type InputStreamingCommandRunner interface {
+	StreamInput(context.Context, string, string, string, []string, io.Reader) error
+}
+
+// FencedInputStreamingCommandRunner is the destructive restore transport. It
+// must atomically compare the supplied Lease token on the server side before
+// feeding the input to the native process.
+type FencedInputStreamingCommandRunner interface {
+	InputStreamingCommandRunner
+	StreamInputFenced(context.Context, string, string, string, string, io.Reader, lease.FenceToken) error
 }
 
 type PodExecutor struct {
@@ -67,6 +92,30 @@ func (e *PodExecutor) Stream(ctx context.Context, namespace, pod, container stri
 	streamErr := executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: output, Stderr: io.Discard})
 	if err := errors.Join(output.finish(), streamErr, ctx.Err()); err != nil {
 		return fmt.Errorf("stream from pod %s: %w", pod, err)
+	}
+	return nil
+}
+
+// StreamInput sends a bounded, already verified native backup to a pinned
+// container. The command is accepted only after the caller has validated the
+// Pod/container identity and operation lease.
+func (e *PodExecutor) StreamInput(ctx context.Context, namespace, pod, container string, command []string, input io.Reader) error {
+	if input == nil {
+		return errors.New("pod stream input is required")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	request := e.client.RESTClient().Post().Resource("pods").Namespace(namespace).Name(pod).SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{Container: container, Command: command, Stdin: true, Stderr: true}, scheme.ParameterCodec)
+	executor, err := remotecommand.NewSPDYExecutor(e.config, "POST", request.URL())
+	if err != nil {
+		return fmt.Errorf("create pod input executor: %w", err)
+	}
+	if err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdin: input, Stderr: io.Discard}); err != nil {
+		return fmt.Errorf("stream input to pod %s: %w", pod, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("stream input to pod %s: %w", pod, err)
 	}
 	return nil
 }

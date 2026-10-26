@@ -39,6 +39,15 @@ type InventoryProvider interface {
 	Retained(context.Context, *api.KubeOVNInstallation) (health.CentralTopology, error)
 }
 
+// ReplacementProvider performs a fresh retained-topology observation for the
+// one automatic IP-drift target selected by lifecycle. It never persists a new
+// baseline; the caller must rebind the immutable lifecycle request and let the
+// normal completion handoff record the resulting topology.
+type ReplacementProvider interface {
+	InventoryProvider
+	VerifyRetainedReplacement(context.Context, *api.KubeOVNInstallation, string) (health.CentralTopology, error)
+}
+
 // Kubernetes requires an uncached client and both installation-bound Leases.
 // Ensure returns a validated retained reference even when live discovery fails.
 // The caller persists that reference before publishing the observation failure.
@@ -87,6 +96,66 @@ func (p *Kubernetes) Retained(ctx context.Context, installation *api.KubeOVNInst
 		return health.CentralTopology{}, errors.New("retained central topology reference changed")
 	}
 	return saved.Topology, p.guard(ctx, installation)
+}
+
+// VerifyRetainedReplacement observes the retained central membership while
+// allowing endpoint address drift for one exact retained Pod. The immutable
+// ConfigMap, installation identity and all non-target identities remain
+// pinned; no new topology record is created here.
+func (p *Kubernetes) VerifyRetainedReplacement(ctx context.Context, installation *api.KubeOVNInstallation, targetPod string) (health.CentralTopology, error) {
+	if p.Client == nil || p.Runner == nil || installation == nil || installation.Status.Topology.Inventory == nil || targetPod == "" {
+		return health.CentralTopology{}, errors.New("central replacement observation requires a pinned topology, direct client and Pod target")
+	}
+	if err := p.guard(ctx, installation); err != nil {
+		return health.CentralTopology{}, err
+	}
+	object := new(corev1.ConfigMap)
+	ref := installation.Status.Topology.Inventory
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: ref.Name}, object); err != nil {
+		return health.CentralTopology{}, err
+	}
+	saved, current, err := readRecord(object, installation)
+	if err != nil {
+		return health.CentralTopology{}, err
+	}
+	if current == nil || *current != *ref {
+		return health.CentralTopology{}, errors.New("retained central topology reference changed")
+	}
+	if _, found := findTopologyMember(saved.Topology, targetPod); !found {
+		return health.CentralTopology{}, errors.New("automatic replacement target is not a retained central Pod")
+	}
+	observed, err := health.DiscoverCentralTopologyWithExpectedReplicasForReplacement(ctx, p.Client, p.Runner, installation, len(saved.Topology.Members), targetPod)
+	if err != nil {
+		return health.CentralTopology{}, err
+	}
+	changed, same := saved.Topology.SameIdentityExceptEndpoints(observed, targetPod)
+	if !same || !changed {
+		return health.CentralTopology{}, errors.New("automatic replacement observation changed an identity outside the target endpoint or did not observe address drift")
+	}
+	if err := p.guard(ctx, installation); err != nil {
+		return health.CentralTopology{}, err
+	}
+	previousUID := object.UID
+	if err := p.Client.Get(ctx, client.ObjectKeyFromObject(object), object); err != nil {
+		return health.CentralTopology{}, err
+	}
+	_, current, err = readRecord(object, installation)
+	if err != nil {
+		return health.CentralTopology{}, err
+	}
+	if object.UID != previousUID || current == nil || *current != *ref {
+		return health.CentralTopology{}, errors.New("retained central topology record changed during replacement observation")
+	}
+	return observed, p.guard(ctx, installation)
+}
+
+func findTopologyMember(topology health.CentralTopology, podName string) (health.CentralIdentity, bool) {
+	for _, member := range topology.Members {
+		if member.Pod.Name == podName {
+			return member, true
+		}
+	}
+	return health.CentralIdentity{}, false
 }
 
 // Handoff records a newly observed topology under a new immutable name. The

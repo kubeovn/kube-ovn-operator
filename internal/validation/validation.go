@@ -6,6 +6,7 @@ import (
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/backup"
+	"github.com/kubeovn/kube-ovn-operator/internal/hcp"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -37,8 +38,16 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 		errs = append(errs, fmt.Errorf("spec.central.mode must be raft or single"))
 	}
 	if spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
-		if strings.TrimSpace(spec.DataPlane.ExternalOVNCentral.NBEndpoint) == "" || strings.TrimSpace(spec.DataPlane.ExternalOVNCentral.SBEndpoint) == "" {
+		if !spec.HCP.Enabled && (strings.TrimSpace(spec.DataPlane.ExternalOVNCentral.NBEndpoint) == "" || strings.TrimSpace(spec.DataPlane.ExternalOVNCentral.SBEndpoint) == "") {
 			errs = append(errs, fmt.Errorf("dataPlaneOnly requires externalOvnCentral.nbEndpoint and sbEndpoint"))
+		}
+	}
+	for key, value := range spec.DataPlane.NodeSelector {
+		if messages := kvalidation.IsQualifiedName(key); len(messages) != 0 {
+			errs = append(errs, fmt.Errorf("spec.dataPlane.nodeSelector key %q is invalid: %s", key, messages[0]))
+		}
+		if messages := kvalidation.IsValidLabelValue(value); len(messages) != 0 {
+			errs = append(errs, fmt.Errorf("spec.dataPlane.nodeSelector value for %q is invalid: %s", key, messages[0]))
 		}
 	}
 	if spec.Upgrade.Backup.Required && strings.TrimSpace(spec.Upgrade.Backup.Destination) == "" {
@@ -80,14 +89,23 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 		}
 	}
 	if spec.HCP.Enabled {
-		if spec.HCP.Role != operatorv1alpha1.HCPRoleManagement && spec.HCP.Role != operatorv1alpha1.HCPRoleDataPlane {
-			errs = append(errs, fmt.Errorf("spec.hcp.role must be management or dataPlane when HCP is enabled"))
+		if err := hcp.ValidateConfig(spec.HCP); err != nil {
+			errs = append(errs, fmt.Errorf("spec.hcp: %w", err))
 		}
-		if strings.TrimSpace(spec.HCP.PairRef) == "" {
-			errs = append(errs, fmt.Errorf("spec.hcp.pairRef is required when HCP is enabled"))
-		}
-		if strings.TrimSpace(spec.HCP.NBEndpoint) == "" || strings.TrimSpace(spec.HCP.SBEndpoint) == "" {
-			errs = append(errs, fmt.Errorf("spec.hcp.nbEndpoint and sbEndpoint are required when HCP is enabled"))
+		switch spec.HCP.Role {
+		case operatorv1alpha1.HCPRoleManagement:
+			if spec.Mode != operatorv1alpha1.InstallationModeControlPlaneOnly {
+				errs = append(errs, fmt.Errorf("spec.hcp.role=management requires spec.mode=controlPlaneOnly"))
+			}
+		case operatorv1alpha1.HCPRoleDataPlane:
+			if spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly {
+				errs = append(errs, fmt.Errorf("spec.hcp.role=dataPlane requires spec.mode=dataPlaneOnly"))
+			}
+			if northbound, northboundErr := hcp.ParseEndpoint(spec.HCP.NBEndpoint); northboundErr == nil {
+				if southbound, southboundErr := hcp.ParseEndpoint(spec.HCP.SBEndpoint); southboundErr == nil && northbound.Protocol != southbound.Protocol {
+					errs = append(errs, fmt.Errorf("spec.hcp dataPlane endpoints must use the same protocol"))
+				}
+			}
 		}
 	}
 	if spec.Central.Mode == operatorv1alpha1.CentralModeRaft && spec.Central.DynamicMembership && spec.Upgrade.Backup.Required && spec.Upgrade.Backup.Destination == "" {
@@ -101,6 +119,7 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 			errs = append(errs, fmt.Errorf("central.memberRequests requires central.dynamicMembership=true"))
 		}
 		seen := make(map[string]struct{}, len(spec.Central.MemberRequests))
+		replacementTargets := make(map[string]string)
 		for _, member := range spec.Central.MemberRequests {
 			if _, exists := seen[member.Name]; exists {
 				errs = append(errs, fmt.Errorf("central.memberRequests contains duplicate name %q", member.Name))
@@ -112,8 +131,25 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 			if member.ReplaceEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.ReplaceEndpoint)) != 0 {
 				errs = append(errs, fmt.Errorf("central.memberRequests[%q].replaceEndpoint must be a DNS subdomain", member.Name))
 			}
+			if member.ReplaceEndpoint != "" {
+				if previous, exists := replacementTargets[member.ReplaceEndpoint]; exists {
+					errs = append(errs, fmt.Errorf("central.memberRequests[%q].replaceEndpoint duplicates target %q already requested by %q", member.Name, member.ReplaceEndpoint, previous))
+				}
+				replacementTargets[member.ReplaceEndpoint] = member.Name
+				if len(replacementTargets) > 1 {
+					errs = append(errs, fmt.Errorf("central.memberRequests may contain only one replaceEndpoint per lifecycle transition"))
+				}
+			}
 			if member.RetireEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.RetireEndpoint)) != 0 {
 				errs = append(errs, fmt.Errorf("central.memberRequests[%q].retireEndpoint must be a DNS subdomain", member.Name))
+			}
+			if member.RemovalApprovalRef != nil {
+				if len(kvalidation.IsDNS1123Subdomain(member.RemovalApprovalRef.Name)) != 0 || member.RemovalApprovalRef.UID == "" {
+					errs = append(errs, fmt.Errorf("central.memberRequests[%q].removalApprovalRef requires a valid name and UID", member.Name))
+				}
+			}
+			if member.TLSSecretRef != nil && len(kvalidation.IsDNS1123Subdomain(member.TLSSecretRef.Name)) != 0 {
+				errs = append(errs, fmt.Errorf("central.memberRequests[%q].tlsSecretRef.name must be a DNS subdomain", member.Name))
 			}
 			if member.ReplaceEndpoint != "" && member.RetireEndpoint != "" {
 				errs = append(errs, fmt.Errorf("central.memberRequests[%q] cannot set both replaceEndpoint and retireEndpoint", member.Name))
@@ -139,9 +175,42 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 			if !pinned || image == "" || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
 				errs = append(errs, fmt.Errorf("central.memberRequests[%q].image must be pinned to a sha256 digest", member.Name))
 			}
+			if memberAddressesPresent(member) {
+				protocol, valid := memberAddressProtocol(member)
+				if !valid {
+					errs = append(errs, fmt.Errorf("central.memberRequests[%q] NB/SB addresses must use one protocol: tcp or ssl", member.Name))
+				} else if (protocol == "ssl") != (member.TLSSecretRef != nil) {
+					errs = append(errs, fmt.Errorf("central.memberRequests[%q] listener protocol and tlsSecretRef must agree", member.Name))
+				}
+			}
 		}
 	}
 	return errs
+}
+
+func memberAddressProtocol(member operatorv1alpha1.CentralMemberSpec) (string, bool) {
+	protocol := ""
+	for _, address := range []string{member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+		current, endpoint, found := strings.Cut(address, ":")
+		if !found || endpoint == "" || current != "tcp" && current != "ssl" {
+			return "", false
+		}
+		if protocol == "" {
+			protocol = current
+		} else if protocol != current {
+			return "", false
+		}
+	}
+	return protocol, true
+}
+
+func memberAddressesPresent(member operatorv1alpha1.CentralMemberSpec) bool {
+	for _, address := range []string{member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+		if strings.TrimSpace(address) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func JoinErrors(errs []error) string {

@@ -285,6 +285,78 @@ func TestS3StoreAllowsRetryAfterPartialPublication(t *testing.T) {
 	}
 }
 
+func TestS3StoreRetriesDeletionAfterPartialPairFailure(t *testing.T) {
+	var (
+		mu           sync.Mutex
+		storage      = map[string][]byte{}
+		deleteCalls  int
+		failDeleteAt = 2
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch request.Method {
+		case http.MethodPut:
+			data, err := io.ReadAll(request.Body)
+			if err != nil {
+				http.Error(writer, "read failed", http.StatusInternalServerError)
+				return
+			}
+			storage[request.URL.Path] = data
+		case http.MethodGet:
+			data, ok := storage[request.URL.Path]
+			if !ok {
+				http.NotFound(writer, request)
+				return
+			}
+			_, _ = writer.Write(data)
+		case http.MethodDelete:
+			deleteCalls++
+			if deleteCalls == failDeleteAt {
+				http.Error(writer, "temporary failure", http.StatusServiceUnavailable)
+				return
+			}
+			if _, ok := storage[request.URL.Path]; !ok {
+				http.NotFound(writer, request)
+				return
+			}
+			delete(storage, request.URL.Path)
+		default:
+			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+	store, err := NewS3Store("s3://test-bucket/operator", Credentials{AccessKeyID: "access", SecretAccessKey: "secret", Endpoint: server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := store.Publish(t.Context(), func(writer io.Writer) (Record, error) {
+		_, writeErr := writer.Write([]byte("snapshot"))
+		return Record{FormatVersion: 1, CompletedAt: time.Unix(100, 0).UTC()}, writeErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(t.Context(), ref); err == nil {
+		t.Fatal("partial S3 deletion unexpectedly succeeded")
+	}
+	mu.Lock()
+	remaining := len(storage)
+	mu.Unlock()
+	if remaining != 1 {
+		t.Fatalf("partial deletion left %d objects, want 1", remaining)
+	}
+	if err := store.Delete(t.Context(), ref); err != nil {
+		t.Fatalf("retry after partial S3 deletion failed: %v", err)
+	}
+	mu.Lock()
+	remaining = len(storage)
+	mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("retry left %d objects, want 0", remaining)
+	}
+}
+
 func TestS3StoreListsCompletePairsAndDeletesBothObjects(t *testing.T) {
 	var (
 		mu      sync.Mutex

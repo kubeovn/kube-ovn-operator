@@ -16,24 +16,35 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/chart"
+	"github.com/kubeovn/kube-ovn-operator/internal/hcp"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
 	"github.com/kubeovn/kube-ovn-operator/internal/planner"
 	"github.com/kubeovn/kube-ovn-operator/internal/topology"
+	"github.com/kubeovn/kube-ovn-operator/internal/upgrade"
+	"github.com/prometheus/client_golang/prometheus"
+	appsv1 "k8s.io/api/apps/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
+	kvalidation "k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -41,8 +52,35 @@ const (
 	planConfigMapPrefix = "kube-ovn-operator-plan-"
 )
 
+var (
+	reconcileTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeovn_operator_reconcile_total",
+		Help: "Total number of KubeOVNInstallation reconciliations by outcome.",
+	}, []string{"outcome"})
+	reconcileDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "kubeovn_operator_reconcile_duration_seconds",
+		Help: "Duration of KubeOVNInstallation reconciliations in seconds.",
+	}, []string{"outcome"})
+	installationReady = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kubeovn_operator_installation_ready",
+		Help: "Whether a named KubeOVNInstallation passed all configured verification gates.",
+	}, []string{"namespace", "name"})
+	installationCondition = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kubeovn_operator_installation_condition",
+		Help: "Latest KubeOVNInstallation condition state: 1 true, 0 false, -1 unknown.",
+	}, []string{"namespace", "name", "condition"})
+)
+
+func init() {
+	crmetrics.Registry.MustRegister(reconcileTotal, reconcileDuration, installationReady, installationCondition)
+}
+
 type KubeOVNInstallationReconciler struct {
 	client.Client
+	// APIReader is an uncached reader for security-sensitive identity pins such
+	// as HCP TLS Secret UID/resourceVersion. Tests and plan-only callers may
+	// leave it nil, in which case the controller client is used.
+	APIReader       client.Reader
 	Scheme          *apiruntime.Scheme
 	Clock           func() time.Time
 	Renderer        chart.Renderer
@@ -50,10 +88,13 @@ type KubeOVNInstallationReconciler struct {
 	Workload        apply.ApplyClient
 	Leases          lease.Runner
 	OVN             health.OVNProvider
+	HCP             hcp.PeerProvider
 	Runtime         health.RuntimeProvider
 	Network         health.NetworkProvider
 	Topology        topology.Provider
 	Lifecycle       lifecycleCoordinator
+	Rollback        RollbackStepExecutor
+	Recorder        record.EventRecorder
 	WorkloadFactory func(apply.InstallationIdentity) apply.ApplyClient
 	// ScheduledBackup is an injectable checkpoint seam. Production uses the
 	// lifecycle manager; tests can provide a verified pair capture without
@@ -74,17 +115,183 @@ type lifecycleCoordinator interface {
 	CleanupBackups(context.Context, *operatorv1alpha1.KubeOVNInstallation, backup.RetentionPolicy, []string, time.Time) (backup.RetentionResult, error)
 	CaptureBackupPair(context.Context, *operatorv1alpha1.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding) (*operatorv1alpha1.BackupStatus, error)
 	VerifyBackupPair(context.Context, *operatorv1alpha1.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding, *operatorv1alpha1.BackupStatus) error
+	RestoreBackupPair(context.Context, *operatorv1alpha1.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding, *operatorv1alpha1.BackupStatus) error
 }
 
 func (r *KubeOVNInstallationReconciler) SetupWithManager(mgr manager.Manager) error {
 	return builder.ControllerManagedBy(mgr).
 		For(&operatorv1alpha1.KubeOVNInstallation{}).
 		Owns(&corev1.ConfigMap{}).
+		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapInstallationObject)).
+		Watches(&appsv1.StatefulSet{}, handler.EnqueueRequestsFromMapFunc(r.mapInstallationObject)).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapInstallationObject)).
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.mapInstallationObject)).
+		Watches(&coordinationv1.Lease{}, handler.EnqueueRequestsFromMapFunc(r.mapInstallationObject)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapSecretToInstallations)).
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapNodeToInstallations)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }
 
-func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+// mapInstallationObject wakes an installation when one of its labeled
+// workloads, storage claims or operation Leases changes. The label and owner
+// checks keep unrelated cluster activity out of the queue; a stale UID label
+// cannot redirect an event to a recreated installation with the same name.
+func (r *KubeOVNInstallationReconciler) mapInstallationObject(ctx context.Context, object client.Object) []reconcile.Request {
+	if r == nil || r.Client == nil || object == nil || object.GetNamespace() == "" {
+		return nil
+	}
+	labels := object.GetLabels()
+	name, namespace := labels[apply.InstallationLabel], labels[apply.InstallationNamespaceLabel]
+	if name == "" || namespace != object.GetNamespace() {
+		for _, owner := range object.GetOwnerReferences() {
+			if owner.APIVersion != operatorv1alpha1.GroupVersion.String() || owner.Kind != "KubeOVNInstallation" || owner.Name == "" {
+				continue
+			}
+			name = owner.Name
+			namespace = object.GetNamespace()
+			break
+		}
+	}
+	if name == "" || namespace != object.GetNamespace() {
+		return nil
+	}
+	installation := new(operatorv1alpha1.KubeOVNInstallation)
+	key := types.NamespacedName{Namespace: namespace, Name: name}
+	if err := r.Get(ctx, key, installation); err != nil {
+		return nil
+	}
+	if uid := labels[apply.InstallationUIDLabel]; uid != "" && uid != string(installation.UID) {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: key}}
+}
+
+// mapSecretToInstallations watches every Secret referenced by an installation's
+// control-plane contract. Secret contents are never read by this mapper; a
+// rotation merely causes the provider or member lifecycle contract to be
+// re-evaluated against the new object identity. Member TLS rotation must wake
+// the controller as well, otherwise a replaced certificate could remain
+// outside the reconcile queue until the periodic resync.
+func (r *KubeOVNInstallationReconciler) mapSecretToInstallations(ctx context.Context, object client.Object) []reconcile.Request {
+	secret, ok := object.(*corev1.Secret)
+	if !ok || secret == nil || secret.Namespace == "" || r == nil || r.Client == nil {
+		return nil
+	}
+	installations := new(operatorv1alpha1.KubeOVNInstallationList)
+	if err := r.List(ctx, installations, client.InNamespace(secret.Namespace)); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(installations.Items))
+	for index := range installations.Items {
+		installation := &installations.Items[index]
+		if !installationReferencesSecret(installation, secret) {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: installation.Namespace, Name: installation.Name}})
+	}
+	return requests
+}
+
+func installationReferencesSecret(installation *operatorv1alpha1.KubeOVNInstallation, secret *corev1.Secret) bool {
+	if installation == nil || secret == nil || installation.Namespace != secret.Namespace {
+		return false
+	}
+	if installation.Spec.HCP.Enabled && installation.Spec.HCP.TLSSecretRef != nil && installation.Spec.HCP.TLSSecretRef.Name == secret.Name {
+		return true
+	}
+	for _, member := range installation.Spec.Central.MemberRequests {
+		if member.TLSSecretRef != nil && member.TLSSecretRef.Name == secret.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// mapNodeToInstallations wakes installations whose central placement, data
+// plane placement, retained observed workload identity or explicit member
+// request refers to the changed Node. Node status and schedulability changes
+// are safety inputs for topology and runtime health, so waiting for the
+// periodic reconcile would leave a stale decision window during a drain or
+// replacement. Retained identities are checked before current selectors so a
+// label removal cannot hide a node that is already hosting a managed workload.
+func (r *KubeOVNInstallationReconciler) mapNodeToInstallations(ctx context.Context, object client.Object) []reconcile.Request {
+	node, ok := object.(*corev1.Node)
+	if !ok || node == nil || node.Name == "" || r.Client == nil {
+		return nil
+	}
+	installations := new(operatorv1alpha1.KubeOVNInstallationList)
+	if err := r.List(ctx, installations); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(installations.Items))
+	for index := range installations.Items {
+		installation := &installations.Items[index]
+		if installationUsesNode(installation, node) {
+			requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: installation.Namespace, Name: installation.Name}})
+		}
+	}
+	slices.SortFunc(requests, func(a, b reconcile.Request) int {
+		if value := strings.Compare(a.Namespace, b.Namespace); value != 0 {
+			return value
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return requests
+}
+
+func installationUsesNode(installation *operatorv1alpha1.KubeOVNInstallation, node *corev1.Node) bool {
+	if installation == nil || node == nil || installation.DeletionTimestamp != nil {
+		return false
+	}
+	// Keep watching a node that hosted a previously observed workload even
+	// after a label change makes it stop matching the desired placement. This
+	// closes the event gap for cordon, drain, deletion and label/IP changes.
+	for _, member := range installation.Status.Topology.Members {
+		if member.Node == node.Name {
+			return true
+		}
+	}
+	for _, member := range installation.Status.Topology.Nodes {
+		if member.Node == node.Name {
+			return true
+		}
+	}
+	for _, member := range installation.Spec.Central.MemberRequests {
+		if member.NodeName == node.Name {
+			return true
+		}
+	}
+	if installation.Spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly && !installation.Spec.HCP.Enabled {
+		selector := installation.Spec.Central.Placement.NodeSelector
+		if len(selector) == 0 {
+			selector = map[string]string{"node-role.kubernetes.io/control-plane": ""}
+		}
+		if labels.SelectorFromSet(selector).Matches(labels.Set(node.Labels)) {
+			return true
+		}
+	}
+	if installation.Spec.Mode != operatorv1alpha1.InstallationModeControlPlaneOnly {
+		if labels.SelectorFromSet(installation.Spec.DataPlane.NodeSelector).Matches(labels.Set(node.Labels)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req reconcile.Request) (result reconcile.Result, err error) {
+	started := time.Now()
+	result, err = r.reconcile(ctx, req)
+	outcome := "success"
+	if err != nil {
+		outcome = "error"
+	}
+	reconcileTotal.WithLabelValues(outcome).Inc()
+	reconcileDuration.WithLabelValues(outcome).Observe(time.Since(started).Seconds())
+	return result, err
+}
+
+func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	logger := log.FromContext(ctx).WithValues("installation", req.NamespacedName)
 	installation := new(operatorv1alpha1.KubeOVNInstallation)
 	if err := r.Get(ctx, req.NamespacedName, installation); err != nil {
@@ -105,12 +312,41 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		logger.Info("installation plan is blocked", "reason", plan.Blocking)
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+	if installation.Spec.HCP.Enabled && r.HCP == nil && (r.Workload != nil || r.WorkloadFactory != nil) {
+		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "HCPPeer", "HCP requires a peer provider before workload apply"
+		if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); err != nil {
+			return reconcile.Result{}, err
+		}
+		logger.Info("HCP installation is waiting for a peer provider")
+		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	var hcpRequest *hcp.PeerRequest
+	if installation.Spec.HCP.Enabled && (r.Workload != nil || r.WorkloadFactory != nil) {
+		request, requestErr := r.hcpPeerRequest(ctx, installation)
+		if requestErr != nil {
+			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "HCPSecret", requestErr.Error()
+			if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
+				return reconcile.Result{}, statusErr
+			}
+			logger.Info("HCP installation is waiting for its TLS Secret", "reason", requestErr.Error())
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		hcpRequest = &request
+	}
 	if err := validateMemberRequestLifecycle(installation); err != nil {
 		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "LifecycleSelection", err.Error()
 		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
 			return reconcile.Result{}, statusErr
 		}
 		logger.Info("member requests are waiting for an initial retained topology", "reason", err.Error())
+		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if upgradePaused(installation) {
+		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseUpgrading, "Paused", "upgrade is paused while the installation is degraded"
+		if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
+			return reconcile.Result{}, statusErr
+		}
+		logger.Info("upgrade paused while installation is degraded")
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	// Recover a durable membership operation before rendering the chart. Node
@@ -217,6 +453,17 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		}
 	}
 	if installation.Status.ObservedVersion != "" && installation.Status.ObservedVersion != installation.Spec.Version {
+		direction, directionErr := upgrade.CompareVersions(installation.Status.ObservedVersion, installation.Spec.Version)
+		if directionErr != nil {
+			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseUpgrading, "VersionContract", directionErr.Error()
+			if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
+				return reconcile.Result{}, statusErr
+			}
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if direction == upgrade.VersionRollback {
+			return r.reconcileRollback(ctx, installation, plan, now)
+		}
 		upgradeReady, upgradeErr := r.ensureUpgradeBackup(ctx, installation)
 		if upgradeErr != nil {
 			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseUpgrading, "Backup", upgradeErr.Error()
@@ -232,22 +479,6 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			}
 			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 		}
-	}
-	if outcome, scheduleErr := r.ensureScheduledBackup(ctx, installation, now()); outcome.Due {
-		installation.Status.Upgrade.Step = "BackupSchedule"
-		if scheduleErr != nil {
-			installation.Status.Phase = operatorv1alpha1.PhaseDegraded
-			setCondition(&installation.Status.Conditions, metav1.Condition{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "BackupScheduleFailed", Message: scheduleErr.Error(), ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now())})
-			setCondition(&installation.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "BackupScheduleFailed", Message: scheduleErr.Error(), ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now())})
-			if statusErr := r.Status().Update(ctx, installation); statusErr != nil {
-				return reconcile.Result{}, statusErr
-			}
-			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		if err := r.Status().Update(ctx, installation); err != nil {
-			return reconcile.Result{}, fmt.Errorf("persist scheduled backup checkpoint: %w", err)
-		}
-		return reconcile.Result{RequeueAfter: outcome.RequeueAfter}, nil
 	}
 	if due, cleanup, cleanupErr := r.ensureBackupRetention(ctx, installation, now()); due {
 		attempted := metav1.NewTime(now())
@@ -273,6 +504,27 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		if statusErr := r.Status().Update(ctx, installation); statusErr != nil {
 			return reconcile.Result{}, statusErr
 		}
+	}
+	// Retention is an independent policy. Run it before honoring a future
+	// scheduled-backup deadline so a long capture interval cannot suppress
+	// cleanup for the lifetime of the installation.
+	if outcome, scheduleErr := r.ensureScheduledBackup(ctx, installation, now()); outcome.Due {
+		installation.Status.Upgrade.Step = "BackupSchedule"
+		if scheduleErr != nil {
+			installation.Status.Phase = operatorv1alpha1.PhaseDegraded
+			setCondition(&installation.Status.Conditions, metav1.Condition{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "BackupScheduleFailed", Message: scheduleErr.Error(), ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now())})
+			setCondition(&installation.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "BackupScheduleFailed", Message: scheduleErr.Error(), ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now())})
+			if statusErr := r.Status().Update(ctx, installation); statusErr != nil {
+				return reconcile.Result{}, statusErr
+			}
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if err := r.Status().Update(ctx, installation); err != nil {
+			return reconcile.Result{}, fmt.Errorf("persist scheduled backup checkpoint: %w", err)
+		}
+		return reconcile.Result{RequeueAfter: outcome.RequeueAfter}, nil
+	} else if outcome.RequeueAfter > 0 {
+		return reconcile.Result{RequeueAfter: outcome.RequeueAfter}, nil
 	}
 	if localRaft(installation) && r.Lifecycle != nil && (installation.Status.Topology.Operation == nil || installation.Status.Topology.Operation.HandoffApplied) && installation.Status.Topology.Inventory != nil && installation.Status.ApplyCheckpoint != nil {
 		started, selectionErr := r.beginAutomaticLifecycle(ctx, installation, plan, now)
@@ -323,6 +575,18 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		}
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+	var upgradeObjects upgrade.ObjectSet
+	upgradeRollout := upgradeOnlySpecChange(installation)
+	if upgradeRollout {
+		upgradeObjects, err = upgrade.Partition(rendered.Objects)
+		if err != nil {
+			plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseUpgrading, "Render", err.Error()
+			if statusErr := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); statusErr != nil {
+				return reconcile.Result{}, statusErr
+			}
+			return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+	}
 	workload := r.Workload
 	if r.WorkloadFactory != nil {
 		workload = r.WorkloadFactory(apply.InstallationIdentity{Namespace: installation.Namespace, Name: installation.Name, UID: installation.UID})
@@ -346,13 +610,22 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			if err := lease.CheckAll(operationCtx); err != nil {
 				return err
 			}
+			// Capture the upgrade authorization before ensureApplyCheckpoint
+			// records the target spec hash. Once that checkpoint advances, the
+			// old-version hash is no longer available to infer authorization.
+			upgradeAuthorized := upgradeAuthorizesApply(installation)
+			upgradePhase := upgrade.RolloutPhase("")
+			if upgradeAuthorized {
+				upgradePhase = upgrade.ParsePhase(installation.Status.Upgrade.Step, upgradeObjects)
+				plan.Step = string(upgradePhase)
+			}
 			if err := r.ensureApplyCheckpoint(operationCtx, installation, rendered); err != nil {
 				return err
 			}
 			if localRaft(installation) && r.Topology != nil {
 				plan.Step = "VerifyRetainedTopology"
 				if err := r.ensureTopology(operationCtx, installation, false); err != nil {
-					topologyCondition = &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionFalse, Reason: "TopologyUnverified", Message: err.Error()}
+					topologyCondition = &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionFalse, Reason: topologyFailureReason(err), Message: err.Error()}
 					return err
 				}
 			}
@@ -369,7 +642,6 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 					return err
 				}
 			}
-			upgradeAuthorized := upgradeAuthorizesApply(installation)
 			if upgradeAuthorized {
 				plan.Step = "UpgradeCheckpoint"
 				if err := r.beginUpgradeApply(operationCtx, installation); err != nil {
@@ -380,19 +652,58 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 			if err := lease.CheckAll(operationCtx); err != nil {
 				return err
 			}
-			if err := workload.Apply(operationCtx, rendered.Objects); err != nil {
-				if upgradeAuthorized {
-					return errors.Join(err, r.failUpgradeApply(operationCtx, installation, err.Error()))
+			objectsToApply := rendered.Objects
+			if upgradeAuthorized {
+				switch upgradePhase {
+				case upgrade.RolloutCRDs:
+					objectsToApply = upgradeObjects.CRDs
+				case upgrade.RolloutCentral:
+					objectsToApply = upgradeObjects.Central
+				case upgrade.RolloutDataPlane:
+					objectsToApply = upgradeObjects.DataPlane
+				case upgrade.RolloutVerify:
+					objectsToApply = nil
 				}
-				return err
+			}
+			if len(objectsToApply) > 0 {
+				if err := workload.Apply(operationCtx, objectsToApply); err != nil {
+					if upgradeAuthorized {
+						return errors.Join(err, r.failUpgradeApply(operationCtx, installation, err.Error()))
+					}
+					return err
+				}
 			}
 			if upgradeAuthorized {
-				// Persist the accepted target before observing it. If the process
-				// exits after Chart Apply, the next reconciliation can retry this
-				// idempotent target from the durable Applying phase rather than
-				// treating the verified backup as a fresh authorization.
-				if err := r.markUpgradeCheckpointApplied(operationCtx, installation, now()); err != nil {
-					return err
+				switch upgradePhase {
+				case upgrade.RolloutCRDs:
+					ready, err := r.upgradeCRDsReady(operationCtx, upgradeObjects.CRDs)
+					if err != nil {
+						return errors.Join(err, r.failUpgradeApply(operationCtx, installation, err.Error()))
+					}
+					if !ready {
+						plan.Step = string(upgrade.RolloutCRDs)
+						return nil
+					}
+					plan.Step = string(upgrade.NextPhase(upgradePhase, upgradeObjects))
+					return nil
+				case upgrade.RolloutCentral:
+					ready, err := r.upgradeCentralReady(operationCtx, installation, workload, upgradeObjects.Central)
+					if err != nil {
+						return errors.Join(err, r.failUpgradeApply(operationCtx, installation, err.Error()))
+					}
+					if !ready {
+						plan.Step = string(upgrade.RolloutCentral)
+						return nil
+					}
+					plan.Step = string(upgrade.NextPhase(upgradePhase, upgradeObjects))
+					return nil
+				case upgrade.RolloutDataPlane:
+					if err := r.markUpgradeCheckpointApplied(operationCtx, installation, now()); err != nil {
+						return err
+					}
+					plan.Step = string(upgrade.RolloutVerify)
+				case upgrade.RolloutVerify:
+					plan.Step = string(upgrade.RolloutVerify)
 				}
 			}
 			if lifecycleHandoffAuthorizesApply(installation) && installation.Status.Topology.Operation != nil {
@@ -402,7 +713,11 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 					return err
 				}
 			}
-			plan.Step = "Observe"
+			if upgradeAuthorized && (upgradePhase == upgrade.RolloutDataPlane || upgradePhase == upgrade.RolloutVerify) {
+				plan.Step = string(upgrade.RolloutVerify)
+			} else {
+				plan.Step = "Observe"
+			}
 			if observer, ok := workload.(apply.Observer); ok {
 				observed, err := observer.Observe(operationCtx, rendered.Objects)
 				if err != nil {
@@ -411,10 +726,12 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 				observation = &observed
 			}
 			if observation != nil && observation.Ready && localRaft(installation) && r.Topology != nil {
-				plan.Step = "RecordTopology"
+				if !(upgradeAuthorized && (upgradePhase == upgrade.RolloutDataPlane || upgradePhase == upgrade.RolloutVerify)) {
+					plan.Step = "RecordTopology"
+				}
 				condition := metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionTrue, Reason: "IdentityVerified", Message: "Live central identities match the retained topology"}
 				if err := r.ensureTopology(operationCtx, installation, true); err != nil {
-					condition.Status, condition.Reason, condition.Message = metav1.ConditionFalse, "TopologyUnverified", err.Error()
+					condition.Status, condition.Reason, condition.Message = metav1.ConditionFalse, topologyFailureReason(err), err.Error()
 				}
 				topologyCondition = &condition
 			}
@@ -447,21 +764,90 @@ func (r *KubeOVNInstallationReconciler) Reconcile(ctx context.Context, req recon
 		}
 		ovnReport = &report
 	}
+	var hcpReport *hcp.PeerReport
+	if err == nil && observation != nil && observation.Ready && installation.Spec.HCP.Enabled && r.HCP != nil {
+		if hcpRequest == nil {
+			request, requestErr := r.hcpPeerRequest(ctx, installation)
+			if requestErr != nil {
+				report := hcp.PeerReport{Reason: "TLSSecretUnavailable", Message: requestErr.Error()}
+				hcpReport = &report
+			} else {
+				hcpRequest = &request
+			}
+		}
+		if hcpRequest != nil {
+			report, peerErr := r.HCP.Observe(ctx, *hcpRequest)
+			if peerErr != nil {
+				report = hcp.PeerReport{Reason: "HCPObservationFailed", Message: peerErr.Error()}
+			} else if contractErr := hcp.ValidateReport(*hcpRequest, report); contractErr != nil {
+				report.Ready = false
+				report.Reason = "HCPContractInvalid"
+				report.Message = contractErr.Error()
+				report.TLSSecret = hcp.SecretIdentity{}
+			}
+			hcpReport = &report
+		}
+	}
 	var runtimeReport *health.RuntimeReport
 	if err == nil && observation != nil && observation.Ready && r.Runtime != nil {
 		runtimeReport = new(r.Runtime.Observe(ctx, installation))
 	}
 	var networkReport *health.NetworkReport
-	if ovnReport != nil && ovnReport.Ready && runtimeReport != nil && runtimeReport.Northd.Status == metav1.ConditionTrue && runtimeReport.DataPlane.Status == metav1.ConditionTrue && r.Network != nil {
+	centralReady := ovnReport != nil && ovnReport.Ready
+	if installation.Spec.HCP.Enabled && installation.Spec.HCP.Role == operatorv1alpha1.HCPRoleDataPlane {
+		centralReady = hcpReport != nil && hcpReport.Ready
+	}
+	if centralReady && runtimeReport != nil && runtimeReport.Northd.Status == metav1.ConditionTrue && runtimeReport.DataPlane.Status == metav1.ConditionTrue && r.Network != nil {
 		networkReport = new(r.Network.Observe(ctx, installation, runtimeReport.Nodes))
 	}
-	if err := r.updateStatus(ctx, installation, plan, now(), observation, ovnReport, runtimeReport, networkReport, topologyCondition); err != nil {
+	if err := r.updateStatus(ctx, installation, plan, now(), observation, ovnReport, runtimeReport, networkReport, topologyCondition, hcpReport); err != nil {
 		return reconcile.Result{}, err
 	}
 	if errors.Is(err, lease.ErrHeld) {
 		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 	return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+// hcpPeerRequest binds provider observation to the current Secret object
+// identity. The provider may read the Secret through its own client, but the
+// controller passes only metadata so credentials cannot enter status, plans or
+// rendered chart values. A replaced or rotated Secret therefore invalidates
+// any report that was produced for an older generation.
+func (r *KubeOVNInstallationReconciler) hcpPeerRequest(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (hcp.PeerRequest, error) {
+	if r == nil || r.Client == nil || installation == nil {
+		return hcp.PeerRequest{}, errors.New("HCP peer observation requires a Kubernetes client and installation")
+	}
+	secretRef := installation.Spec.HCP.TLSSecretRef
+	if secretRef == nil || strings.TrimSpace(secretRef.Name) == "" {
+		return hcp.PeerRequest{}, errors.New("HCP TLS Secret reference is empty")
+	}
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	secret := new(corev1.Secret)
+	key := client.ObjectKey{Namespace: installation.Namespace, Name: secretRef.Name}
+	if err := reader.Get(ctx, key, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return hcp.PeerRequest{}, fmt.Errorf("HCP TLS Secret %s/%s was not found", key.Namespace, key.Name)
+		}
+		return hcp.PeerRequest{}, fmt.Errorf("read HCP TLS Secret %s/%s: %w", key.Namespace, key.Name, err)
+	}
+	if secret.UID == "" {
+		return hcp.PeerRequest{}, fmt.Errorf("HCP TLS Secret %s/%s has no stable UID", key.Namespace, key.Name)
+	}
+	return hcp.PeerRequest{
+		Installation: types.NamespacedName{Namespace: installation.Namespace, Name: installation.Name},
+		Version:      installation.Spec.Version,
+		Config:       installation.Spec.HCP,
+		TLSSecret: hcp.SecretIdentity{
+			Namespace:       secret.Namespace,
+			Name:            secret.Name,
+			UID:             secret.UID,
+			ResourceVersion: secret.ResourceVersion,
+		},
+	}, nil
 }
 
 func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now func() time.Time) (bool, error) {
@@ -496,12 +882,36 @@ func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Cont
 			if !replicaOnly {
 				return errors.New("automatic lifecycle selection requires the desired change to modify central replicas only")
 			}
-			verified, err := r.Topology.VerifyRetained(centralCtx, installation)
-			if err != nil {
-				return fmt.Errorf("verify retained topology before automatic selection: %w", err)
-			}
-			if verified == nil || installation.Status.Topology.Inventory == nil || *verified != *installation.Status.Topology.Inventory {
-				return errors.New("automatic lifecycle selection requires a complete fresh topology matching the retained inventory")
+			// A lost Deployment endpoint is the one deliberate exception to the
+			// retained-identity check: its old Pod cannot still be present. The
+			// selector has already pinned the old UID, every survivor and the
+			// approval; Begin performs a fresh NB/SB/quorum observation before any
+			// mutation. A healthy retained Node with IP drift uses a separate
+			// exact-target observation and rebinds the request to its fresh
+			// addresses before Begin. All other transitions still require an
+			// unchanged baseline.
+			if request.AutomaticReplacement && request.Retirement != nil && !request.Retirement.EndpointMissing {
+				replacementProvider, ok := r.Topology.(topology.ReplacementProvider)
+				if !ok {
+					return errors.New("automatic address replacement requires a drift-tolerant topology provider")
+				}
+				observed, err := replacementProvider.VerifyRetainedReplacement(centralCtx, installation, request.RemoveEndpoint)
+				if err != nil {
+					return fmt.Errorf("verify retained topology for automatic address replacement: %w", err)
+				}
+				updated, err := lifecycle.RebindAutomaticReplacement(*request, retained, observed)
+				if err != nil {
+					return fmt.Errorf("rebind automatic replacement addresses: %w", err)
+				}
+				request = &updated
+			} else if request.Retirement == nil || !request.Retirement.EndpointMissing {
+				verified, err := r.Topology.VerifyRetained(centralCtx, installation)
+				if err != nil {
+					return fmt.Errorf("verify retained topology before automatic selection: %w", err)
+				}
+				if verified == nil || installation.Status.Topology.Inventory == nil || *verified != *installation.Status.Topology.Inventory {
+					return errors.New("automatic lifecycle selection requires a complete fresh topology matching the retained inventory")
+				}
 			}
 			reference, err = r.Lifecycle.Begin(centralCtx, installation, *request)
 			return err
@@ -527,7 +937,7 @@ func hasMemberReplacementRequest(installation *operatorv1alpha1.KubeOVNInstallat
 		return false
 	}
 	for _, member := range installation.Spec.Central.MemberRequests {
-		if member.ReplaceEndpoint != "" {
+		if member.ReplaceEndpoint != "" || (member.RetireEndpoint == "" && member.RemovalApprovalRef != nil) {
 			return true
 		}
 	}
@@ -574,9 +984,14 @@ func (r *KubeOVNInstallationReconciler) ensurePlanConfigMap(ctx context.Context,
 	return nil
 }
 
-func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time, observation *apply.Observation, ovnReport *health.OVNReport, runtimeReport *health.RuntimeReport, networkReport *health.NetworkReport, topologyCondition *metav1.Condition) error {
+func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time, observation *apply.Observation, ovnReport *health.OVNReport, runtimeReport *health.RuntimeReport, networkReport *health.NetworkReport, topologyCondition *metav1.Condition, hcpReports ...*hcp.PeerReport) error {
+	previous := installation.Status.DeepCopy()
 	status := installation.Status.DeepCopy()
-	if status.ApplyCheckpoint == nil {
+	var hcpReport *hcp.PeerReport
+	if len(hcpReports) != 0 {
+		hcpReport = hcpReports[0]
+	}
+	if status.ApplyCheckpoint == nil && plan.Step != "Rollback" {
 		status.ObservedVersion = ""
 	}
 	status.Phase = plan.Phase
@@ -591,6 +1006,9 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 	status.HCP = operatorv1alpha1.HCPStatus{}
 	status.Upgrade.Step = plan.Step
 	status.Upgrade.CanRollback = false
+	if installation.Status.ObservedVersion == "" || installation.Status.ObservedVersion == installation.Spec.Version {
+		status.Upgrade.Rollback = nil
+	}
 	readyReason, message := "PlanOnly", "The installation plan is valid; workload readiness has not been observed."
 	workloadStatus := metav1.ConditionUnknown
 	workloadReason := "NotObserved"
@@ -601,6 +1019,37 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 	northd := metav1.Condition{Type: "NorthdReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Northd has not been observed for this rollout"}
 	dataPlane := metav1.Condition{Type: "DataPlaneReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Data-plane connections have not been observed for this rollout"}
 	network := metav1.Condition{Type: "NetworkReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Network probes await healthy workloads, databases and runtime"}
+	hcpCondition := metav1.Condition{Type: "HCPReady", Status: metav1.ConditionTrue, Reason: "NotRequired", Message: "This installation does not use hosted control-plane pairing"}
+	if installation.Spec.HCP.Enabled {
+		hcpCondition = metav1.Condition{Type: "HCPReady", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "HCP peer health has not been observed for this rollout"}
+		if hcpReport != nil {
+			status.HCP.Paired = hcpReport.Paired
+			status.HCP.EndpointReady = hcpReport.EndpointReady
+			status.HCP.PeerObservedVersion = hcpReport.Peer.Version
+			status.HCP.TLSSecretUID = hcpReport.TLSSecret.UID
+			status.HCP.TLSSecretResourceVersion = hcpReport.TLSSecret.ResourceVersion
+			if hcpReport.Ready {
+				hcpCondition.Status, hcpCondition.Reason, hcpCondition.Message = metav1.ConditionTrue, "PeerReady", "HCP peer is paired and its configured endpoints are healthy"
+			} else {
+				hcpCondition.Status = metav1.ConditionFalse
+				hcpCondition.Reason = hcpReport.Reason
+				hcpCondition.Message = hcpReport.Message
+				if hcpCondition.Reason == "" {
+					hcpCondition.Reason = "PeerNotReady"
+				}
+				if hcpCondition.Message == "" {
+					hcpCondition.Message = "HCP peer is not ready"
+				}
+			}
+		} else if plan.Step == "HCPPeer" && plan.Blocking != "" {
+			hcpCondition.Status, hcpCondition.Reason, hcpCondition.Message = metav1.ConditionFalse, "PeerProviderUnavailable", plan.Blocking
+		}
+		if hcpCondition.Status == metav1.ConditionFalse {
+			status.Phase = operatorv1alpha1.PhaseDegraded
+			degraded, degradedReason = metav1.ConditionTrue, hcpCondition.Reason
+			message = hcpCondition.Message
+		}
+	}
 	topologyState := metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionUnknown, Reason: "NotObserved", Message: "Complete central identity inventory has not been verified for this rollout"}
 	if !localRaft(installation) {
 		topologyState.Status, topologyState.Reason, topologyState.Message = metav1.ConditionTrue, "NotRequired", "Local RAFT topology inventory does not apply to this installation"
@@ -688,7 +1137,7 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		degraded, degradedReason, readyReason, message = metav1.ConditionTrue, "TopologyUnverified", "TopologyUnverified", topologyState.Message
 	}
 	networkVerified := network.Status == metav1.ConditionTrue && (installation.Spec.Mode == operatorv1alpha1.InstallationModeControlPlaneOnly && network.Reason == "NotRequired" || status.Network != nil && status.Network.ObservedNodes > 0 && status.Network.SuccessfulProbes > 0 && len(status.Network.AddressFamilies) > 0)
-	if topologyState.Status == metav1.ConditionTrue && plan.Blocking == "" && workloadStatus == metav1.ConditionTrue && ovnStatus == metav1.ConditionTrue && northd.Status == metav1.ConditionTrue && dataPlane.Status == metav1.ConditionTrue && networkVerified {
+	if topologyState.Status == metav1.ConditionTrue && hcpCondition.Status == metav1.ConditionTrue && plan.Blocking == "" && workloadStatus == metav1.ConditionTrue && ovnStatus == metav1.ConditionTrue && northd.Status == metav1.ConditionTrue && dataPlane.Status == metav1.ConditionTrue && networkVerified {
 		readyStatus, readyReason, message = metav1.ConditionTrue, "VerificationComplete", "Workloads, OVN databases, runtime and configured network probes passed verification"
 		status.Phase = operatorv1alpha1.PhaseReady
 		status.Upgrade.Step = "Verified"
@@ -699,7 +1148,7 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		{Type: "WorkloadsReady", Status: workloadStatus, Reason: workloadReason, Message: workloadMessage},
 		{Type: "OVNDBReady", Status: ovnStatus, Reason: ovnReason, Message: ovnMessage},
 		northd, dataPlane,
-		network, topologyState,
+		network, topologyState, hcpCondition,
 	} {
 		condition.ObservedGeneration = installation.Generation
 		condition.LastTransitionTime = metav1.NewTime(now)
@@ -709,13 +1158,87 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 	if err := r.Status().Update(ctx, updated); err != nil {
 		return err
 	}
+	r.observeStatus(installation, *previous, *status)
 	installation.ResourceVersion = updated.ResourceVersion
 	installation.Status = updated.Status
 	return nil
 }
 
+func (r *KubeOVNInstallationReconciler) observeStatus(installation *operatorv1alpha1.KubeOVNInstallation, previous, current operatorv1alpha1.KubeOVNInstallationStatus) {
+	if installation == nil {
+		return
+	}
+	name := installation.Name
+	namespace := installation.Namespace
+	ready := conditionValue(current.Conditions, "Ready")
+	installationReady.WithLabelValues(namespace, name).Set(ready)
+	for _, condition := range current.Conditions {
+		installationCondition.WithLabelValues(namespace, name, condition.Type).Set(conditionMetricValue(condition.Status))
+	}
+	if r.Recorder == nil {
+		return
+	}
+	if previous.Phase != current.Phase {
+		eventType := corev1.EventTypeNormal
+		if current.Phase == operatorv1alpha1.PhaseDegraded {
+			eventType = corev1.EventTypeWarning
+		}
+		r.Recorder.Eventf(installation, eventType, "PhaseChanged", "installation phase changed from %q to %q", previous.Phase, current.Phase)
+	}
+	previousReady := findInstallationCondition(previous.Conditions, "Ready")
+	currentReady := findInstallationCondition(current.Conditions, "Ready")
+	if currentReady != nil && (previousReady == nil || previousReady.Status != currentReady.Status || previousReady.Reason != currentReady.Reason) {
+		eventType := corev1.EventTypeNormal
+		if currentReady.Status != metav1.ConditionTrue {
+			eventType = corev1.EventTypeWarning
+		}
+		r.Recorder.Eventf(installation, eventType, "ReadyChanged", "%s", currentReady.Message)
+	}
+}
+
+func findInstallationCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+	for index := range conditions {
+		if conditions[index].Type == conditionType {
+			return &conditions[index]
+		}
+	}
+	return nil
+}
+
+func conditionValue(conditions []metav1.Condition, conditionType string) float64 {
+	condition := findInstallationCondition(conditions, conditionType)
+	if condition != nil && condition.Status == metav1.ConditionTrue {
+		return 1
+	}
+	return 0
+}
+
+func conditionMetricValue(status metav1.ConditionStatus) float64 {
+	switch status {
+	case metav1.ConditionTrue:
+		return 1
+	case metav1.ConditionFalse:
+		return 0
+	default:
+		return -1
+	}
+}
+
 func localRaft(installation *operatorv1alpha1.KubeOVNInstallation) bool {
 	return installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly && !installation.Spec.HCP.Enabled
+}
+
+func topologyFailureReason(err error) string {
+	if _, ok := errors.AsType[*health.EndpointDriftError](err); ok {
+		return "CentralEndpointDrift"
+	}
+	if node, ok := errors.AsType[*health.NodeLifecycleError](err); ok {
+		if node.Unschedulable {
+			return "CentralNodeDraining"
+		}
+		return "CentralNodeUnavailable"
+	}
+	return "TopologyUnverified"
 }
 
 func (r *KubeOVNInstallationReconciler) ensureTopology(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, initialize bool) error {
@@ -774,20 +1297,20 @@ func replicaOnlySpecChange(installation *operatorv1alpha1.KubeOVNInstallation, r
 	if installation == nil || installation.Status.ApplyCheckpoint == nil || retainedReplicas < 1 {
 		return false, errors.New("automatic lifecycle selection requires an existing apply checkpoint and retained member count")
 	}
-	data, err := stdjson.Marshal(installation.Spec, stdjson.Deterministic(true))
+	currentHash, currentBaseHash, err := installationSpecHashes(installation.Spec)
 	if err != nil {
 		return false, fmt.Errorf("hash current installation spec: %w", err)
 	}
-	if fmt.Sprintf("%x", sha256.Sum256(data)) == installation.Status.ApplyCheckpoint.SpecHash {
+	if currentHash == installation.Status.ApplyCheckpoint.SpecHash {
 		return true, nil
 	}
 	spec := installation.Spec
 	spec.Central.Replicas = int32(retainedReplicas)
-	data, err = stdjson.Marshal(spec, stdjson.Deterministic(true))
+	retainedHash, retainedBaseHash, err := installationSpecHashes(spec)
 	if err != nil {
 		return false, fmt.Errorf("hash prior installation spec: %w", err)
 	}
-	if fmt.Sprintf("%x", sha256.Sum256(data)) == installation.Status.ApplyCheckpoint.SpecHash {
+	if retainedHash == installation.Status.ApplyCheckpoint.SpecHash {
 		return true, nil
 	}
 	// Prepared member slots are lifecycle inputs. The first replica increase
@@ -796,14 +1319,34 @@ func replicaOnlySpecChange(installation *operatorv1alpha1.KubeOVNInstallation, r
 	// slots omitted. Once the handoff is accepted, the full current spec is
 	// recorded in the checkpoint and the exact hash path above applies again.
 	if len(spec.Central.MemberRequests) == 0 {
-		return false, nil
+		return installation.Status.ApplyCheckpoint.BaseSpecHash != "" && currentBaseHash == installation.Status.ApplyCheckpoint.BaseSpecHash, nil
 	}
 	spec.Central.MemberRequests = nil
-	data, err = stdjson.Marshal(spec, stdjson.Deterministic(true))
+	_, baseHash, err := installationSpecHashes(spec)
 	if err != nil {
 		return false, fmt.Errorf("hash prior installation spec without member requests: %w", err)
 	}
-	return fmt.Sprintf("%x", sha256.Sum256(data)) == installation.Status.ApplyCheckpoint.SpecHash, nil
+	if baseHash == installation.Status.ApplyCheckpoint.SpecHash {
+		return true, nil
+	}
+	if installation.Status.ApplyCheckpoint.BaseSpecHash == "" {
+		return false, nil
+	}
+	return currentBaseHash == installation.Status.ApplyCheckpoint.BaseSpecHash || retainedBaseHash == installation.Status.ApplyCheckpoint.BaseSpecHash, nil
+}
+
+func installationSpecHashes(spec operatorv1alpha1.KubeOVNInstallationSpec) (full, base string, err error) {
+	data, err := stdjson.Marshal(spec, stdjson.Deterministic(true))
+	if err != nil {
+		return "", "", err
+	}
+	full = fmt.Sprintf("%x", sha256.Sum256(data))
+	spec.Central.MemberRequests = nil
+	data, err = stdjson.Marshal(spec, stdjson.Deterministic(true))
+	if err != nil {
+		return "", "", err
+	}
+	return full, fmt.Sprintf("%x", sha256.Sum256(data)), nil
 }
 
 func validateMemberRequestLifecycle(installation *operatorv1alpha1.KubeOVNInstallation) error {
@@ -823,6 +1366,9 @@ func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstal
 	if request.Add == nil {
 		for _, member := range installation.Spec.Central.MemberRequests {
 			if member.RetireEndpoint == request.RemoveEndpoint {
+				if !lifecycleMemberApprovalMatches(member, request) {
+					return fmt.Errorf("retirement member request %q changed after operation admission; restore removalApprovalRef before retrying", member.Name)
+				}
 				return nil
 			}
 		}
@@ -848,12 +1394,43 @@ func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstal
 		if member.Name != memberName {
 			continue
 		}
-		if member.NodeName != request.Add.Workload.Node.Name || member.ClaimName != request.Add.Workload.Claim.Name || member.VolumeName != request.Add.Workload.Volume.Name || member.Image != request.Add.Workload.Image || member.NorthboundAddress != northboundAddress || member.SouthboundAddress != southboundAddress || member.NorthboundClientAddress != request.Add.NorthboundAddress || member.SouthboundClientAddress != request.Add.SouthboundAddress || member.ReplaceEndpoint != request.RemoveEndpoint {
-			return fmt.Errorf("lifecycle member request %q changed after operation admission; restore the pinned node, storage, image and NB/SB addresses before retrying", memberName)
+		autoReplacement := member.ReplaceEndpoint == "" && member.RetireEndpoint == "" && member.RemovalApprovalRef != nil
+		memberTLSName := ""
+		if member.TLSSecretRef != nil {
+			memberTLSName = member.TLSSecretRef.Name
+		}
+		requestTLSName := ""
+		if request.Add.Workload.TLSSecret != nil {
+			requestTLSName = request.Add.Workload.TLSSecret.Name
+		}
+		if member.NodeName != request.Add.Workload.Node.Name || member.ClaimName != request.Add.Workload.Claim.Name || member.VolumeName != request.Add.Workload.Volume.Name || member.Image != request.Add.Workload.Image || member.NorthboundAddress != northboundAddress || member.SouthboundAddress != southboundAddress || member.NorthboundClientAddress != request.Add.NorthboundAddress || member.SouthboundClientAddress != request.Add.SouthboundAddress || memberTLSName != requestTLSName || request.AutomaticReplacement != autoReplacement || !autoReplacement && member.ReplaceEndpoint != request.RemoveEndpoint || !lifecycleMemberApprovalMatches(member, request) {
+			return fmt.Errorf("lifecycle member request %q changed after operation admission; restore the pinned node, storage, image, addresses and TLS Secret reference before retrying", memberName)
 		}
 		return nil
 	}
 	return fmt.Errorf("lifecycle member request %q was removed after operation admission; restore the pinned request before retrying", memberName)
+}
+
+func lifecycleMemberApprovalMatches(member operatorv1alpha1.CentralMemberSpec, request lifecycle.Request) bool {
+	name, uid := "", ""
+	if member.RemovalApprovalRef != nil {
+		name, uid = member.RemovalApprovalRef.Name, string(member.RemovalApprovalRef.UID)
+	}
+	if len(request.Databases) == 0 {
+		// Synthetic planner tests and pre-admission callers may not carry the
+		// database inventory yet. They cannot prove an approval reference, but
+		// an omitted reference remains safely equivalent to the old contract.
+		return member.RemovalApprovalRef == nil
+	}
+	if len(request.Databases) != 2 {
+		return false
+	}
+	for _, database := range request.Databases {
+		if database.Approval.Name != name || database.Approval.UID != uid {
+			return false
+		}
+	}
+	return true
 }
 
 // lifecycleRenderSpec returns the legal Raft input plus the retained topology
@@ -991,6 +1568,11 @@ func (r *KubeOVNInstallationReconciler) ensureBackupRetention(ctx context.Contex
 		return true, backup.RetentionResult{}, errors.New("backup retention requires operation leases")
 	}
 	protected := protectedBackupReferences(installation)
+	recoveryRefs, err := r.protectedRecoveryBackupReferences(ctx, installation)
+	if err != nil {
+		return true, backup.RetentionResult{}, err
+	}
+	protected = append(protected, recoveryRefs...)
 	var active []string
 	var cleanup backup.RetentionResult
 	err = r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
@@ -1008,6 +1590,46 @@ func (r *KubeOVNInstallationReconciler) ensureBackupRetention(ctx context.Contex
 		})
 	})
 	return true, cleanup, err
+}
+
+// protectedRecoveryBackupReferences keeps a durable recovery plan's backup
+// pair available until the request reaches a terminal phase. The request may
+// be waiting for an external executor, so installation status alone cannot
+// describe every pair that remains needed. Listing failure is returned to the
+// caller and prevents destructive cleanup.
+func (r *KubeOVNInstallationReconciler) protectedRecoveryBackupReferences(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) ([]string, error) {
+	if r == nil || r.Client == nil || installation == nil {
+		return nil, errors.New("backup retention cannot inspect recovery requests without a Kubernetes client")
+	}
+	requests := new(operatorv1alpha1.KubeOVNRecoveryRequestList)
+	if err := r.List(ctx, requests, client.InNamespace(installation.Namespace)); err != nil {
+		return nil, fmt.Errorf("list recovery requests for backup retention: %w", err)
+	}
+	refs := make([]string, 0, len(requests.Items))
+	for index := range requests.Items {
+		request := &requests.Items[index]
+		if request.Spec.InstallationRef != installation.Name {
+			continue
+		}
+		switch request.Status.Phase {
+		case operatorv1alpha1.RecoveryPhaseSucceeded, operatorv1alpha1.RecoveryPhaseFailed, operatorv1alpha1.RecoveryPhaseExpired:
+			continue
+		}
+		if request.Status.Plan != nil && request.Status.Plan.InstallationUID != "" && request.Status.Plan.InstallationUID != installation.UID {
+			continue
+		}
+		reference := ""
+		if request.Status.Plan != nil {
+			reference = request.Status.Plan.BackupRef
+		}
+		if reference == "" {
+			reference = request.Spec.BackupRef
+		}
+		if strings.TrimSpace(reference) != "" {
+			refs = append(refs, reference)
+		}
+	}
+	return slices.Compact(slices.Sorted(slices.Values(refs))), nil
 }
 
 func protectedBackupReferences(installation *operatorv1alpha1.KubeOVNInstallation) []string {
@@ -1096,8 +1718,7 @@ func validateScheduledBackup(status *operatorv1alpha1.BackupStatus, binding life
 	if status == nil || status.ID == "" || len(status.DatabaseRefs) != 2 || status.DatabaseRefs["OVN_Northbound"] == "" || status.DatabaseRefs["OVN_Southbound"] == "" || status.CompletedAt.IsZero() {
 		return errors.New("scheduled backup returned an incomplete verified pair")
 	}
-	refs, err := stdjson.Marshal(status.DatabaseRefs, stdjson.Deterministic(true))
-	if err != nil || status.ID != fmt.Sprintf("sha256:%x", sha256.Sum256(refs)) {
+	if !backupPairIDMatches(status) {
 		return errors.New("scheduled backup pair ID does not match its database references")
 	}
 	if strings.TrimSpace(status.Destination) != binding.Destination || status.Version != binding.Version || status.TopologyDigest != binding.TopologyDigest {
@@ -1216,6 +1837,73 @@ func (r *KubeOVNInstallationReconciler) ensureUpgradeBackup(ctx context.Context,
 	return ready, nil
 }
 
+// upgradeCRDsReady verifies the API server has established every CRD from the
+// pinned target manifest before any target workload is rolled. Applying a CRD
+// and immediately applying a workload in the same reconciliation would allow
+// discovery and admission races to turn a valid upgrade into a partial one.
+func (r *KubeOVNInstallationReconciler) upgradeCRDsReady(ctx context.Context, objects []*unstructured.Unstructured) (bool, error) {
+	for _, object := range objects {
+		if object == nil || object.GetKind() != "CustomResourceDefinition" {
+			continue
+		}
+		crd := new(apiextensionsv1.CustomResourceDefinition)
+		if err := r.Get(ctx, client.ObjectKey{Name: object.GetName()}, crd); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("read target CRD %q readiness: %w", object.GetName(), err)
+		}
+		established, accepted := false, false
+		for _, condition := range crd.Status.Conditions {
+			switch condition.Type {
+			case apiextensionsv1.Established:
+				established = condition.Status == apiextensionsv1.ConditionTrue
+			case apiextensionsv1.NamesAccepted:
+				accepted = condition.Status == apiextensionsv1.ConditionTrue
+			}
+		}
+		if !established || !accepted {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// upgradeCentralReady gates the data-plane phase on both Kubernetes rollout
+// and live central health. A workload observer alone cannot prove that OVN
+// databases or northd have accepted the new central image/configuration.
+func (r *KubeOVNInstallationReconciler) upgradeCentralReady(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, workload apply.ApplyClient, objects []*unstructured.Unstructured) (bool, error) {
+	if len(objects) == 0 {
+		return true, nil
+	}
+	observer, ok := workload.(apply.Observer)
+	if !ok {
+		return false, errors.New("central-first upgrade requires a workload observer")
+	}
+	observation, err := observer.Observe(ctx, objects)
+	if err != nil {
+		return false, fmt.Errorf("observe central rollout: %w", err)
+	}
+	if !observation.Ready {
+		return false, nil
+	}
+	if r.OVN == nil || r.Runtime == nil {
+		return false, errors.New("central-first upgrade requires OVN and runtime readiness providers")
+	}
+	ovnReport, err := r.OVN.Observe(ctx, installation)
+	if err != nil {
+		return false, fmt.Errorf("observe OVN readiness after central rollout: %w", err)
+	}
+	if !ovnReport.Ready {
+		return false, nil
+	}
+	runtimeReport := r.Runtime.Observe(ctx, installation)
+	if runtimeReport.Northd.Status != metav1.ConditionTrue {
+		return false, nil
+	}
+	return true, nil
+}
+
 func matchingLastBackup(status *operatorv1alpha1.BackupStatus, binding lifecycle.BackupBinding) *operatorv1alpha1.BackupStatus {
 	if status == nil || strings.TrimSpace(status.Destination) != binding.Destination || status.Version != binding.Version || status.TopologyDigest != binding.TopologyDigest {
 		return nil
@@ -1257,10 +1945,10 @@ func cloneUpgradeCheckpoint(checkpoint *operatorv1alpha1.UpgradeCheckpointStatus
 }
 
 func upgradeCheckpointMatches(checkpoint *operatorv1alpha1.UpgradeCheckpointStatus, binding lifecycle.BackupBinding, targetVersion string) bool {
-	if checkpoint == nil || checkpoint.ID == "" || len(checkpoint.DatabaseRefs) != 2 || checkpoint.SourceVersion != binding.Version || checkpoint.TargetVersion != targetVersion || strings.TrimSpace(checkpoint.Destination) != binding.Destination || checkpoint.TopologyDigest != binding.TopologyDigest {
+	if checkpoint == nil || checkpoint.ID == "" || len(checkpoint.DatabaseRefs) != 2 || checkpoint.SourceVersion != binding.Version || checkpoint.TargetVersion != targetVersion || strings.TrimSpace(checkpoint.Destination) != binding.Destination || checkpoint.TopologyDigest != binding.TopologyDigest || checkpoint.CapturedAt.IsZero() {
 		return false
 	}
-	return checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointVerified || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplying || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplied
+	return (checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointVerified || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplying || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplied) && backupPairIDMatches(&operatorv1alpha1.BackupStatus{ID: checkpoint.ID, DatabaseRefs: checkpoint.DatabaseRefs})
 }
 
 func (r *KubeOVNInstallationReconciler) persistUpgradeCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, checkpoint *operatorv1alpha1.UpgradeCheckpointStatus, backup *operatorv1alpha1.BackupStatus, authorized bool) error {
@@ -1298,14 +1986,219 @@ func upgradeOnlySpecChange(installation *operatorv1alpha1.KubeOVNInstallation) b
 	if installation == nil || installation.Status.ApplyCheckpoint == nil || installation.Status.ObservedVersion == "" || installation.Status.ObservedVersion == installation.Spec.Version {
 		return false
 	}
+	currentJSON, err := stdjson.Marshal(installation.Spec, stdjson.Deterministic(true))
+	if err != nil {
+		return false
+	}
+	currentHash := fmt.Sprintf("%x", sha256.Sum256(currentJSON))
+	if currentHash == installation.Status.ApplyCheckpoint.SpecHash {
+		checkpoint := installation.Status.Upgrade.Checkpoint
+		return checkpoint != nil && checkpoint.SourceVersion == installation.Status.ObservedVersion && checkpoint.TargetVersion == installation.Spec.Version && installation.Status.Topology.Inventory != nil && checkpoint.TopologyDigest == installation.Status.Topology.Inventory.Digest
+	}
 	spec := installation.Spec
 	spec.Version = installation.Status.ObservedVersion
 	data, err := stdjson.Marshal(spec, stdjson.Deterministic(true))
 	return err == nil && fmt.Sprintf("%x", sha256.Sum256(data)) == installation.Status.ApplyCheckpoint.SpecHash
 }
 
+func installationDegraded(installation *operatorv1alpha1.KubeOVNInstallation) bool {
+	if installation == nil {
+		return false
+	}
+	condition := findInstallationCondition(installation.Status.Conditions, "Degraded")
+	return condition != nil && condition.Status == metav1.ConditionTrue
+}
+
+func upgradePaused(installation *operatorv1alpha1.KubeOVNInstallation) bool {
+	if installation == nil || installation.Status.ObservedVersion == "" || installation.Status.ObservedVersion == installation.Spec.Version || !installation.Spec.Upgrade.PauseOnDegraded || !installationDegraded(installation) {
+		return false
+	}
+	direction, err := upgrade.CompareVersions(installation.Status.ObservedVersion, installation.Spec.Version)
+	return err == nil && direction == upgrade.VersionUpgrade
+}
+
+func (r *KubeOVNInstallationReconciler) reconcileRollback(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now func() time.Time) (reconcile.Result, error) {
+	current := now().UTC()
+	blocked := func(reason string) (reconcile.Result, error) {
+		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseUpgrading, "Rollback", reason
+		installation.Status.Upgrade.Rollback = rollbackBlockedStatus(installation, current, reason)
+		installation.Status.Upgrade.CanRollback = false
+		if err := r.persistRollbackStatus(ctx, installation, plan, current); err != nil {
+			return reconcile.Result{}, err
+		}
+		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if !installation.Spec.Upgrade.AllowRollback {
+		return blocked(fmt.Sprintf("version rollback from %s to %s requires spec.upgrade.allowRollback=true", installation.Status.ObservedVersion, installation.Spec.Version))
+	}
+	if r.Rollback == nil {
+		return blocked(fmt.Sprintf("version rollback from %s to %s is blocked until a version-aware database restore and workload rollback executor is configured", installation.Status.ObservedVersion, installation.Spec.Version))
+	}
+	if err := r.Rollback.Ready(); err != nil {
+		return blocked(fmt.Sprintf("version rollback from %s to %s is not ready: %v", installation.Status.ObservedVersion, installation.Spec.Version, err))
+	}
+	capabilities, ok := r.Rollback.(rollbackCapabilities)
+	if !ok {
+		return blocked("version rollback executor does not expose restore, workload and fencing capability evidence")
+	}
+	restoreReady, workloadReady, fenceReady, capabilityErr := capabilities.Capabilities()
+	if capabilityErr != nil {
+		return blocked(fmt.Sprintf("version rollback capabilities are unavailable: %v", capabilityErr))
+	}
+	fenceReady = fenceReady && r.Leases != nil
+	rollbackPlan, contract, pair, err := r.rollbackAdmission(installation, current)
+	if err != nil {
+		return blocked(err.Error())
+	}
+	contract.RestoreExecutorReady, contract.WorkloadRollbackReady, contract.FenceReady = restoreReady, workloadReady, fenceReady
+	if err := contract.Validate(); err != nil {
+		return blocked(err.Error())
+	}
+	rollback := installation.Status.Upgrade.Rollback
+	if rollback == nil || rollback.SourceVersion != rollbackPlan.SourceVersion || rollback.TargetVersion != rollbackPlan.TargetVersion || rollback.BackupID != rollbackPlan.BackupID || rollback.TopologyDigest != rollbackPlan.TopologyDigest || rollback.ChartDigest != rollbackPlan.ChartDigest || !sameRecoveryApprovalRef(rollback.ApprovalRef, rollbackPlan.ApprovalRef) || rollback.Phase == operatorv1alpha1.RollbackPhaseBlocked {
+		rollback = &operatorv1alpha1.RollbackStatus{Phase: operatorv1alpha1.RollbackPhaseQuiescing, SourceVersion: rollbackPlan.SourceVersion, TargetVersion: rollbackPlan.TargetVersion, BackupID: rollbackPlan.BackupID, TopologyDigest: rollbackPlan.TopologyDigest, ChartDigest: rollbackPlan.ChartDigest, ApprovalRef: rollbackPlan.ApprovalRef, StartedAt: metav1.NewTime(current), RPOSeconds: maxDurationSeconds(current.Sub(pair.CompletedAt.Time))}
+	}
+	if rollback.Phase == operatorv1alpha1.RollbackPhaseFailed {
+		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if rollback.Phase == operatorv1alpha1.RollbackPhaseSucceeded {
+		return reconcile.Result{}, nil
+	}
+	installation.Status.Upgrade.Rollback = rollback
+	installation.Status.Upgrade.CanRollback = true
+	if err := r.persistRollbackStatus(ctx, installation, planner.Plan{Phase: operatorv1alpha1.PhaseUpgrading, Step: "Rollback"}, current); err != nil {
+		return reconcile.Result{}, err
+	}
+	rollback = installation.Status.Upgrade.Rollback
+	next, stepErr := r.runRollbackStep(ctx, installation, rollbackPlan, rollback.Phase)
+	if stepErr != nil {
+		if errors.Is(stepErr, ErrRollbackInProgress) {
+			rollback.Reason = "rollback operation accepted; waiting for workload and OVN verification"
+			if err := r.persistRollbackStatus(ctx, installation, planner.Plan{Phase: operatorv1alpha1.PhaseUpgrading, Step: "Rollback"}, current); err != nil {
+				return reconcile.Result{}, err
+			}
+			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		rollback.Phase, rollback.Reason = operatorv1alpha1.RollbackPhaseFailed, stepErr.Error()
+		installation.Status.Upgrade.CanRollback = false
+		if err := r.persistRollbackStatus(ctx, installation, planner.Plan{Phase: operatorv1alpha1.PhaseUpgrading, Step: "Rollback", Blocking: stepErr.Error()}, current); err != nil {
+			return reconcile.Result{}, err
+		}
+		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	rollback.Phase = next
+	rollback.Reason = "rollback phase advanced"
+	if next == operatorv1alpha1.RollbackPhaseSucceeded {
+		rollback.CompletedAt = metav1.NewTime(current)
+		rollback.RTOSeconds = maxDurationSeconds(current.Sub(rollback.StartedAt.Time))
+		rollback.Reason = "target Chart, both databases and verification gates converged"
+		installation.Status.ObservedVersion = rollback.TargetVersion
+		installation.Status.ApplyCheckpoint = nil
+		installation.Status.Upgrade.CanRollback = false
+	}
+	if err := r.persistRollbackStatus(ctx, installation, planner.Plan{Phase: operatorv1alpha1.PhaseUpgrading, Step: "Rollback"}, current); err != nil {
+		return reconcile.Result{}, err
+	}
+	return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+func (r *KubeOVNInstallationReconciler) rollbackAdmission(installation *operatorv1alpha1.KubeOVNInstallation, now time.Time) (RollbackPlan, upgrade.RollbackContract, *operatorv1alpha1.BackupStatus, error) {
+	checkpoint := installation.Status.Upgrade.Checkpoint
+	if checkpoint == nil || checkpoint.SourceVersion != installation.Spec.Version || checkpoint.TargetVersion != installation.Status.ObservedVersion || checkpoint.ID == "" || len(checkpoint.DatabaseRefs) != 2 || checkpoint.DatabaseRefs["OVN_Northbound"] == "" || checkpoint.DatabaseRefs["OVN_Southbound"] == "" || checkpoint.TopologyDigest == "" || checkpoint.CapturedAt.IsZero() || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointCapturing || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointFailed {
+		return RollbackPlan{}, upgrade.RollbackContract{}, nil, fmt.Errorf("version rollback from %s to %s requires a verified target-version NB/SB backup pair", installation.Status.ObservedVersion, installation.Spec.Version)
+	}
+	pair := backupFromUpgradeCheckpoint(checkpoint)
+	if pair == nil || !backupPairIDMatches(pair) {
+		return RollbackPlan{}, upgrade.RollbackContract{}, nil, errors.New("version rollback backup checkpoint is incomplete")
+	}
+	plan := RollbackPlan{InstallationNamespace: installation.Namespace, InstallationName: installation.Name, InstallationUID: installation.UID, InstallationGeneration: installation.Generation, SourceVersion: installation.Status.ObservedVersion, TargetVersion: installation.Spec.Version, BackupID: pair.ID, DatabaseRefs: maps.Clone(pair.DatabaseRefs), Destination: pair.Destination, TopologyDigest: pair.TopologyDigest, ChartDigest: installation.Spec.Chart.Digest, ApprovalRef: installation.Spec.Upgrade.RollbackApprovalRef, Mode: "rollback"}
+	operationToken, tokenErr := rollbackOperationToken(plan)
+	if tokenErr != nil {
+		return RollbackPlan{}, upgrade.RollbackContract{}, nil, tokenErr
+	}
+	plan.OperationToken = operationToken
+	contract := upgrade.RollbackContract{FromVersion: plan.SourceVersion, ToVersion: plan.TargetVersion, FromCentralMode: string(installation.Spec.Central.Mode), ToCentralMode: string(installation.Spec.Central.Mode), AllowRollback: installation.Spec.Upgrade.AllowRollback, BackupID: plan.BackupID, DatabaseRefs: maps.Clone(plan.DatabaseRefs), TopologyDigest: plan.TopologyDigest, ChartDigest: plan.ChartDigest}
+	if pair.CompletedAt.After(now) {
+		return RollbackPlan{}, upgrade.RollbackContract{}, nil, errors.New("version rollback backup checkpoint has a future capture time")
+	}
+	return plan, contract, pair, nil
+}
+
+func (r *KubeOVNInstallationReconciler) runRollbackStep(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan RollbackPlan, phase operatorv1alpha1.RollbackPhase) (operatorv1alpha1.RollbackPhase, error) {
+	if r.Leases == nil {
+		return phase, errors.New("rollback requires installation and central operation leases")
+	}
+	var next operatorv1alpha1.RollbackPhase
+	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
+			var err error
+			next, err = r.Rollback.Step(centralCtx, plan, phase)
+			return err
+		})
+	})
+	return next, err
+}
+
+func (r *KubeOVNInstallationReconciler) persistRollbackStatus(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now time.Time) error {
+	status := installation.Status.DeepCopy()
+	status.Phase = plan.Phase
+	status.Upgrade.Step = plan.Step
+	status.ObservedGeneration = installation.Generation
+	if status.Upgrade.Rollback != nil {
+		status.Upgrade.Rollback.Reason = strings.TrimSpace(status.Upgrade.Rollback.Reason)
+	}
+	message := "version rollback is gated by a durable target-version backup pair and fenced execution"
+	if plan.Blocking != "" {
+		message = plan.Blocking
+	}
+	setCondition(&status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "RollbackInProgress", Message: message, ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now)})
+	setCondition(&status.Conditions, metav1.Condition{Type: "Degraded", Status: metav1.ConditionFalse, Reason: "RollbackGated", Message: message, ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now)})
+	updated := installationWithStatus(installation, *status)
+	if err := r.Status().Update(ctx, updated); err != nil {
+		return err
+	}
+	installation.ResourceVersion = updated.ResourceVersion
+	installation.Status = updated.Status
+	return nil
+}
+
+func maxDurationSeconds(duration time.Duration) int64 {
+	if duration <= 0 {
+		return 0
+	}
+	return int64(duration / time.Second)
+}
+
+func rollbackBlockedStatus(installation *operatorv1alpha1.KubeOVNInstallation, now time.Time, reason string) *operatorv1alpha1.RollbackStatus {
+	status := &operatorv1alpha1.RollbackStatus{
+		Phase:         operatorv1alpha1.RollbackPhaseBlocked,
+		SourceVersion: installation.Status.ObservedVersion,
+		TargetVersion: installation.Spec.Version,
+		ApprovalRef:   installation.Spec.Upgrade.RollbackApprovalRef,
+		Reason:        reason,
+	}
+	backup := installation.Status.LastBackup
+	checkpoint := installation.Status.Upgrade.Checkpoint
+	if checkpoint != nil && checkpoint.SourceVersion == installation.Spec.Version && checkpoint.TargetVersion == status.SourceVersion && rollbackCheckpointUsable(checkpoint.Phase) && !checkpoint.CapturedAt.IsZero() {
+		backup = backupFromUpgradeCheckpoint(checkpoint)
+	}
+	if backup == nil || !backupPairIDMatches(backup) || backup.Version == "" || backup.Version != installation.Spec.Version && backup.Version != status.SourceVersion || backup.TopologyDigest == "" || installation.Status.Topology.Inventory == nil || backup.TopologyDigest != installation.Status.Topology.Inventory.Digest {
+		return status
+	}
+	status.BackupID = backup.ID
+	status.TopologyDigest = backup.TopologyDigest
+	status.ChartDigest = installation.Spec.Chart.Digest
+	if !backup.CompletedAt.IsZero() {
+		age := now.Sub(backup.CompletedAt.Time)
+		if age > 0 {
+			status.RPOSeconds = int64(age / time.Second)
+		}
+	}
+	return status
+}
+
 func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, rendered chart.Rendered) error {
-	specJSON, err := stdjson.Marshal(installation.Spec, stdjson.Deterministic(true))
+	specHash, baseSpecHash, err := installationSpecHashes(installation.Spec)
 	if err != nil {
 		return err
 	}
@@ -1314,12 +2207,28 @@ func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Contex
 		return err
 	}
 	checkpoint := operatorv1alpha1.ApplyCheckpointStatus{
-		SpecHash:     fmt.Sprintf("%x", sha256.Sum256(specJSON)),
+		SpecHash:     specHash,
+		BaseSpecHash: baseSpecHash,
 		ManifestHash: fmt.Sprintf("%x", sha256.Sum256(manifestJSON)),
 		Version:      installation.Spec.Version,
 	}
 	if existing := installation.Status.ApplyCheckpoint; existing != nil {
 		if *existing != checkpoint {
+			// Older checkpoints predate BaseSpecHash. Add the derived field in
+			// place when every existing input still matches, so a restart does
+			// not turn this compatibility migration into an unauthorized apply.
+			if existing.BaseSpecHash == "" && existing.SpecHash == checkpoint.SpecHash && existing.ManifestHash == checkpoint.ManifestHash && existing.Version == checkpoint.Version {
+				previous := *existing
+				installation.Status.ApplyCheckpoint = &checkpoint
+				updated := installation.DeepCopy()
+				if err := r.Status().Update(ctx, updated); err != nil {
+					installation.Status.ApplyCheckpoint = &previous
+					return fmt.Errorf("persist apply checkpoint baseline: %w", err)
+				}
+				installation.ResourceVersion = updated.ResourceVersion
+				installation.Status = updated.Status
+				return nil
+			}
 			if !lifecycleHandoffAuthorizesApply(installation) && !upgradeAuthorizesApply(installation) {
 				return fmt.Errorf("installation inputs changed after the first apply checkpoint; a lifecycle executor is required")
 			}
@@ -1415,7 +2324,7 @@ func upgradeAuthorizesApply(installation *operatorv1alpha1.KubeOVNInstallation) 
 		return false
 	}
 	backup := backupFromUpgradeCheckpoint(checkpoint)
-	if validateScheduledBackup(backup, binding) != nil || installation.Status.ApplyCheckpoint.Version != installation.Status.ObservedVersion {
+	if validateScheduledBackup(backup, binding) != nil || (installation.Status.ApplyCheckpoint.Version != installation.Status.ObservedVersion && installation.Status.ApplyCheckpoint.Version != installation.Spec.Version) {
 		return false
 	}
 	return checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplying || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointVerified && installation.Status.Upgrade.CheckpointAuthorized
@@ -1461,15 +2370,24 @@ type RecoveryPlan struct {
 	RequestGeneration      int64
 	Reason                 string
 	Mode                   operatorv1alpha1.RecoveryMode
+	SourceVersion          string
+	TargetVersion          string
+	ChartDigest            string
+	TargetMemberRef        string
+	TargetMemberDigest     string
+	TopologyDigest         string
 	BackupRef              string
+	DatabaseRefs           map[string]string
+	ApprovalRef            *operatorv1alpha1.RecoveryApprovalReference
 	Approver               string
 	ExpiresAt              time.Time
 	Digest                 string
 }
 
-// RecoveryExecutor is an explicit integration boundary for a future central
-// admin adapter. The default operator leaves it nil, so a RecoveryRequest can
-// be validated and durably queued without mutating a database or storage.
+// RecoveryExecutor is an explicit integration boundary for central recovery.
+// The normal operator injects the non-destructive rejoin adapter; plan-only
+// mode leaves it nil, so requests are validated and durably queued without a
+// database or storage mutation.
 type RecoveryExecutor interface {
 	Execute(context.Context, RecoveryPlan) error
 }
@@ -1541,7 +2459,24 @@ func (r *RecoveryRequestReconciler) Reconcile(ctx context.Context, req reconcile
 		return reconcile.Result{RequeueAfter: time.Second}, nil
 	}
 	if err := r.Executor.Execute(ctx, plan); err != nil {
+		// A destructive executor persists its phase from a fresh object so a
+		// restart can resume it. Refresh before writing the outer request phase
+		// to avoid turning that status update into a stale-resource conflict.
+		latest := new(operatorv1alpha1.KubeOVNRecoveryRequest)
+		if refreshErr := r.Get(ctx, client.ObjectKeyFromObject(request), latest); refreshErr == nil {
+			request = latest
+		}
+		if errors.Is(err, ErrRecoveryInProgress) {
+			if progressErr := r.setRecoveryInProgress(ctx, request, now); progressErr != nil {
+				return reconcile.Result{}, progressErr
+			}
+			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+		}
 		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "ExecutionFailed", err.Error(), now, false)
+	}
+	latest := new(operatorv1alpha1.KubeOVNRecoveryRequest)
+	if refreshErr := r.Get(ctx, client.ObjectKeyFromObject(request), latest); refreshErr == nil {
+		request = latest
 	}
 	completed := metav1.NewTime(now)
 	request.Status.Phase = operatorv1alpha1.RecoveryPhaseSucceeded
@@ -1575,8 +2510,18 @@ func buildRecoveryPlan(request *operatorv1alpha1.KubeOVNRecoveryRequest, install
 	if approver == "" || len(approver) > 256 {
 		return RecoveryPlan{}, "InvalidRequest", errors.New("spec.approvedBy must contain 1 to 256 non-space characters")
 	}
+	targetMemberRef, targetMemberDigest, topologyDigest, err := recoveryTarget(request, installation)
+	if err != nil {
+		return RecoveryPlan{}, "TargetInvalid", err
+	}
 	switch request.Spec.Mode {
 	case operatorv1alpha1.RecoveryModeRejoin:
+		if targetMemberRef == "" {
+			return RecoveryPlan{}, "TargetRequired", errors.New("rejoin requires spec.targetMemberRef naming an explicit central.memberRequests entry")
+		}
+		if request.Spec.ApprovalRef != nil {
+			return RecoveryPlan{}, "ApprovalUnsupported", errors.New("rejoin recovery does not accept a destructive recovery approval")
+		}
 	case operatorv1alpha1.RecoveryModeReconvert, operatorv1alpha1.RecoveryModeFreshBootstrap:
 		if strings.TrimSpace(request.Spec.BackupRef) == "" {
 			return RecoveryPlan{}, "BackupRequired", fmt.Errorf("mode %q requires spec.backupRef bound to a verified backup pair", request.Spec.Mode)
@@ -1589,8 +2534,10 @@ func buildRecoveryPlan(request *operatorv1alpha1.KubeOVNRecoveryRequest, install
 		return RecoveryPlan{}, "Expired", errors.New("recovery request has expired")
 	}
 	backupRef := strings.TrimSpace(request.Spec.BackupRef)
+	var verifiedBackup *operatorv1alpha1.BackupStatus
 	if backupRef != "" {
-		if !matchesVerifiedBackup(installation, backupRef) {
+		verifiedBackup = verifiedRecoveryBackup(installation, backupRef)
+		if verifiedBackup == nil {
 			return RecoveryPlan{}, "BackupMismatch", errors.New("backupRef does not match the installation's current verified backup pair")
 		}
 	}
@@ -1601,21 +2548,158 @@ func buildRecoveryPlan(request *operatorv1alpha1.KubeOVNRecoveryRequest, install
 		RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID,
 		InstallationNamespace: installation.Namespace, InstallationName: installation.Name, InstallationUID: installation.UID,
 		InstallationGeneration: installation.Generation, RequestGeneration: request.Generation,
-		Reason: reason, Mode: request.Spec.Mode, BackupRef: backupRef, Approver: approver, ExpiresAt: expiresAt,
+		Reason: reason, Mode: request.Spec.Mode, SourceVersion: installation.Status.ObservedVersion, TargetVersion: installation.Spec.Version,
+		ChartDigest: installation.Spec.Chart.Digest, TargetMemberRef: targetMemberRef, TargetMemberDigest: targetMemberDigest,
+		TopologyDigest: topologyDigest, BackupRef: backupRef, ApprovalRef: request.Spec.ApprovalRef, Approver: approver, ExpiresAt: expiresAt,
+	}
+	if verifiedBackup != nil {
+		plan.DatabaseRefs = maps.Clone(verifiedBackup.DatabaseRefs)
 	}
 	plan.Digest = recoveryPlanDigest(plan)
 	return plan, "", nil
 }
 
+// recoveryTarget resolves the explicit member slot at admission time. A
+// digest is retained in the immutable plan so a later edit cannot redirect an
+// executor to a different Node, storage identity or endpoint.
+func recoveryTarget(request *operatorv1alpha1.KubeOVNRecoveryRequest, installation *operatorv1alpha1.KubeOVNInstallation) (string, string, string, error) {
+	if request == nil || installation == nil {
+		return "", "", "", errors.New("recovery target requires a request and installation")
+	}
+	ref := strings.TrimSpace(request.Spec.TargetMemberRef)
+	if ref == "" {
+		if request.Spec.Mode == operatorv1alpha1.RecoveryModeReconvert || request.Spec.Mode == operatorv1alpha1.RecoveryModeFreshBootstrap {
+			if installation.Status.Topology.Inventory == nil || installation.Status.Topology.Inventory.Digest == "" {
+				return "", "", "", errors.New("destructive recovery requires a retained topology binding")
+			}
+			return "", "", installation.Status.Topology.Inventory.Digest, nil
+		}
+		return "", "", "", nil
+	}
+	if request.Spec.Mode != operatorv1alpha1.RecoveryModeRejoin {
+		return "", "", "", errors.New("spec.targetMemberRef is only supported for rejoin recovery")
+	}
+	if installation.Spec.Central.Mode != operatorv1alpha1.CentralModeRaft || installation.Spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly || !installation.Spec.Central.DynamicMembership {
+		return "", "", "", errors.New("rejoin target requires a local raft installation with dynamic membership enabled")
+	}
+	retained := installation.Status.Topology.Inventory
+	if retained == nil || retained.Digest == "" {
+		return "", "", "", errors.New("rejoin target requires a retained central topology")
+	}
+	var target *operatorv1alpha1.CentralMemberSpec
+	for index := range installation.Spec.Central.MemberRequests {
+		member := &installation.Spec.Central.MemberRequests[index]
+		if member.Name == ref {
+			if target != nil {
+				return "", "", "", fmt.Errorf("rejoin target member %q is ambiguous", ref)
+			}
+			target = member
+		}
+	}
+	if target == nil {
+		return "", "", "", fmt.Errorf("rejoin target member %q is not present in central.memberRequests", ref)
+	}
+	if target.RetireEndpoint != "" {
+		return "", "", "", errors.New("rejoin target cannot be a retirement-only member request")
+	}
+	if err := validateRecoveryTargetMember(*target); err != nil {
+		return "", "", "", fmt.Errorf("validate rejoin target %q: %w", ref, err)
+	}
+	data, err := stdjson.Marshal(*target, stdjson.Deterministic(true))
+	if err != nil {
+		return "", "", "", fmt.Errorf("marshal rejoin target %q: %w", ref, err)
+	}
+	return ref, fmt.Sprintf("sha256:%x", sha256.Sum256(data)), retained.Digest, nil
+}
+
+func validateRecoveryTargetMember(member operatorv1alpha1.CentralMemberSpec) error {
+	if len(kvalidation.IsDNS1123Label(member.Name)) != 0 {
+		return errors.New("target member name must be a DNS label")
+	}
+	if member.ReplaceEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.ReplaceEndpoint)) != 0 {
+		return errors.New("target member replaceEndpoint must be a DNS subdomain")
+	}
+	if member.RetireEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.RetireEndpoint)) != 0 {
+		return errors.New("target member retireEndpoint must be a DNS subdomain")
+	}
+	if member.ReplaceEndpoint != "" && member.RetireEndpoint != "" {
+		return errors.New("target member cannot set both replaceEndpoint and retireEndpoint")
+	}
+	for _, value := range []string{member.NodeName, member.ClaimName, member.VolumeName, member.Image, member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+		if strings.TrimSpace(value) == "" {
+			return errors.New("target member requires node, storage, image and all NB/SB addresses")
+		}
+	}
+	image, digest, found := strings.Cut(member.Image, "@sha256:")
+	if !found || image == "" || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
+		return errors.New("target member image must be pinned to a sha256 digest")
+	}
+	if err := validateMemberTLSContract(member); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateMemberTLSContract(member operatorv1alpha1.CentralMemberSpec) error {
+	if member.TLSSecretRef != nil && len(kvalidation.IsDNS1123Subdomain(member.TLSSecretRef.Name)) != 0 {
+		return errors.New("target member tlsSecretRef.name must be a DNS subdomain")
+	}
+	protocol := ""
+	for _, address := range []string{member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+		current, endpoint, found := strings.Cut(address, ":")
+		if !found || endpoint == "" || current != "tcp" && current != "ssl" {
+			return errors.New("target member NB/SB addresses must use tcp or ssl")
+		}
+		if protocol == "" {
+			protocol = current
+		} else if protocol != current {
+			return errors.New("target member NB/SB addresses must use one protocol")
+		}
+	}
+	if (protocol == "ssl") != (member.TLSSecretRef != nil) {
+		return errors.New("target member listener protocol and tlsSecretRef must agree")
+	}
+	return nil
+}
+
+func verifiedRecoveryBackup(installation *operatorv1alpha1.KubeOVNInstallation, reference string) *operatorv1alpha1.BackupStatus {
+	if installation == nil || strings.TrimSpace(reference) == "" || installation.Status.ObservedVersion == "" || installation.Status.Topology.Inventory == nil || installation.Status.Topology.Inventory.Digest == "" {
+		return nil
+	}
+	candidates := []*operatorv1alpha1.BackupStatus{installation.Status.LastBackup}
+	checkpoint := installation.Status.Upgrade.Checkpoint
+	if checkpoint != nil && (checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointVerified || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplying || checkpoint.Phase == operatorv1alpha1.UpgradeCheckpointApplied) {
+		candidates = append(candidates, backupFromUpgradeCheckpoint(checkpoint))
+	}
+	for _, backup := range candidates {
+		if backup == nil || backup.ID != reference || backup.Version == "" || backup.Version != installation.Status.ObservedVersion || strings.TrimSpace(backup.Destination) != backupDestination(installation) || backup.TopologyDigest != installation.Status.Topology.Inventory.Digest || backup.CompletedAt.IsZero() {
+			continue
+		}
+		if !backupPairIDMatches(backup) {
+			continue
+		}
+		copy := new(operatorv1alpha1.BackupStatus)
+		backup.DeepCopyInto(copy)
+		return copy
+	}
+	return nil
+}
+
+// backupPairIDMatches verifies the content-addressed binding between the
+// durable pair ID and both database references before a recovery plan can use
+// the pair. Status fields are untrusted input after an API-server restore or
+// manual edit; non-empty references alone do not prove they belong to the
+// recorded pair.
+func backupPairIDMatches(status *operatorv1alpha1.BackupStatus) bool {
+	if status == nil || len(status.DatabaseRefs) != 2 || status.DatabaseRefs["OVN_Northbound"] == "" || status.DatabaseRefs["OVN_Southbound"] == "" {
+		return false
+	}
+	refs, err := stdjson.Marshal(status.DatabaseRefs, stdjson.Deterministic(true))
+	return err == nil && status.ID == fmt.Sprintf("sha256:%x", sha256.Sum256(refs))
+}
+
 func matchesVerifiedBackup(installation *operatorv1alpha1.KubeOVNInstallation, reference string) bool {
-	if installation == nil || strings.TrimSpace(reference) == "" || installation.Status.LastBackup == nil {
-		return false
-	}
-	backup := installation.Status.LastBackup
-	if backup.ID != reference || backup.ID == "" || backup.Version == "" || backup.Version != installation.Status.ObservedVersion || backup.TopologyDigest == "" || installation.Status.Topology.Inventory == nil || backup.TopologyDigest != installation.Status.Topology.Inventory.Digest || backup.CompletedAt.IsZero() {
-		return false
-	}
-	return len(backup.DatabaseRefs) == 2 && backup.DatabaseRefs["OVN_Northbound"] != "" && backup.DatabaseRefs["OVN_Southbound"] != ""
+	return verifiedRecoveryBackup(installation, reference) != nil
 }
 
 func recoveryPlanDigest(plan RecoveryPlan) string {
@@ -1630,14 +2714,24 @@ func recoveryPlanDigest(plan RecoveryPlan) string {
 		RequestGeneration      int64
 		Reason                 string
 		Mode                   operatorv1alpha1.RecoveryMode
+		SourceVersion          string
+		TargetVersion          string
+		ChartDigest            string
+		TargetMemberRef        string
+		TargetMemberDigest     string
+		TopologyDigest         string
 		BackupRef              string
+		DatabaseRefs           map[string]string
+		ApprovalRef            *operatorv1alpha1.RecoveryApprovalReference
 		Approver               string
 		ExpiresAt              string
 	}{
 		RequestNamespace: plan.RequestNamespace, RequestName: plan.RequestName, RequestUID: plan.RequestUID,
 		InstallationNamespace: plan.InstallationNamespace, InstallationName: plan.InstallationName, InstallationUID: plan.InstallationUID,
 		InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration,
-		Reason: plan.Reason, Mode: plan.Mode, BackupRef: plan.BackupRef, Approver: plan.Approver,
+		Reason: plan.Reason, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest,
+		TargetMemberRef: plan.TargetMemberRef, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest,
+		BackupRef: plan.BackupRef, DatabaseRefs: plan.DatabaseRefs, ApprovalRef: plan.ApprovalRef, Approver: plan.Approver,
 		ExpiresAt: plan.ExpiresAt.UTC().Format(time.RFC3339Nano),
 	}, stdjson.Deterministic(true))
 	if err != nil {
@@ -1647,14 +2741,21 @@ func recoveryPlanDigest(plan RecoveryPlan) string {
 }
 
 func recoveryPlanStatus(plan RecoveryPlan) *operatorv1alpha1.RecoveryPlanStatus {
-	return &operatorv1alpha1.RecoveryPlanStatus{Digest: plan.Digest, InstallationUID: plan.InstallationUID, InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration, Mode: plan.Mode, BackupRef: plan.BackupRef, ExpiresAt: metav1.NewTime(plan.ExpiresAt)}
+	return &operatorv1alpha1.RecoveryPlanStatus{Digest: plan.Digest, InstallationUID: plan.InstallationUID, InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest, TargetMemberRef: plan.TargetMemberRef, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest, BackupRef: plan.BackupRef, DatabaseRefs: maps.Clone(plan.DatabaseRefs), ApprovalRef: plan.ApprovalRef, ExpiresAt: metav1.NewTime(plan.ExpiresAt)}
 }
 
 func sameRecoveryPlan(left, right *operatorv1alpha1.RecoveryPlanStatus) bool {
 	if left == nil || right == nil {
 		return left == right
 	}
-	return left.Digest == right.Digest && left.InstallationUID == right.InstallationUID && left.InstallationGeneration == right.InstallationGeneration && left.RequestGeneration == right.RequestGeneration && left.Mode == right.Mode && left.BackupRef == right.BackupRef && left.ExpiresAt.Time.Equal(right.ExpiresAt.Time)
+	return left.Digest == right.Digest && left.InstallationUID == right.InstallationUID && left.InstallationGeneration == right.InstallationGeneration && left.RequestGeneration == right.RequestGeneration && left.Mode == right.Mode && left.SourceVersion == right.SourceVersion && left.TargetVersion == right.TargetVersion && left.ChartDigest == right.ChartDigest && left.TargetMemberRef == right.TargetMemberRef && left.TargetMemberDigest == right.TargetMemberDigest && left.TopologyDigest == right.TopologyDigest && left.BackupRef == right.BackupRef && maps.Equal(left.DatabaseRefs, right.DatabaseRefs) && sameRecoveryApprovalRef(left.ApprovalRef, right.ApprovalRef) && left.ExpiresAt.Time.Equal(right.ExpiresAt.Time)
+}
+
+func sameRecoveryApprovalRef(left, right *operatorv1alpha1.RecoveryApprovalReference) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 func recoveryCondition(generation int64, conditionType string, status metav1.ConditionStatus, reason, message string, now time.Time) metav1.Condition {
@@ -1672,6 +2773,13 @@ func (r *RecoveryRequestReconciler) setRecoveryExecuting(ctx context.Context, re
 	request.Status.Phase = operatorv1alpha1.RecoveryPhaseExecuting
 	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; approvedBy is self-reported and does not authorize execution", now))
 	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionTrue, "ExecutionStarted", "explicit recovery executor was admitted to execute the persisted plan", now))
+	return r.updateRecoveryStatus(ctx, request)
+}
+
+func (r *RecoveryRequestReconciler) setRecoveryInProgress(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, now time.Time) error {
+	request.Status.Phase = operatorv1alpha1.RecoveryPhaseExecuting
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; approvedBy is self-reported and does not authorize execution", now))
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionTrue, "ExecutionInProgress", "the durable rejoin operation is advancing and will be retried until both databases and the workload converge", now))
 	return r.updateRecoveryStatus(ctx, request)
 }
 

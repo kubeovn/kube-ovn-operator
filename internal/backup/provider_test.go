@@ -19,7 +19,9 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
 	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -42,11 +44,13 @@ func testSnapshot() ovnadmin.Snapshot {
 }
 
 type testSource struct {
-	data     []byte
-	identity Identity
-	snapshot ovnadmin.Snapshot
-	after    func()
-	err      error
+	data        []byte
+	identity    Identity
+	snapshot    ovnadmin.Snapshot
+	after       func()
+	err         error
+	restored    []byte
+	fencedToken *lease.FenceToken
 }
 
 func (s *testSource) Identity(context.Context, string) (Identity, error) { return s.identity, nil }
@@ -61,6 +65,21 @@ func (s *testSource) Stream(_ context.Context, _, _ string, destination io.Write
 		s.after()
 	}
 	return errors.Join(err, s.err)
+}
+
+func (s *testSource) Restore(_ context.Context, _, _ string, source io.Reader) error {
+	data, err := io.ReadAll(source)
+	if err != nil {
+		return err
+	}
+	s.restored = data
+	return nil
+}
+
+func (s *testSource) RestoreFenced(ctx context.Context, database, endpoint string, source io.Reader, token lease.FenceToken) error {
+	s.fencedToken = new(lease.FenceToken)
+	*s.fencedToken = token
+	return s.Restore(ctx, database, endpoint, source)
 }
 
 func fixture(t *testing.T) (*Provider, *testSource, string) {
@@ -81,8 +100,18 @@ func withLeases(t *testing.T, fn func(context.Context) error) error {
 	if err := coordinationv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	manager := lease.New(fake.NewClientBuilder().WithScheme(scheme).Build())
+	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
+	manager := lease.New(kube)
 	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "backup", Namespace: "test", UID: "installation"}
+	controller := true
+	for _, scope := range []lease.Scope{lease.Installation, lease.Central} {
+		if err := kube.Create(t.Context(), &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+			Name: lease.Name(scope, installation.Name), Namespace: installation.Namespace, UID: types.UID(string(scope) + "-lease"),
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation", Name: installation.Name, UID: installation.UID, Controller: &controller}},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return manager.With(t.Context(), installation, lease.Installation, func(ctx context.Context) error {
 		return manager.With(ctx, installation, lease.Central, fn)
 	})
@@ -159,6 +188,88 @@ func TestCaptureSurvivesRestartAndRejectsChanges(t *testing.T) {
 		}
 		if err := restarted.Verify(ctx, source.snapshot, ref); err == nil {
 			t.Fatal("accepted modified metadata")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSameFenceRejectsMemberHealthAndLeaderChanges(t *testing.T) {
+	leader := membership.Member{ServerID: "11111111-1111-1111-1111-111111111111", Address: "tcp:127.0.0.1:6643", Healthy: true, Leader: true}
+	follower := membership.Member{ServerID: "22222222-2222-2222-2222-222222222222", Address: "tcp:127.0.0.1:6644", Healthy: true}
+	base := testSnapshot()
+	base.Members = []membership.Member{leader, follower}
+	base.LeaderServerID = leader.ServerID
+
+	changedHealth := base
+	changedHealth.Members = slices.Clone(base.Members)
+	changedHealth.Members[1].Healthy = false
+	if sameFence(base, changedHealth) {
+		t.Fatal("sameFence accepted a member health change")
+	}
+
+	changedLeader := base
+	changedLeader.Members = slices.Clone(base.Members)
+	changedLeader.Members[0].Leader = false
+	changedLeader.Members[1].Leader = true
+	changedLeader.LeaderServerID = follower.ServerID
+	if sameFence(base, changedLeader) {
+		t.Fatal("sameFence accepted a leader role change")
+	}
+
+	reordered := base
+	reordered.Members = []membership.Member{follower, leader}
+	if !sameFence(base, reordered) {
+		t.Fatal("sameFence rejected an order-only member change")
+	}
+}
+
+func TestRestoreReopensAndStreamsVerifiedNativeBackup(t *testing.T) {
+	provider, source, _ := fixture(t)
+	err := withLeases(t, func(ctx context.Context) error {
+		ref, err := provider.Capture(ctx, "OVN_Northbound", "central-0")
+		if err != nil {
+			return err
+		}
+		if err := provider.Restore(ctx, "OVN_Northbound", "central-0", ref); err != nil {
+			return err
+		}
+		if !bytes.Equal(source.restored, source.data) {
+			return errors.New("restore did not stream the verified native backup bytes")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRestoreFencedRejectsStaleTokenBeforeNativeInput(t *testing.T) {
+	provider, source, _ := fixture(t)
+	err := withLeases(t, func(ctx context.Context) error {
+		ref, err := provider.Capture(ctx, "OVN_Northbound", "central-0")
+		if err != nil {
+			return err
+		}
+		token, err := lease.Token(ctx, lease.Central)
+		if err != nil {
+			return err
+		}
+		stale := token
+		stale.Epoch++
+		if err := provider.RestoreFenced(ctx, "OVN_Northbound", "central-0", ref, stale); err == nil {
+			return errors.New("stale restore token was accepted")
+		}
+		if source.fencedToken != nil || source.restored != nil {
+			return errors.New("stale restore reached native input")
+		}
+		if err := provider.RestoreFenced(ctx, "OVN_Northbound", "central-0", ref, token); err != nil {
+			return err
+		}
+		if source.fencedToken == nil || *source.fencedToken != token {
+			return errors.New("native restore did not receive the current fence token")
 		}
 		return nil
 	})
