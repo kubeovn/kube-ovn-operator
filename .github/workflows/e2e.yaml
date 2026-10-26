@@ -28,9 +28,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: helm/kind-action@v1.12.0
-        with:
-          cluster_name: kube-ovn-operator-e2e
+      - name: Install kind
+        run: |
+          curl --fail --location --silent --show-error \
+            https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64 \
+            --output /tmp/kind
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+      - name: Create kind cluster
+        run: kind create cluster --name kube-ovn-operator-e2e --wait 120s
       - name: Run operator smoke test
         run: make e2e
       - name: Run render, apply and observe integration
@@ -62,11 +69,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: helm/kind-action@v1.12.0
-        with:
-          cluster_name: kube-ovn-operator-controller-e2e
-          config: test/e2e/kind-controller.yaml
-          wait: 120s
+      - name: Install kind
+        run: |
+          curl --fail --location --silent --show-error \
+            https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64 \
+            --output /tmp/kind
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+      - name: Create kind cluster
+        run: kind create cluster --name kube-ovn-operator-controller-e2e --config test/e2e/kind-controller.yaml --wait 120s
       - name: Verify default Controller Deployment handoff admission
         run: bash test/e2e/controller-handoff-smoke.sh
       - name: Diagnose default Controller handoff failure
