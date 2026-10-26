@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -128,5 +130,45 @@ func TestReconcileRetainsTopologyOnFailureAndNeverUsesItAsHealth(t *testing.T) {
 	got = run()
 	if got.Status.Topology.Inventory == nil || *got.Status.Topology.Inventory != ref || meta.IsStatusConditionTrue(got.Status.Conditions, "TopologyRecorded") {
 		t.Fatalf("stale rollout reused identity as health: %+v", got.Status)
+	}
+}
+
+func TestReconcileCordonedCentralNodeFailsClosedBeforeWorkloadApply(t *testing.T) {
+	scheme := controllerScheme(t)
+	ref := &api.CentralTopologyReference{Name: "inventory", UID: "inventory-uid", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	installation := &api.KubeOVNInstallation{
+		ObjectMeta: metav1.ObjectMeta{Name: "cordoned", Namespace: "default", UID: "cordoned-uid", Generation: 1},
+		Spec: api.KubeOVNInstallationSpec{
+			Version: "v1.17.0", Mode: api.InstallationModeControlPlaneOnly,
+			Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3},
+		},
+		Status: api.KubeOVNInstallationStatus{Topology: api.TopologyStatus{Inventory: ref}},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+	workload := &observedWorkload{observation: apply.Observation{Ready: true, ReadyCentralReplicas: 3}}
+	provider := topologyProviderFunc(func(context.Context, *api.KubeOVNInstallation) (*api.CentralTopologyReference, error) {
+		return ref, &health.NodeLifecycleError{NodeName: "node-0", Unschedulable: true}
+	})
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme, Leases: lease.New(kube), Renderer: objectRenderer{}, Workload: workload, Topology: provider}
+	result, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(installation)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != 30*time.Second || workload.applyCalls != 0 {
+		t.Fatalf("cordoned central node was not fail-closed: result=%+v applyCalls=%d", result, workload.applyCalls)
+	}
+	got := new(api.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Topology.Inventory == nil || *got.Status.Topology.Inventory != *ref {
+		t.Fatalf("cordoned node failure discarded retained topology: %+v", got.Status.Topology)
+	}
+	topologyCondition := meta.FindStatusCondition(got.Status.Conditions, "TopologyRecorded")
+	if topologyCondition == nil || topologyCondition.Status != metav1.ConditionFalse || topologyCondition.Reason != "CentralNodeDraining" {
+		t.Fatalf("cordoned node did not produce CentralNodeDraining: %+v", got.Status.Conditions)
+	}
+	if got.Status.Phase != api.PhaseDegraded || meta.IsStatusConditionTrue(got.Status.Conditions, "Ready") {
+		t.Fatalf("cordoned node was reported ready: %+v", got.Status)
 	}
 }

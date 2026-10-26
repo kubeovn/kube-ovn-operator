@@ -417,3 +417,339 @@ printf '%s\n' "$journal_json" | grep -Fq '"phase":"Complete"'
 printf '%s\n' "$journal_json" | grep -Fq "$replacement_set"
 echo "immutable request and completion journal verified"
 echo "default controller completed native Deployment replacement: $target_pod -> $replacement_pod; StatefulSet=$replacement_set; inventory=$final_inventory"
+
+# Exercise automatic loss inference after the explicit replacement. The
+# approval is created before the endpoint is lost, and the replacement request
+# deliberately omits replaceEndpoint. Cordon plus Pod deletion makes the old
+# endpoint uniquely lost while preserving the healthy Deployment survivor.
+automatic_target_pod=$(kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json | python3 -c '
+import json
+import sys
+
+for item in json.load(sys.stdin).get("items", []):
+    owners = item.get("metadata", {}).get("ownerReferences", [])
+    if any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in owners):
+        print(item["metadata"]["name"])
+        break
+')
+if [[ -z "${automatic_target_pod}" ]]; then
+  echo 'could not identify a Deployment Pod for automatic loss replacement' >&2
+  exit 1
+fi
+automatic_target_node=$(kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system -o jsonpath='{.spec.nodeName}')
+if [[ -z "${automatic_target_node}" ]]; then
+  echo "Deployment Pod ${automatic_target_pod} has no target Node" >&2
+  exit 1
+fi
+
+automatic_claim_name=controller-auto-replacement-data
+automatic_volume_name=controller-auto-replacement-volume
+automatic_storage_path=/tmp/kube-ovn-operator-controller-auto-replacement
+docker exec --user 65532:65532 "${worker}" mkdir -m 0700 "${automatic_storage_path}"
+automatic_claim_uid=""
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${automatic_claim_name}
+  namespace: kube-ovn-operator-system
+spec:
+  storageClassName: ""
+  volumeName: ${automatic_volume_name}
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+YAML
+for _ in $(seq 1 60); do
+  automatic_claim_uid=$(kubectl get pvc "${automatic_claim_name}" -n kube-ovn-operator-system -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+  if [[ -n "${automatic_claim_uid}" ]]; then
+    break
+  fi
+  sleep 1
+done
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ${automatic_volume_name}
+spec:
+  storageClassName: ""
+  capacity:
+    storage: 1Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  claimRef:
+    name: ${automatic_claim_name}
+    namespace: kube-ovn-operator-system
+    uid: ${automatic_claim_uid}
+  hostPath:
+    path: ${automatic_storage_path}
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [${worker}]
+YAML
+kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/${automatic_claim_name} -n kube-ovn-operator-system --timeout=60s >/dev/null
+
+automatic_inventory=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.inventory.name}')
+automatic_topology=$(kubectl get configmap "${automatic_inventory}" -n kube-ovn-operator-system -o jsonpath='{.data.topology\.json}')
+installation_uid=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.metadata.uid}')
+automatic_approval_name=automatic-lost-approval
+automatic_approval_operation_id=eeee0000-1111-2222-3333-444444444444
+TOPOLOGY_JSON="${automatic_topology}" TARGET_POD="${automatic_target_pod}" INSTALLATION_UID="${installation_uid}" APPROVAL_NAME="${automatic_approval_name}" OPERATION_ID="${automatic_approval_operation_id}" python3 - <<'PYTHON' >"${test_dir}/automatic-approval.json"
+import datetime
+import json
+import os
+
+topology = json.loads(os.environ["TOPOLOGY_JSON"])["topology"]["members"]
+target = next((member for member in topology if member["pod"]["name"] == os.environ["TARGET_POD"]), None)
+if target is None:
+    raise SystemExit(f"target Pod {os.environ['TARGET_POD']} is absent from retained topology")
+targets = [
+    {
+        "database": database["database"],
+        "clusterID": database["clusterID"],
+        "serverID": database["serverID"],
+        "address": database["address"],
+    }
+    for database in target["databases"]
+]
+if len(targets) != 2:
+    raise SystemExit("automatic loss approval requires both NB and SB targets")
+expires = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)).isoformat().replace("+00:00", "Z")
+approval = {
+    "apiVersion": "operator.kubeovn.io/v1alpha1",
+    "kind": "KubeOVNMemberRemovalApproval",
+    "metadata": {"name": os.environ["APPROVAL_NAME"], "namespace": "kube-ovn-operator-system"},
+    "spec": {
+        "decision": {
+            "installationRef": {"name": "controller-retirement", "uid": os.environ["INSTALLATION_UID"]},
+            "operationID": os.environ["OPERATION_ID"],
+            "targets": targets,
+            "reason": "kind smoke test for approved automatic endpoint loss replacement",
+            "expiresAt": expires,
+        }
+    },
+}
+print(json.dumps(approval))
+PYTHON
+kubectl apply -f "${test_dir}/automatic-approval.json" >/dev/null
+automatic_approval_uid=$(kubectl get kubeovnmemberremovalapproval "${automatic_approval_name}" -n kube-ovn-operator-system -o jsonpath='{.metadata.uid}')
+if [[ -z "${automatic_approval_uid}" ]]; then
+  echo 'automatic loss approval has no UID' >&2
+  exit 1
+fi
+
+cat >"${test_dir}/automatic-replacement.json" <<JSON
+{"spec":{"central":{"memberRequests":[{"name":"automatic-replacement","nodeName":"${worker}","claimName":"${automatic_claim_name}","volumeName":"${automatic_volume_name}","image":"${member_image}","northboundAddress":"tcp:${worker_ip}:6643","southboundAddress":"tcp:${worker_ip}:6644","northboundClientAddress":"tcp:${worker_ip}:6641","southboundClientAddress":"tcp:${worker_ip}:6642","removalApprovalRef":{"name":"${automatic_approval_name}","uid":"${automatic_approval_uid}"}}]}}}
+JSON
+kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/automatic-replacement.json" >/dev/null
+kubectl cordon "${automatic_target_node}" >/dev/null
+kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --wait=false >/dev/null
+
+previous_request_name=${request_name}
+automatic_request_name=""
+for _ in $(seq 1 120); do
+  automatic_request_name=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.requestName}' 2>/dev/null || true)
+  if [[ -n "${automatic_request_name}" && "${automatic_request_name}" != "${previous_request_name}" ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ -z "${automatic_request_name}" || "${automatic_request_name}" == "${previous_request_name}" ]]; then
+  kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
+  cat "${test_dir}/operator.log"
+  exit 1
+fi
+automatic_request_json=$(kubectl get configmap "${automatic_request_name}" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
+printf '%s\n' "${automatic_request_json}" | grep -Fq "${automatic_target_pod}"
+printf '%s\n' "${automatic_request_json}" | grep -Fq '"automaticReplacement":true'
+printf '%s\n' "${automatic_request_json}" | grep -Fq '"endpointMissing":true'
+printf '%s\n' "${automatic_request_json}" | grep -Fq "${automatic_approval_name}"
+printf '%s\n' "${automatic_request_json}" | grep -Fq "${automatic_approval_operation_id}"
+automatic_journal_name=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.journalName}')
+echo "automatic loss replacement admitted: ${automatic_target_pod} on ${automatic_target_node}; request=${automatic_request_name}"
+
+automatic_phase=""
+for _ in $(seq 1 240); do
+  automatic_phase=$(journal_phase "${automatic_journal_name}" 2>/dev/null || true)
+  if [[ "${automatic_phase}" == Complete ]]; then
+    break
+  fi
+  sleep 2
+done
+if [[ "${automatic_phase}" != Complete ]]; then
+  echo "automatic loss replacement did not reach Complete (last phase: ${automatic_phase})" >&2
+  kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
+  kubectl get deployments,statefulsets,pods,configmaps -n kube-ovn-operator-system -o wide || true
+  cat "${test_dir}/operator.log"
+  exit 1
+fi
+automatic_replicas=$(kubectl get deployment/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
+if [[ "${automatic_replicas}" != 1 ]]; then
+  echo "expected Chart Deployment to scale to one replica after automatic replacement, got ${automatic_replicas}" >&2
+  exit 1
+fi
+if kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
+  echo "automatically retired Deployment Pod ${automatic_target_pod} still exists" >&2
+  exit 1
+fi
+automatic_set=""
+automatic_pod=""
+for _ in $(seq 1 120); do
+  automatic_set=$(kubectl get statefulsets -n kube-ovn-operator-system -l 'operator.kubeovn.io/member-record' -o json | OLD_SET="${replacement_set}" python3 -c '
+import json
+import os
+import sys
+
+for item in json.load(sys.stdin).get("items", []):
+    if item["metadata"]["name"] != os.environ["OLD_SET"]:
+        print(item["metadata"]["name"])
+        break
+')
+  if [[ -n "${automatic_set}" ]]; then
+    automatic_pod=$(kubectl get pods -n kube-ovn-operator-system -l 'operator.kubeovn.io/member-record,app=ovn-central' -o json | SET_NAME="${automatic_set}" python3 -c '
+import json
+import os
+import sys
+
+for item in json.load(sys.stdin).get("items", []):
+    owners = item.get("metadata", {}).get("ownerReferences", [])
+    if any(owner.get("controller") and owner.get("kind") == "StatefulSet" and owner.get("name") == os.environ["SET_NAME"] for owner in owners):
+        print(item["metadata"]["name"])
+        break
+')
+    ready=$(kubectl get statefulset "${automatic_set}" -n kube-ovn-operator-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+    if [[ "${ready}" == 1 && -n "${automatic_pod}" ]]; then
+      break
+    fi
+  fi
+  sleep 2
+done
+if [[ -z "${automatic_set}" || -z "${automatic_pod}" ]]; then
+  echo 'automatic replacement StatefulSet or Pod did not become ready' >&2
+  kubectl get statefulsets,pods -n kube-ovn-operator-system -l 'operator.kubeovn.io/member-record' -o wide || true
+  exit 1
+fi
+if [[ "$(kubectl get kubeovnmemberremovalapproval "${automatic_approval_name}" -n kube-ovn-operator-system -o jsonpath='{.status.phase}')" != Completed ]]; then
+  echo 'automatic loss approval did not reach Completed' >&2
+  kubectl get kubeovnmemberremovalapproval "${automatic_approval_name}" -n kube-ovn-operator-system -o yaml || true
+  exit 1
+fi
+automatic_final_inventory=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.inventory.name}')
+automatic_final_topology=$(kubectl get configmap "${automatic_final_inventory}" -n kube-ovn-operator-system -o jsonpath='{.data.topology\.json}')
+AUTO_TOPOLOGY="${automatic_final_topology}" TARGET_POD="${automatic_target_pod}" AUTOMATIC_POD="${automatic_pod}" python3 - <<'PYTHON'
+import json
+import os
+
+members = json.loads(os.environ["AUTO_TOPOLOGY"])["topology"]["members"]
+if len(members) != 3:
+    raise SystemExit(f"expected three members after automatic replacement, got {len(members)}")
+if any(member["pod"]["name"] == os.environ["TARGET_POD"] for member in members):
+    raise SystemExit("automatically retired Deployment Pod remains in the topology")
+replacement = [member for member in members if member["pod"]["name"] == os.environ["AUTOMATIC_POD"]]
+if len(replacement) != 1 or replacement[0]["workload"]["kind"] != "StatefulSet":
+    raise SystemExit("automatic replacement StatefulSet is missing from the topology")
+if sum(member["workload"]["kind"] == "Deployment" for member in members) != 1:
+    raise SystemExit("automatic replacement did not leave one Chart Deployment member")
+if sum(member["workload"]["kind"] == "StatefulSet" for member in members) != 2:
+    raise SystemExit("automatic replacement did not retain two StatefulSet members")
+PYTHON
+echo "automatic Deployment replacement completed: ${automatic_target_pod} retired and Chart Deployment scaled to one"
+echo "automatic replacement StatefulSet ready: ${automatic_set}/${automatic_pod}"
+request_name=${automatic_request_name}
+
+# Exercise a second lifecycle retirement after automatic replacement. The
+# automatic replacement leaves one Chart Deployment member and two
+# independently managed StatefulSet members. Reducing the desired count to two
+# must remove exactly one healthy StatefulSet member while preserving the Chart
+# Deployment and the other replacement.
+scale_in_target=$(kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json | python3 -c '
+import json
+import sys
+
+for item in json.load(sys.stdin).get("items", []):
+    owners = item.get("metadata", {}).get("ownerReferences", [])
+    if any(owner.get("controller") and owner.get("kind") == "StatefulSet" for owner in owners):
+        print(item["metadata"]["name"])
+        break
+')
+if [[ -z "${scale_in_target}" ]]; then
+  echo 'could not identify an independent StatefulSet Pod for scale-in' >&2
+  exit 1
+fi
+cat >"${test_dir}/scale-in.json" <<JSON
+{"spec":{"central":{"replicas":2,"memberRequests":[{"name":"retire-chart","retireEndpoint":"${scale_in_target}"}]}}}
+JSON
+previous_request_name=${request_name}
+kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/scale-in.json" >/dev/null
+
+scale_in_request=""
+for _ in $(seq 1 90); do
+  scale_in_request=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.requestName}' 2>/dev/null || true)
+  if [[ -n "${scale_in_request}" && "${scale_in_request}" != "${previous_request_name}" ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ -z "${scale_in_request}" || "${scale_in_request}" == "${previous_request_name}" ]]; then
+  kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
+  cat "${test_dir}/operator.log"
+  exit 1
+fi
+scale_in_journal=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.journalName}')
+scale_in_request_json=$(kubectl get configmap "${scale_in_request}" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
+printf '%s\n' "${scale_in_request_json}" | grep -Fq "${scale_in_target}"
+printf '%s\n' "${scale_in_request_json}" | grep -Fq '"kind":"StatefulSet"'
+
+scale_in_phase=""
+for _ in $(seq 1 240); do
+  scale_in_phase=$(journal_phase "${scale_in_journal}" 2>/dev/null || true)
+  if [[ "${scale_in_phase}" == Complete ]]; then
+    break
+  fi
+  sleep 2
+done
+if [[ "${scale_in_phase}" != Complete ]]; then
+  echo "StatefulSet retirement did not reach Complete (last phase: ${scale_in_phase})" >&2
+  kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
+  kubectl get deployments,statefulsets,pods,configmaps -n kube-ovn-operator-system -o wide || true
+  cat "${test_dir}/operator.log"
+  exit 1
+fi
+scale_in_replicas=$(kubectl get deployment/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
+if [[ "${scale_in_replicas}" != 1 ]]; then
+  echo "expected Chart Deployment to remain at one replica after StatefulSet retirement, got ${scale_in_replicas}" >&2
+  exit 1
+fi
+if kubectl get pod "${scale_in_target}" -n kube-ovn-operator-system >/dev/null 2>&1; then
+  echo "retired StatefulSet Pod ${scale_in_target} still exists after scale-in" >&2
+  exit 1
+fi
+echo "StatefulSet retirement completed: ${scale_in_target} retired after joint convergence"
+
+scale_in_inventory=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.inventory.name}')
+scale_in_topology=$(kubectl get configmap "${scale_in_inventory}" -n kube-ovn-operator-system -o jsonpath='{.data.topology\.json}')
+SCALE_IN_TOPOLOGY="${scale_in_topology}" RETIRED_POD="${scale_in_target}" python3 - <<'PYTHON'
+import json
+import os
+
+members = json.loads(os.environ["SCALE_IN_TOPOLOGY"])["topology"]["members"]
+if len(members) != 2:
+    raise SystemExit(f"expected two final central members after scale-in, got {len(members)}")
+if any(member["pod"]["name"] == os.environ["RETIRED_POD"] for member in members):
+    raise SystemExit("retired Chart Deployment Pod remains in the post-scale-in topology")
+if sum(member["workload"]["kind"] == "Deployment" for member in members) != 1:
+    raise SystemExit("post-scale-in topology does not retain exactly one Chart Deployment member")
+if sum(member["workload"]["kind"] == "StatefulSet" for member in members) != 1:
+    raise SystemExit("post-scale-in topology does not retain the independent replacement member")
+for member in members:
+    if any(not database["serverID"] for database in member["databases"]):
+        raise SystemExit("post-scale-in topology contains an incomplete NB/SB identity")
+PYTHON
+echo "post-scale-in topology identity checks passed"

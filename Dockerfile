@@ -7,6 +7,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/operator ./cmd/ope
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/network-probe ./cmd/network-probe
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/member-prepare ./cmd/member-prepare
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/member-run ./cmd/member-run
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/fence-agent ./cmd/fence-agent
 
 FROM build AS central-test-build
 RUN CGO_ENABLED=0 go test -c -o /out/central.test ./internal/central
@@ -47,3 +48,8 @@ COPY --from=build /out/member-prepare /member-prepare
 COPY --from=build /out/member-run /member-run
 USER 65532:65532
 ENTRYPOINT ["/operator"]
+
+FROM central-runtime AS fence-agent
+COPY --from=build /out/fence-agent /fence-agent
+USER 65532:65532
+ENTRYPOINT ["/fence-agent"]

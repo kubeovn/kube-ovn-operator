@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -272,6 +273,136 @@ func TestApprovalRequiresCurrentUnhealthyTargetAndQuorum(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func recoveryApprovalRecord() (*api.KubeOVNRecoveryApproval, RecoveryBinding, api.RecoveryApprovalReference) {
+	now := time.Now().Add(-time.Minute).Truncate(time.Second)
+	record := &api.KubeOVNRecoveryApproval{
+		ObjectMeta: metav1.ObjectMeta{Name: "recovery-approval", Namespace: "test", UID: "recovery-approval-uid", Generation: 1, CreationTimestamp: metav1.NewTime(now)},
+		Spec: api.RecoveryApprovalSpec{
+			InstallationRef: api.InstallationReference{Name: "ovn", UID: "installation-uid"}, InstallationGeneration: 2,
+			RequestRef: &api.RecoveryRequestReference{Name: "recover", UID: "request-uid", Generation: 3}, Mode: "reconvert",
+			SourceVersion: "v1.17.0", TargetVersion: "v1.16.0", BackupRef: "sha256:" + strings.Repeat("a", 64),
+			TopologyDigest: "sha256:" + strings.Repeat("b", 64), ChartDigest: "sha256:" + strings.Repeat("c", 64),
+			Reason: "lost quorum requires restore", ExpiresAt: metav1.NewTime(now.Add(time.Hour)),
+		},
+	}
+	binding := RecoveryBinding{InstallationName: "ovn", InstallationUID: "installation-uid", InstallationGeneration: 2, RequestName: "recover", RequestUID: "request-uid", RequestGeneration: 3, Mode: "reconvert", SourceVersion: "v1.17.0", TargetVersion: "v1.16.0", BackupRef: record.Spec.BackupRef, TopologyDigest: record.Spec.TopologyDigest, ChartDigest: record.Spec.ChartDigest}
+	ref := api.RecoveryApprovalReference{Name: record.Name, UID: record.UID}
+	return record, binding, ref
+}
+
+func TestRecoveryApprovalSurvivesRestartAndIsConsumedOnce(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := api.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	record, binding, ref := recoveryApprovalRecord()
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(record).WithObjects(record).Build()
+	installation := &api.KubeOVNInstallation{Name: "ovn", Namespace: "test", UID: "installation-uid"}
+	provider, err := NewRecovery(kube, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := lease.New(kube)
+	if err := manager.With(t.Context(), installation, lease.Installation, func(ctx context.Context) error {
+		return manager.With(ctx, installation, lease.Central, func(ctx context.Context) error {
+			if err := provider.Reserve(ctx, ref, binding); err != nil {
+				return err
+			}
+			reserved := new(api.KubeOVNRecoveryApproval)
+			if err := kube.Get(ctx, client.ObjectKeyFromObject(record), reserved); err != nil {
+				return err
+			}
+			restarted, err := NewRecovery(kube, installation)
+			if err != nil {
+				return err
+			}
+			if err := restarted.Reserve(ctx, ref, binding); err != nil {
+				return err
+			}
+			if err := restarted.Complete(ctx, ref, binding); err != nil {
+				return err
+			}
+			completed := new(api.KubeOVNRecoveryApproval)
+			if err := kube.Get(ctx, client.ObjectKeyFromObject(record), completed); err != nil {
+				return err
+			}
+			if err := restarted.Complete(ctx, ref, binding); err != nil {
+				return err
+			}
+			current := new(api.KubeOVNRecoveryApproval)
+			if err := kube.Get(ctx, client.ObjectKeyFromObject(record), current); err != nil {
+				return err
+			}
+			if current.ResourceVersion != completed.ResourceVersion || !reflect.DeepEqual(current.Status, completed.Status) {
+				t.Fatal("recovery approval completion retry rewrote audit")
+			}
+			if err := restarted.Reserve(ctx, ref, binding); err == nil {
+				t.Fatal("completed recovery approval was reserved again")
+			}
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecoveryApprovalRejectsBindingDrift(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := api.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	record, binding, ref := recoveryApprovalRecord()
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(record).WithObjects(record).Build()
+	installation := &api.KubeOVNInstallation{Name: "ovn", Namespace: "test", UID: "installation-uid"}
+	provider, err := NewRecovery(kube, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding.TargetVersion = "v1.15.0"
+	manager := lease.New(kube)
+	err = manager.With(t.Context(), installation, lease.Installation, func(ctx context.Context) error {
+		return manager.With(ctx, installation, lease.Central, func(ctx context.Context) error {
+			return provider.Reserve(ctx, ref, binding)
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not bind") {
+		t.Fatalf("binding drift was accepted: %v", err)
+	}
+}
+
+func TestRecoveryApprovalRejectsUnsupportedMode(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := api.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	record, binding, ref := recoveryApprovalRecord()
+	binding.Mode = "eraseEverything"
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(record).WithObjects(record).Build()
+	installation := &api.KubeOVNInstallation{Name: "ovn", Namespace: "test", UID: "installation-uid"}
+	provider, err := NewRecovery(kube, installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := lease.New(kube)
+	err = manager.With(t.Context(), installation, lease.Installation, func(ctx context.Context) error {
+		return manager.With(ctx, installation, lease.Central, func(ctx context.Context) error {
+			return provider.Reserve(ctx, ref, binding)
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "mode") || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported recovery mode was accepted: %v", err)
 	}
 }
 

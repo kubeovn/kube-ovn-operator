@@ -42,7 +42,14 @@ func healthFixture(t *testing.T) (*operatorv1alpha1.KubeOVNInstallation, client.
 }
 
 func TestOVNObserverReadsBothDatabasesAndUsesOwnerUIDs(t *testing.T) {
-	installation, kube, _ := healthFixture(t)
+	installation, kube, objects := healthFixture(t)
+	for index := 0; index < 3; index++ {
+		pod := objects[index+2].(*corev1.Pod)
+		pod.Spec.NodeName = fmt.Sprintf("node-%d", index)
+		if err := kube.Update(t.Context(), pod); err != nil {
+			t.Fatal(err)
+		}
+	}
 	calls := 0
 	observer := OVNObserver{Reader: kube, Runner: runnerFunc(func(_ context.Context, ns, pod, container string, command []string) ([]byte, error) {
 		calls++
@@ -59,6 +66,11 @@ func TestOVNObserverReadsBothDatabasesAndUsesOwnerUIDs(t *testing.T) {
 	got, err := observer.Observe(t.Context(), installation)
 	if err != nil || !got.Ready || calls != 6 || len(got.Members) != 6 || len(got.Databases) != 2 {
 		t.Fatalf("report=%+v calls=%d err=%v", got, calls, err)
+	}
+	for _, member := range got.Members {
+		if member.Node == "" {
+			t.Fatalf("central member status did not retain its Node identity: %+v", got.Members)
+		}
 	}
 	foreign := &corev1.Pod{Name: "foreign", Namespace: installation.Namespace, Labels: map[string]string{"app": "ovn-central"}}
 	if err := kube.Create(t.Context(), foreign); err != nil {
@@ -105,8 +117,11 @@ func TestOVNObserverDoesNotTreatMissingOrUnreadyPodsAsSuccess(t *testing.T) {
 				return nil, nil
 			})}
 			got, err := observer.Observe(t.Context(), installation)
-			if err != nil || got.Ready {
+			if err != nil || scenario != "peer" && got.Ready {
 				t.Fatalf("unexpected report: %+v %v", got, err)
+			}
+			if scenario == "peer" && (got.Reason != "NotRequired" || got.Message == "") {
+				t.Fatalf("external OVN was not marked not-required: %+v", got)
 			}
 		})
 	}

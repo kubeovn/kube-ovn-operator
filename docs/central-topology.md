@@ -61,16 +61,38 @@ Baseline transitions require explicit lifecycle completion evidence; this module
 does not absorb external topology changes automatically. The default controller
 can select one safe replica reduction or an explicit same-size replacement. An
 implicit reduction requires an exactly one-member independent StatefulSet
-pinned successfully. A Chart Deployment reduction or replacement must set
+pinned successfully. A Chart Deployment reduction or replacement normally sets
 `central.memberRequests[].retireEndpoint` or `replaceEndpoint` to bind one exact
 Pod; admission pins the Deployment and ReplicaSet UIDs, target Pod UID, all
 survivor UIDs and the admitted spec before any database or scale-down mutation.
-Ambiguous reductions and automatic target inference remain blocked. The
-selected path can authorize its next apply checkpoint only after the immutable
-completion receipt and successor baseline are pinned; strict in-flight fencing
-remains open. Joint observations are samples, not an atomic NB/SB snapshot.
+A same-size request with a UID-bound `removalApprovalRef` may omit
+`replaceEndpoint`; automatic target inference is then allowed only for one
+retained Pod that has disappeared or changed UID. Ambiguous candidates and
+transient Node conditions remain blocked. The selected path can authorize its
+next apply checkpoint only after the immutable completion receipt and successor
+baseline are pinned. Strict in-flight fencing is available only through the
+configured remote fence service; its production deployment and multi-node
+takeover test remain open. Joint observations are samples, not an atomic
+NB/SB snapshot.
 Retained metadata assumes trusted Kubernetes writers and cannot authenticate
 against an actor able to rewrite both records and status.
+
+An explicit same-size `replaceEndpoint`, or a same-size request carrying a
+UID-bound `removalApprovalRef` that selects one unique healthy target, admits a
+narrow node IP drift case. The retained target Pod and Node UID must still be
+present and every native identity, quorum, listener and storage check must pass,
+but the retained RAFT/client addresses may no longer be listed as that Node's
+current `InternalIP`. The controller performs a fresh exact-target observation,
+rebinds that target's four addresses and preparation remotes, and persists the
+canonical request before joining the new member. The exception is scoped to the
+named target and is rejected for ordinary observations, multiple replacement
+targets, Node UID replacement, Node deletion, or any other topology identity or
+non-target address change. The same explicit target may be cordoned during a
+planned drain; its replacement Node must still be Ready and schedulable. A
+separate explicit replacement path handles a Deployment endpoint that has
+already disappeared with a failed Node: it requires a UID-pinned permanent-loss
+approval, retains all surviving Pod identities and permits one replacement Pod
+to be selected for the guarded post-convergence scale-down.
 
 Tests cover complete and partial discovery, peer health/configuration disagreement,
 listener resolution and changes, identity replacement, missing/corrupt records,

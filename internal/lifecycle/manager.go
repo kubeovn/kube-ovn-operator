@@ -14,6 +14,7 @@ import (
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 	"github.com/kubeovn/kube-ovn-operator/internal/workload"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,6 +28,7 @@ type Manager struct {
 	Client       client.Client
 	Runner       health.BackupRunner
 	StoreFactory func(*api.KubeOVNInstallation) (backup.Store, error)
+	RestoreFence RestoreFence
 	MaxAge       time.Duration
 	MaxBytes     int64
 }
@@ -129,6 +131,123 @@ func (m *Manager) CaptureBackupPair(ctx context.Context, installation *api.KubeO
 func (m *Manager) VerifyBackupPair(ctx context.Context, installation *api.KubeOVNInstallation, topology health.CentralTopology, binding BackupBinding, status *api.BackupStatus) error {
 	_, err := m.backupPair(ctx, installation, topology, binding, status, true)
 	return err
+}
+
+// RestoreFenceReady reports whether the destructive restore transport can
+// atomically admit native restore commands. It is intentionally separate from
+// the ordinary Lease checks used by backup capture and lifecycle writes.
+func (m *Manager) RestoreFenceReady() error {
+	if m == nil || m.RestoreFence == nil {
+		return errors.New("atomic restore fence is not configured")
+	}
+	if err := m.RestoreFence.Ready(); err != nil {
+		return fmt.Errorf("atomic restore fence is not ready: %w", err)
+	}
+	return nil
+}
+
+// RestoreFenceReadyFor performs the optional live readiness preflight exposed
+// by a remote fence service. Static capability checks remain useful for
+// admission, but destructive callers should use this method before quiescing
+// workloads when the fence can verify its current Lease arm state.
+func (m *Manager) RestoreFenceReadyFor(ctx context.Context, installation *api.KubeOVNInstallation, topology health.CentralTopology) error {
+	if err := m.RestoreFenceReady(); err != nil {
+		return err
+	}
+	preflight, ok := m.RestoreFence.(interface {
+		ReadyFor(context.Context, *api.KubeOVNInstallation, health.CentralTopology) error
+	})
+	if !ok {
+		return nil
+	}
+	if err := preflight.ReadyFor(ctx, installation, topology); err != nil {
+		return fmt.Errorf("atomic restore fence readiness preflight: %w", err)
+	}
+	return nil
+}
+
+// RestoreBackupPair restores both databases from one immutable, version-bound
+// pair. The caller must hold the installation and central Leases; this method
+// also checks the central fence before and after every database mutation so a
+// stale or cancelled operation cannot continue with the second database.
+func (m *Manager) RestoreBackupPair(ctx context.Context, installation *api.KubeOVNInstallation, topology health.CentralTopology, binding BackupBinding, status *api.BackupStatus) error {
+	if m == nil || installation == nil {
+		return errors.New("database restore requires an installation")
+	}
+	if err := m.RestoreFenceReady(); err != nil {
+		return err
+	}
+	if binding.Version == "" || binding.TopologyDigest == "" {
+		return errors.New("database restore requires a target version and topology digest")
+	}
+	if status == nil || status.Version != binding.Version || strings.TrimSpace(status.Destination) != strings.TrimSpace(binding.Destination) || status.TopologyDigest != binding.TopologyDigest {
+		return errors.New("database restore pair is not bound to the requested target version, destination and topology")
+	}
+	if err := validateBackupReferences(status); err != nil {
+		return err
+	}
+	if err := topology.Validate(); err != nil {
+		return fmt.Errorf("validate retained topology before restore: %w", err)
+	}
+	if installation.Status.Topology.Inventory == nil || installation.Status.Topology.Inventory.Digest != binding.TopologyDigest {
+		return errors.New("database restore topology does not match the retained installation topology")
+	}
+	executor, closeStore, err := m.executor(installation)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+	inventories := inventories(topology)
+	restorers, err := preflightFencedRestoreAdapters(ctx, inventories, executor.dependencies.Database)
+	if err != nil {
+		return err
+	}
+	for index, inventory := range inventories {
+		if err := lease.CheckFor(ctx, lease.Central, installation.UID); err != nil {
+			return fmt.Errorf("fence %s restore: %w", inventory.Database, err)
+		}
+		restorer := restorers[index]
+		ref := status.DatabaseRefs[inventory.Database]
+		token, err := lease.Token(ctx, lease.Central)
+		if err != nil {
+			return fmt.Errorf("read current restore fence for %s: %w", inventory.Database, err)
+		}
+		if err := m.RestoreFence.Restore(ctx, installation, inventory.Database, func(restoreCtx context.Context) error {
+			return restorer.RestoreFenced(restoreCtx, ref, token)
+		}); err != nil {
+			return fmt.Errorf("restore %s database: %w", inventory.Database, err)
+		}
+		if err := lease.CheckFor(ctx, lease.Central, installation.UID); err != nil {
+			return fmt.Errorf("fence after %s restore: %w", inventory.Database, err)
+		}
+	}
+	return nil
+}
+
+// preflightFencedRestoreAdapters opens and validates every database adapter
+// before the caller is allowed to invoke any restore operation. A missing
+// capability in the second database must therefore fail before the first
+// database can receive restore input.
+func preflightFencedRestoreAdapters(ctx context.Context, inventories []Inventory, factory func(context.Context, Inventory) (Database, error)) ([2]FencedDatabaseRestorer, error) {
+	var restorers [2]FencedDatabaseRestorer
+	if len(inventories) != len(restorers) || factory == nil {
+		return restorers, errors.New("restore requires both database adapters")
+	}
+	for index, inventory := range inventories {
+		database, err := factory(ctx, inventory)
+		if err != nil {
+			return restorers, fmt.Errorf("open %s restore adapter: %w", inventory.Database, err)
+		}
+		if database == nil {
+			return restorers, fmt.Errorf("open %s restore adapter: factory returned nil", inventory.Database)
+		}
+		restorer, ok := database.(FencedDatabaseRestorer)
+		if !ok {
+			return restorers, fmt.Errorf("%s restore adapter does not expose atomic fencing", inventory.Database)
+		}
+		restorers[index] = restorer
+	}
+	return restorers, nil
 }
 
 func (m *Manager) backupPair(ctx context.Context, installation *api.KubeOVNInstallation, topology health.CentralTopology, binding BackupBinding, existing *api.BackupStatus, verifyOnly bool) (*api.BackupStatus, error) {

@@ -43,6 +43,19 @@ type Runner interface {
 	With(context.Context, *operatorv1alpha1.KubeOVNInstallation, Scope, func(context.Context) error) error
 }
 
+// FenceToken is the server-facing identity of the currently held operation
+// lease. A remote mutating executor must accept a request only while this
+// exact lease UID, holder and transition epoch are active. The token is not a
+// proof by itself; the remote service must atomically validate it against its
+// current fence before executing the request.
+type FenceToken struct {
+	InstallationUID types.UID `json:"installationUID"`
+	LeaseUID        types.UID `json:"leaseUID"`
+	Scope           Scope     `json:"scope"`
+	Holder          string    `json:"holder"`
+	Epoch           int32     `json:"epoch"`
+}
+
 // Manager requires an uncached Kubernetes client. Observations deliberately
 // use local elapsed time instead of trusting a remote holder's RenewTime.
 type Manager struct {
@@ -173,6 +186,30 @@ func CheckFor(ctx context.Context, scope Scope, installationUID types.UID) error
 		return ErrOwnership
 	}
 	return Check(ctx, scope)
+}
+
+// Token returns the immutable fence identity for a held operation. It checks
+// the Lease immediately before returning, but callers must still pass the
+// token to a server-side fenced transport; cancellation cannot revoke a
+// request that a remote server has already accepted.
+func Token(ctx context.Context, scope Scope) (FenceToken, error) {
+	if scope != Installation && scope != Central {
+		return FenceToken{}, errors.New("unknown operation lease scope")
+	}
+	if err := Check(ctx, scope); err != nil {
+		return FenceToken{}, err
+	}
+	g, ok := ctx.Value(scopeKey(scope)).(*guard)
+	if !ok || g.installation == nil || g.uid == "" || g.holder == "" || g.transitions < 1 {
+		return FenceToken{}, fmt.Errorf("%s operation lease is incomplete", scope)
+	}
+	return FenceToken{
+		InstallationUID: g.installation.UID,
+		LeaseUID:        g.uid,
+		Scope:           scope,
+		Holder:          g.holder,
+		Epoch:           g.transitions,
+	}, nil
 }
 
 func (m *Manager) acquire(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, scope Scope) (*guard, error) {

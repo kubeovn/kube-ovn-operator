@@ -45,6 +45,18 @@ type Reference struct {
 	UID  types.UID `json:"uid"`
 }
 
+// TLSSecretReference binds a member workload to one Secret generation and its
+// non-sensitive key names. Secret data is read only by the kubelet-mounted
+// volume and is never serialized into status or lifecycle plans.
+type TLSSecretReference struct {
+	Name            string    `json:"name"`
+	UID             types.UID `json:"uid"`
+	ResourceVersion string    `json:"resourceVersion"`
+	PrivateKeyKey   string    `json:"privateKeyKey"`
+	CertificateKey  string    `json:"certificateKey"`
+	CAKey           string    `json:"caKey"`
+}
+
 // Request uses an existing Bound filesystem PVC. Its mount root must already be
 // private and owned by UID 65532, as required by member-prepare. Neither this
 // adapter nor its containers chmod/chown existing storage. Node and PV identity
@@ -58,6 +70,7 @@ type Request struct {
 	Image                  string                      `json:"image"`
 	Resources              corev1.ResourceRequirements `json:"resources"`
 	Tolerations            []corev1.Toleration         `json:"tolerations,omitempty"`
+	TLSSecret              *TLSSecretReference         `json:"tlsSecret,omitempty"`
 }
 
 type Preparation struct {
@@ -98,7 +111,7 @@ func New(kube client.Client, installation *api.KubeOVNInstallation) (*Provisione
 // Prepare persists a reservation before creating a Job. Retry the same request
 // to observe completion. No server is started and no OVN membership is changed.
 func (p *Provisioner) Prepare(ctx context.Context, request Request) (Preparation, error) {
-	request, err := p.canonical(request)
+	request, err := p.canonical(ctx, request)
 	if err != nil {
 		return Preparation{}, err
 	}
@@ -179,10 +192,16 @@ func (p *Provisioner) Start(ctx context.Context, ref Reference, launch central.R
 	if err := launch.Validate(); err != nil {
 		return Reference{}, err
 	}
-	// Secret identity/mount lifecycle is a separate contract. Do not silently
-	// downgrade an SSL request or synthesize credentials in this adapter.
+	// Secret identity/mount lifecycle is bound to the immutable request. Do not
+	// silently downgrade an SSL request or accept paths outside the fixed mount.
+	if (launch.TLS != nil) != (request.TLSSecret != nil) {
+		return Reference{}, errors.New("TLS launch must match the bound Secret identity")
+	}
 	if launch.TLS != nil {
-		return Reference{}, errors.New("TLS workload provisioning requires a Secret identity provider")
+		expected := central.TLSFiles{PrivateKey: central.TLSMountPath + "/key", Certificate: central.TLSMountPath + "/cert", CA: central.TLSMountPath + "/ca"}
+		if *launch.TLS != expected {
+			return Reference{}, errors.New("TLS launch paths must use the fixed Secret mount")
+		}
 	}
 	for _, address := range []string{launch.NorthboundAddress, launch.SouthboundAddress} {
 		if err := p.nodeAddress(ctx, request, address); err != nil {
@@ -215,7 +234,7 @@ func (p *Provisioner) Start(ctx context.Context, ref Reference, launch central.R
 	return Reference{Name: workload.Name, UID: workload.UID}, nil
 }
 
-func (p *Provisioner) canonical(request Request) (Request, error) {
+func (p *Provisioner) canonical(ctx context.Context, request Request) (Request, error) {
 	content, err := json.Marshal(request)
 	if err != nil || len(content) > 16<<10 {
 		return Request{}, errors.New("invalid or oversized member request")
@@ -243,12 +262,68 @@ func (p *Provisioner) canonical(request Request) (Request, error) {
 	if !found || image == "" || len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" || strings.ContainsAny(image, " \t\n@") {
 		return Request{}, errors.New("runtime image must be pinned to a sha256 digest")
 	}
+	if request.TLSSecret != nil {
+		if err := validateTLSSecretReference(*request.TLSSecret); err != nil {
+			return Request{}, err
+		}
+		current, err := ResolveTLSSecret(ctx, p.kube, p.installation.Namespace, &api.LocalObjectReference{Name: request.TLSSecret.Name})
+		if err != nil {
+			return Request{}, err
+		}
+		if *current != *request.TLSSecret {
+			return Request{}, errors.New("member TLS Secret identity or key mapping changed")
+		}
+	}
 	for _, db := range request.Preparation.Databases {
-		if !strings.HasPrefix(db.LocalAddress, "tcp:") {
+		protocol, _, found := strings.Cut(db.LocalAddress, ":")
+		if !found || protocol != "tcp" && protocol != "ssl" {
+			return Request{}, errors.New("member listener must use tcp or ssl")
+		}
+		if protocol == "ssl" && request.TLSSecret == nil {
 			return Request{}, errors.New("TLS workload provisioning requires a Secret identity provider")
 		}
 	}
 	return request, nil
+}
+
+// ResolveTLSSecret reads only Secret metadata and key names. It never returns
+// or logs Secret data, so callers can persist the result as an immutable
+// lifecycle binding without copying credentials into a ConfigMap.
+func ResolveTLSSecret(ctx context.Context, reader client.Reader, namespace string, reference *api.LocalObjectReference) (*TLSSecretReference, error) {
+	if reader == nil || strings.TrimSpace(namespace) == "" || reference == nil || len(validation.IsDNS1123Subdomain(reference.Name)) != 0 {
+		return nil, errors.New("TLS Secret reference requires a namespace and valid name")
+	}
+	secret := new(corev1.Secret)
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: reference.Name}, secret); err != nil {
+		return nil, fmt.Errorf("read TLS Secret %s/%s: %w", namespace, reference.Name, err)
+	}
+	if secret.UID == "" || secret.ResourceVersion == "" || secret.DeletionTimestamp != nil {
+		return nil, errors.New("TLS Secret has no stable identity or is being deleted")
+	}
+	keys, err := tlsSecretKeys(secret.Data)
+	if err != nil {
+		return nil, err
+	}
+	return &TLSSecretReference{Name: secret.Name, UID: secret.UID, ResourceVersion: secret.ResourceVersion, PrivateKeyKey: keys[0], CertificateKey: keys[1], CAKey: keys[2]}, nil
+}
+
+func validateTLSSecretReference(reference TLSSecretReference) error {
+	if len(validation.IsDNS1123Subdomain(reference.Name)) != 0 || reference.UID == "" || reference.ResourceVersion == "" {
+		return errors.New("TLS Secret identity is incomplete")
+	}
+	if reference.PrivateKeyKey == "" || reference.CertificateKey == "" || reference.CAKey == "" || reference.PrivateKeyKey == reference.CertificateKey || reference.PrivateKeyKey == reference.CAKey || reference.CertificateKey == reference.CAKey {
+		return errors.New("TLS Secret key mapping is incomplete or duplicated")
+	}
+	return nil
+}
+
+func tlsSecretKeys(data map[string][]byte) ([3]string, error) {
+	for _, keys := range [][3]string{{"tls.key", "tls.crt", "ca.crt"}, {"key", "cert", "cacert"}} {
+		if len(data[keys[0]]) != 0 && len(data[keys[1]]) != 0 && len(data[keys[2]]) != 0 {
+			return keys, nil
+		}
+	}
+	return [3]string{}, errors.New("TLS Secret must contain tls.key/tls.crt/ca.crt or key/cert/cacert")
 }
 
 func (p *Provisioner) guard(ctx context.Context, request Request, reservation string) error {
@@ -261,6 +336,15 @@ func (p *Provisioner) guard(ctx context.Context, request Request, reservation st
 	}
 	if installation.UID != p.installation.UID || installation.DeletionTimestamp != nil || installation.Generation != p.installation.Generation {
 		return errors.New("installation changed during member provisioning")
+	}
+	if request.TLSSecret != nil {
+		current, err := ResolveTLSSecret(ctx, p.kube, p.installation.Namespace, &api.LocalObjectReference{Name: request.TLSSecret.Name})
+		if err != nil {
+			return err
+		}
+		if *current != *request.TLSSecret {
+			return errors.New("member TLS Secret identity or key mapping changed")
+		}
 	}
 	for _, db := range request.Preparation.Databases {
 		if err := p.nodeAddress(ctx, request, db.LocalAddress); err != nil {
@@ -461,7 +545,7 @@ func (p *Provisioner) load(ctx context.Context, ref Reference) (Request, error) 
 	if err := p.decode(record, "request.json", &request, nil); err != nil {
 		return Request{}, err
 	}
-	return p.canonical(request)
+	return p.canonical(ctx, request)
 }
 
 func (p *Provisioner) read(ctx context.Context, name, key string, value any, parent *Reference) error {

@@ -3,6 +3,7 @@ package lease
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -23,7 +24,17 @@ func fixture(t *testing.T) (*Manager, *operatorv1alpha1.KubeOVNInstallation) {
 		t.Fatal(err)
 	}
 	manager := New(fake.NewClientBuilder().WithScheme(scheme).Build())
-	return manager, &operatorv1alpha1.KubeOVNInstallation{Name: "kube-ovn", Namespace: "network", UID: "installation-uid"}
+	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "kube-ovn", Namespace: "network", UID: "installation-uid"}
+	controller := true
+	for _, scope := range []Scope{Installation, Central} {
+		if err := manager.client.Create(t.Context(), &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+			Name: Name(scope, installation.Name), Namespace: installation.Namespace, UID: types.UID(string(scope) + "-lease-uid"),
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation", Name: installation.Name, UID: installation.UID, Controller: &controller}},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return manager, installation
 }
 
 func TestOnlyOneActorCanHoldLeaseAndReleaseAllowsNextActor(t *testing.T) {
@@ -124,6 +135,39 @@ func TestRenewalExtendsObservationAndLocalDeadlineStopsWrites(t *testing.T) {
 	localClock.Step(renewInterval)
 	if err := guard.check(t.Context(), false); !errors.Is(err, ErrLost) {
 		t.Fatalf("expired local lease still allowed a write: %v", err)
+	}
+}
+
+func TestFenceTokenBindsLeaseUIDHolderAndTransition(t *testing.T) {
+	manager, installation := fixture(t)
+	var token FenceToken
+	if err := manager.With(t.Context(), installation, Installation, func(ctx context.Context) error {
+		var err error
+		token, err = Token(ctx, Installation)
+		if err != nil {
+			return err
+		}
+		other := New(manager.client)
+		if err := other.With(t.Context(), installation, Installation, func(context.Context) error { return nil }); !errors.Is(err, ErrHeld) {
+			return fmt.Errorf("unexpected competing lease result: %w", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if token.InstallationUID != installation.UID || token.LeaseUID == "" || token.Scope != Installation || token.Holder == "" || token.Epoch != 1 {
+		t.Fatalf("unexpected fence token: %+v", token)
+	}
+	var next FenceToken
+	if err := manager.With(t.Context(), installation, Installation, func(ctx context.Context) error {
+		var err error
+		next, err = Token(ctx, Installation)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if next.LeaseUID != token.LeaseUID || next.Epoch == token.Epoch || next.Holder == token.Holder {
+		t.Fatalf("lease takeover did not produce a new fence epoch: old=%+v new=%+v", token, next)
 	}
 }
 
