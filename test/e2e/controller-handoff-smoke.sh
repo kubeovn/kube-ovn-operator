@@ -693,16 +693,17 @@ JSON
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/automatic-replacement.json" >/dev/null
 kubectl cordon "${automatic_target_node}" >/dev/null
 
-# The operator owns the rendered Deployment and may reapply its chart while
-# the automatic replacement is preparing. Keep the fixture Deployment paused
-# and its active ReplicaSet at one continuously so the Kubernetes controllers
-# cannot create a second unpinned replacement between lifecycle observations.
-# This is test-only coordination for the deliberate endpoint-loss injection;
-# the operator itself remains running and must still drive the lifecycle.
+# The Deployment was paused before the deliberate endpoint-loss injection.
+# Keep its active ReplicaSet at one so the Kubernetes controllers cannot create
+# a second unpinned replacement between lifecycle observations. This is
+# test-only coordination for the injection; the operator remains running and
+# must still drive the lifecycle.
 guard_automatic_workload() {
   while true; do
-    kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null 2>&1 || true
-    kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
+    automatic_replicas=$(kubectl get replicaset "${automatic_replicaset}" -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+    if [[ "${automatic_replicas}" != 1 ]]; then
+      kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
+    fi
     kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json 2>/dev/null |
       SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
 import json
