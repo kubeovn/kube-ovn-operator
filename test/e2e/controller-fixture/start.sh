@@ -111,4 +111,12 @@ trap cleanup TERM INT EXIT
 while kill -0 "${nb_pid}" 2>/dev/null && kill -0 "${sb_pid}" 2>/dev/null && kill -0 "${northd_pid}" 2>/dev/null; do
   sleep 1
 done
-exit 1
+
+# cluster/leave intentionally stops the native member after it has been
+# removed from both Raft configurations. Keep this fixture Pod alive until
+# the lifecycle executor observes the removal and scales the Deployment down;
+# exiting here would make the ReplicaSet create a replacement on the same
+# hostPath before that scale-down is persisted.
+while :; do
+  sleep 3600
+done
