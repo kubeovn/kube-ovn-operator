@@ -516,12 +516,12 @@ if [[ "${automatic_candidate_count}" -lt 2 ]]; then
   exit 1
 fi
 
-# Stop the local operator while the Deployment is reduced. The lifecycle
-# controller will resume before it admits the automatic operation, so the
-# fixture must have a one-replica Deployment contract before that point.
+# Stop the local operator while the ReplicaSet is reduced. The Deployment
+# remains a two-replica retirement contract until automatic admission pins the
+# lost endpoint.
 kill -STOP "${operator_pid}"
 automatic_replicaset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["replicaset"])' "${automatic_candidates_file}")
-kubectl scale deployment "${central_deployment}" -n kube-ovn-operator-system --replicas=1 >/dev/null
+kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null
 kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null
 automatic_target_pod=""
 automatic_target_node=""
@@ -762,6 +762,10 @@ if [[ -z "${automatic_request_name}" || "${automatic_request_name}" == "${previo
   cat "${test_dir}/operator.log"
   exit 1
 fi
+# Admission has pinned the unique lost endpoint. Reduce the fixture
+# Deployment's desired replicas now so its controller cannot recreate a second
+# unpinned Pod while the durable operation converges.
+kubectl scale deployment "${central_deployment}" -n kube-ovn-operator-system --replicas=1 >/dev/null
 guard_automatic_workload &
 deployment_guard_pid=$!
 guard_automatic_replacements &
