@@ -518,10 +518,10 @@ fi
 
 # Stop the local operator while the ReplicaSet is reduced. The Deployment
 # remains a two-replica retirement contract until automatic admission pins the
-# lost endpoint.
+# lost endpoint; the replacement guard below removes any Pod created after the
+# operator resumes.
 kill -STOP "${operator_pid}"
 automatic_replicaset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["replicaset"])' "${automatic_candidates_file}")
-kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null
 kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null
 automatic_target_pod=""
 automatic_target_node=""
@@ -693,8 +693,7 @@ JSON
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/automatic-replacement.json" >/dev/null
 kubectl cordon "${automatic_target_node}" >/dev/null
 
-# The Deployment was paused before the deliberate endpoint-loss injection.
-# Keep its active ReplicaSet at one so the Kubernetes controllers cannot create
+# Keep the active ReplicaSet at one so the Kubernetes controllers cannot retain
 # a second unpinned replacement between lifecycle observations. This is
 # test-only coordination for the injection; the operator remains running and
 # must still drive the lifecycle.
@@ -800,8 +799,8 @@ for _ in $(seq 1 240); do
     wait "${replacement_guard_pid}" 2>/dev/null || true
     replacement_guard_pid=""
   else
-    # Keep the paused Deployment's ReplicaSet at one while the operator drains
-    # the old database identity. A paused Deployment can otherwise restore its
+    # Keep the Deployment's active ReplicaSet at one while the operator drains
+    # the old database identity. A Deployment can otherwise restore its
     # ReplicaSet count during a reconciliation and recreate the lost endpoint.
     # Keep this guard through Retiring: the executor must first scale the
     # Deployment itself, while a late Kubernetes replacement Pod would violate
