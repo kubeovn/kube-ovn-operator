@@ -523,18 +523,21 @@ import os
 
 candidates = json.load(open(os.environ["CANDIDATES_FILE"]))
 current = {
-    item["metadata"]["name"]
+    item["metadata"]["name"]: item
     for item in json.loads(os.environ["CURRENT_PODS"]).get("items", [])
     if any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in item.get("metadata", {}).get("ownerReferences", []))
 }
-missing = [item for item in candidates if item["name"] not in current]
-if len(current) == 1 and len(missing) == 1:
-    print(f'{missing[0]["name"]}|{missing[0]["node"]}')
+deleting = [item for item in candidates if item["name"] in current and current[item["name"]]["metadata"].get("deletionTimestamp")]
+if deleting:
+    print(f'{deleting[0]["name"]}|{deleting[0]["node"]}')
+elif len(current) >= 2:
+    print(f'{candidates[0]["name"]}|{candidates[0]["node"]}')
 PYTHON
   )
   if [[ -n "${candidate}" ]]; then
     automatic_target_pod=${candidate%%|*}
     automatic_target_node=${candidate#*|}
+    kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
     break
   fi
   sleep 1
@@ -542,6 +545,17 @@ done
 if [[ -z "${automatic_target_pod}" || -z "${automatic_target_node}" ]]; then
   kill -CONT "${operator_pid}"
   echo 'Deployment scale-down did not retire exactly one original Pod' >&2
+  exit 1
+fi
+for _ in $(seq 1 30); do
+  if ! kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+if kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
+  kill -CONT "${operator_pid}"
+  echo "automatic loss target Pod ${automatic_target_pod} was not removed" >&2
   exit 1
 fi
 
