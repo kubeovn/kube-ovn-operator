@@ -496,7 +496,8 @@ items = []
 for item in json.load(sys.stdin).get("items", []):
     owners = item.get("metadata", {}).get("ownerReferences", [])
     if any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in owners):
-        items.append({"name": item["metadata"]["name"], "node": item.get("spec", {}).get("nodeName", "")})
+        rs = next(owner["name"] for owner in owners if owner.get("controller") and owner.get("kind") == "ReplicaSet")
+        items.append({"name": item["metadata"]["name"], "node": item.get("spec", {}).get("nodeName", ""), "replicaset": rs})
 print(json.dumps(items))
 ' >"${automatic_candidates_file}"
 automatic_candidate_count=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "${automatic_candidates_file}")
@@ -505,11 +506,13 @@ if [[ "${automatic_candidate_count}" -lt 2 ]]; then
   exit 1
 fi
 
-# Pause the local operator while the Deployment is reduced. This lets the
-# ReplicaSet retire one selected endpoint without the operator immediately
-# restoring the chart replica count or creating a replacement Pod.
+# Pause the local operator while the ReplicaSet is reduced. Pausing the
+# Deployment keeps its declared two-replica retirement contract intact while
+# preventing the ReplicaSet controller from recreating the lost endpoint.
 kill -STOP "${operator_pid}"
-kubectl scale deployment "${central_deployment}" -n kube-ovn-operator-system --replicas=1 >/dev/null
+automatic_replicaset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["replicaset"])' "${automatic_candidates_file}")
+kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null
+kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null
 automatic_target_pod=""
 automatic_target_node=""
 for _ in $(seq 1 90); do
