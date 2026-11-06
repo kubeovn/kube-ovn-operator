@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -448,16 +449,7 @@ func (e *Executor) retire(ctx context.Context, target Retirement) (bool, error) 
 			if state.survivorsPresent != len(target.Survivors) || !target.EndpointMissing && !state.endpointPresent {
 				return false, errors.New("retirement Deployment changed before scale-down")
 			}
-			if !target.EndpointMissing || state.replacementPresent {
-				if err := e.prioritizeDeploymentTarget(ctx, target); err != nil {
-					return false, err
-				}
-			}
-			if err := e.guard(ctx); err != nil {
-				return false, err
-			}
-			state.deployment.Spec.Replicas = new(target.Replicas - 1)
-			if err := e.kube.Update(ctx, state.deployment); err != nil {
+			if err := e.scaleDeployment(ctx, target); err != nil {
 				return false, err
 			}
 			return false, nil
@@ -487,6 +479,38 @@ func (e *Executor) retire(ctx context.Context, target Retirement) (bool, error) 
 		return false, nil
 	}
 	return !state.endpointPresent, nil
+}
+
+// scaleDeployment retries the final scale-down against a fresh Deployment.
+// The Deployment controller updates status while the lifecycle executor is
+// removing the database member, so a resourceVersion read immediately before
+// Update can become stale even though the pinned workload is still valid.
+func (e *Executor) scaleDeployment(ctx context.Context, target Retirement) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		state, err := e.retirementTarget(ctx, target)
+		if err != nil {
+			return err
+		}
+		if state.deployment.Spec.Replicas == nil {
+			return errors.New("retirement Deployment has no replica count")
+		}
+		if *state.deployment.Spec.Replicas == target.Replicas-1 {
+			return nil
+		}
+		if *state.deployment.Spec.Replicas != target.Replicas {
+			return errors.New("retirement Deployment replica count changed during scale-down")
+		}
+		if !target.EndpointMissing || state.replacementPresent {
+			if err := e.prioritizeDeploymentTarget(ctx, target); err != nil {
+				return err
+			}
+		}
+		if err := e.guard(ctx); err != nil {
+			return err
+		}
+		state.deployment.Spec.Replicas = new(target.Replicas - 1)
+		return e.kube.Update(ctx, state.deployment)
+	})
 }
 
 func (e *Executor) prioritizeDeploymentTarget(ctx context.Context, target Retirement) error {

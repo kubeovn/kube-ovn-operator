@@ -22,6 +22,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/workload"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -120,15 +121,16 @@ func (a *approvalFake) Complete(_ context.Context, _ membership.ApprovalReferenc
 }
 
 type fixture struct {
-	kube         client.Client
-	installation *api.KubeOVNInstallation
-	request      Request
-	dbs          [2]*databaseFake
-	members      memberFake
-	approvals    approvalFake
-	inventories  [2]Inventory
-	failUpdate   func(client.Object) bool
-	failCreate   func(client.Object) bool
+	kube            client.Client
+	installation    *api.KubeOVNInstallation
+	request         Request
+	dbs             [2]*databaseFake
+	members         memberFake
+	approvals       approvalFake
+	inventories     [2]Inventory
+	failUpdate      func(client.Object) bool
+	failCreate      func(client.Object) bool
+	conflictUpdates int
 }
 
 func setup(t *testing.T) *fixture {
@@ -155,6 +157,12 @@ func setup(t *testing.T) *fixture {
 				return nil
 			},
 			Update: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
+				if f.conflictUpdates > 0 {
+					if _, ok := object.(*appsv1.Deployment); ok {
+						f.conflictUpdates--
+						return apierrors.NewConflict(appsv1.Resource("deployments"), object.GetName(), errors.New("test conflict"))
+					}
+				}
 				if f.failUpdate != nil && f.failUpdate(object) {
 					return errors.New("journal write failed")
 				}
@@ -579,6 +587,7 @@ func TestDeploymentRetirementPinsTargetAndScalesOnlyThatPod(t *testing.T) {
 	f.mustStep(t, ref, Removing)
 	f.mustStep(t, ref, Removing)
 	f.mustStep(t, ref, Removing)
+	f.conflictUpdates = 1
 	f.mustStep(t, ref, Retiring)
 	f.mustStep(t, ref, Retiring)
 	current := new(appsv1.Deployment)
