@@ -1441,6 +1441,30 @@ func TestReplicaOnlySpecChangePinsTheRetainedMemberCount(t *testing.T) {
 	}
 }
 
+func TestBeginAutomaticLifecycleDoesNotRepeatConsumedSpec(t *testing.T) {
+	installation := &operatorv1alpha1.KubeOVNInstallation{
+		ObjectMeta: metav1.ObjectMeta{Name: "automatic", Namespace: "default", UID: types.UID("automatic-uid"), Generation: 2},
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true},
+		},
+		Status: operatorv1alpha1.KubeOVNInstallationStatus{
+			Topology: operatorv1alpha1.TopologyStatus{Operation: &operatorv1alpha1.CentralOperationReference{HandoffApplied: true}},
+		},
+	}
+	fullHash, _, err := installationSpecHashes(installation.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fullHash}
+
+	reconciler := new(KubeOVNInstallationReconciler)
+	started, err := reconciler.beginAutomaticLifecycle(t.Context(), installation, planner.Plan{}, time.Now)
+	if err != nil || started {
+		t.Fatalf("consumed automatic lifecycle was selected again: started=%v err=%v", started, err)
+	}
+}
+
 func TestReplicaOnlySpecChangeAllowsASecondTransitionAfterTheFirstHandoff(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}}
 	data, err := stdjson.Marshal(installation.Spec, stdjson.Deterministic(true))

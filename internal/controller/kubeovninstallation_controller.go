@@ -851,6 +851,19 @@ func (r *KubeOVNInstallationReconciler) hcpPeerRequest(ctx context.Context, inst
 }
 
 func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, plan planner.Plan, now func() time.Time) (bool, error) {
+	// A completed handoff is a consumed declarative lifecycle request. Do not
+	// re-admit the same approval-backed member request on every reconcile when
+	// the installation spec has not changed. A new lifecycle request changes
+	// the spec hash and remains eligible for selection below.
+	if operation := installation.Status.Topology.Operation; operation != nil && operation.HandoffApplied && installation.Status.ApplyCheckpoint != nil {
+		currentHash, _, err := installationSpecHashes(installation.Spec)
+		if err != nil {
+			return false, fmt.Errorf("hash automatic lifecycle spec: %w", err)
+		}
+		if currentHash == installation.Status.ApplyCheckpoint.SpecHash {
+			return false, nil
+		}
+	}
 	provider, ok := r.Topology.(topology.InventoryProvider)
 	if !ok {
 		return false, errors.New("automatic lifecycle selection requires a retained topology provider")

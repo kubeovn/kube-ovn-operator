@@ -798,12 +798,18 @@ if [[ "${automatic_phase}" != Complete ]]; then
   cat "${test_dir}/operator.log"
   exit 1
 fi
+# The completed lifecycle still needs one Chart apply to consume its handoff
+# authorization. Stop the fixture guards before that write, then immediately
+# replace the one-shot automatic member request with the next explicit
+# scale-in request. Leaving the approval-backed request in the spec would make
+# the controller infer a second automatic replacement after handoff.
 kill "${deployment_guard_pid}" 2>/dev/null || true
 wait "${deployment_guard_pid}" 2>/dev/null || true
 deployment_guard_pid=""
 kill "${replacement_guard_pid}" 2>/dev/null || true
 wait "${replacement_guard_pid}" 2>/dev/null || true
 replacement_guard_pid=""
+
 kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null 2>&1 || true
 kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
 kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
@@ -885,13 +891,27 @@ if sum(member["workload"]["kind"] == "StatefulSet" for member in members) != 2:
 PYTHON
 echo "automatic Deployment replacement completed: ${automatic_target_pod} retired and Chart Deployment scaled to one"
 echo "automatic replacement StatefulSet ready: ${automatic_set}/${automatic_pod}"
-request_name=${automatic_request_name}
 
-# Exercise a second lifecycle retirement after automatic replacement. The
-# automatic replacement leaves one Chart Deployment member and two
-# independently managed StatefulSet members. Reducing the desired count to two
-# must remove exactly one healthy StatefulSet member while preserving the Chart
-# Deployment and the other replacement.
+automatic_handoff=""
+for _ in $(seq 1 90); do
+  automatic_operation_request=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.requestName}' 2>/dev/null || true)
+  automatic_handoff=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.handoffApplied}' 2>/dev/null || true)
+  if [[ "${automatic_operation_request}" == "${automatic_request_name}" && "${automatic_handoff}" == true ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ "${automatic_operation_request}" != "${automatic_request_name}" || "${automatic_handoff}" != true ]]; then
+  echo 'automatic lifecycle handoff was not consumed before the next request' >&2
+  kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
+  cat "${test_dir}/operator.log"
+  exit 1
+fi
+echo "automatic lifecycle handoff authorization consumed"
+
+# Replace the one-shot automatic member request immediately after its handoff
+# is consumed. Leaving the approval-backed request in the spec would make the
+# controller infer a second automatic replacement on the next reconcile.
 scale_in_target=$(kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json | python3 -c '
 import json
 import sys
@@ -909,9 +929,16 @@ fi
 cat >"${test_dir}/scale-in.json" <<JSON
 {"spec":{"central":{"replicas":2,"memberRequests":[{"name":"retire-chart","retireEndpoint":"${scale_in_target}"}]}}}
 JSON
-previous_request_name=${request_name}
+previous_request_name=${automatic_request_name}
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/scale-in.json" >/dev/null
 
+request_name=${automatic_request_name}
+
+# Exercise a second lifecycle retirement after automatic replacement. The
+# automatic replacement leaves one Chart Deployment member and two
+# independently managed StatefulSet members. Reducing the desired count to two
+# must remove exactly one healthy StatefulSet member while preserving the Chart
+# Deployment and the other replacement.
 scale_in_request=""
 for _ in $(seq 1 90); do
   scale_in_request=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.requestName}' 2>/dev/null || true)
