@@ -8,11 +8,16 @@ created_cluster=0
 operator_pid=""
 server_pid=""
 deployment_guard_pid=""
+replacement_guard_pid=""
 
 cleanup() {
   if [[ -n "${deployment_guard_pid}" ]]; then
     kill "${deployment_guard_pid}" 2>/dev/null || true
     wait "${deployment_guard_pid}" 2>/dev/null || true
+  fi
+  if [[ -n "${replacement_guard_pid}" ]]; then
+    kill "${replacement_guard_pid}" 2>/dev/null || true
+    wait "${replacement_guard_pid}" 2>/dev/null || true
   fi
   if [[ -n "${operator_pid}" ]]; then
     kill -CONT "${operator_pid}" 2>/dev/null || true
@@ -698,6 +703,11 @@ guard_automatic_workload() {
   while true; do
     kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null 2>&1 || true
     kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
+    sleep 0.2
+  done
+}
+guard_automatic_replacements() {
+  while true; do
     kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json 2>/dev/null |
       REPLICA_SET="${automatic_replicaset}" SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
 import json
@@ -734,6 +744,8 @@ if [[ -z "${automatic_request_name}" || "${automatic_request_name}" == "${previo
   cat "${test_dir}/operator.log"
   exit 1
 fi
+guard_automatic_replacements &
+replacement_guard_pid=$!
 automatic_request_json=$(kubectl get configmap "${automatic_request_name}" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
 printf '%s\n' "${automatic_request_json}" | grep -Fq "${automatic_target_pod}"
 printf '%s\n' "${automatic_request_json}" | grep -Fq '"automaticReplacement":true'
@@ -768,6 +780,9 @@ fi
 kill "${deployment_guard_pid}" 2>/dev/null || true
 wait "${deployment_guard_pid}" 2>/dev/null || true
 deployment_guard_pid=""
+kill "${replacement_guard_pid}" 2>/dev/null || true
+wait "${replacement_guard_pid}" 2>/dev/null || true
+replacement_guard_pid=""
 kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null 2>&1 || true
 kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
 kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
