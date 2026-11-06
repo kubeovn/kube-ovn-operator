@@ -249,8 +249,15 @@ if [[ -z "${inventory}" ]]; then
   exit 1
 fi
 
-worker=$(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+mapfile -t worker_nodes < <(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)
+if [[ "${#worker_nodes[@]}" -lt 2 ]]; then
+  echo "expected two worker nodes, got ${#worker_nodes[@]}" >&2
+  exit 1
+fi
+worker=${worker_nodes[0]}
+automatic_worker=${worker_nodes[1]}
 worker_ip=$(kubectl get node "${worker}" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+automatic_worker_ip=$(kubectl get node "${automatic_worker}" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
 # The provisioner deliberately refuses to chmod/chown existing storage. Create
 # the private root as the workload UID before the hostPath PV is bound.
 docker exec --user 65532:65532 "${worker}" mkdir -m 0700 /tmp/kube-ovn-operator-controller-replacement
@@ -502,7 +509,7 @@ fi
 automatic_claim_name=controller-auto-replacement-data
 automatic_volume_name=controller-auto-replacement-volume
 automatic_storage_path=/tmp/kube-ovn-operator-controller-auto-replacement
-docker exec --user 65532:65532 "${worker}" mkdir -m 0700 "${automatic_storage_path}"
+docker exec --user 65532:65532 "${automatic_worker}" mkdir -m 0700 "${automatic_storage_path}"
 automatic_claim_uid=""
 kubectl apply -f - <<YAML
 apiVersion: v1
@@ -549,7 +556,7 @@ spec:
         - matchExpressions:
             - key: kubernetes.io/hostname
               operator: In
-              values: [${worker}]
+              values: [${automatic_worker}]
 YAML
 kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/${automatic_claim_name} -n kube-ovn-operator-system --timeout=60s >/dev/null
 
@@ -603,7 +610,7 @@ if [[ -z "${automatic_approval_uid}" ]]; then
 fi
 
 cat >"${test_dir}/automatic-replacement.json" <<JSON
-{"spec":{"central":{"memberRequests":[{"name":"automatic-replacement","nodeName":"${worker}","claimName":"${automatic_claim_name}","volumeName":"${automatic_volume_name}","image":"${member_image}","northboundAddress":"tcp:${worker_ip}:6643","southboundAddress":"tcp:${worker_ip}:6644","northboundClientAddress":"tcp:${worker_ip}:6641","southboundClientAddress":"tcp:${worker_ip}:6642","removalApprovalRef":{"name":"${automatic_approval_name}","uid":"${automatic_approval_uid}"}}]}}}
+{"spec":{"central":{"memberRequests":[{"name":"automatic-replacement","nodeName":"${automatic_worker}","claimName":"${automatic_claim_name}","volumeName":"${automatic_volume_name}","image":"${member_image}","northboundAddress":"tcp:${automatic_worker_ip}:6643","southboundAddress":"tcp:${automatic_worker_ip}:6644","northboundClientAddress":"tcp:${automatic_worker_ip}:6641","southboundClientAddress":"tcp:${automatic_worker_ip}:6642","removalApprovalRef":{"name":"${automatic_approval_name}","uid":"${automatic_approval_uid}"}}]}}}
 JSON
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/automatic-replacement.json" >/dev/null
 kubectl cordon "${automatic_target_node}" >/dev/null
