@@ -224,7 +224,7 @@ func checkRetirement(set *appsv1.StatefulSet, installation *api.KubeOVNInstallat
 		set.Labels[apply.ManagedByLabel] != apply.ManagedByValue || set.Labels[apply.InstallationUIDLabel] != string(installation.UID) || set.Labels[apply.InstallationLabel] != installation.Name || set.Labels[apply.InstallationNamespaceLabel] != installation.Namespace {
 		return errors.New("retirement workload identity or installation ownership changed")
 	}
-	if set.Spec.Replicas == nil || (*set.Spec.Replicas != 0 && *set.Spec.Replicas != 1) || len(set.Spec.VolumeClaimTemplates) != 0 || set.Spec.UpdateStrategy.Type != appsv1.OnDeleteStatefulSetStrategyType || len(set.Spec.Template.Spec.Containers) != 1 || set.Spec.Template.Spec.Containers[0].Name != "ovn-central" || set.Spec.Ordinals != nil && set.Spec.Ordinals.Start != 0 {
+	if set.Spec.Replicas == nil || (*set.Spec.Replicas != 0 && *set.Spec.Replicas != 1) || len(set.Spec.VolumeClaimTemplates) != 0 || set.Spec.UpdateStrategy.Type != appsv1.OnDeleteStatefulSetStrategyType || !hasCentralContainer(set.Spec.Template.Spec.Containers) || set.Spec.Ordinals != nil && set.Spec.Ordinals.Start != 0 {
 		return errors.New("retirement requires an independent single-member StatefulSet with retained external storage")
 	}
 	return nil
@@ -236,10 +236,24 @@ func checkDeploymentRetirement(deployment *appsv1.Deployment, installation *api.
 		deployment.Labels[apply.ManagedByLabel] != apply.ManagedByValue || deployment.Labels[apply.InstallationUIDLabel] != string(installation.UID) || deployment.Labels[apply.InstallationLabel] != installation.Name || deployment.Labels[apply.InstallationNamespaceLabel] != installation.Namespace {
 		return errors.New("deployment retirement workload identity or installation ownership changed")
 	}
-	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas < 1 || deployment.Spec.Selector == nil || len(deployment.Spec.Template.Spec.Containers) != 1 || deployment.Spec.Template.Spec.Containers[0].Name != "ovn-central" || !deployment.Spec.Template.Spec.HostNetwork {
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas < 1 || deployment.Spec.Selector == nil || !hasCentralContainer(deployment.Spec.Template.Spec.Containers) || !deployment.Spec.Template.Spec.HostNetwork {
 		return errors.New("deployment retirement requires a multi-replica host-network ovn-central workload")
 	}
 	return nil
+}
+
+func hasCentralContainer(containers []corev1.Container) bool {
+	found := false
+	for _, container := range containers {
+		if container.Name != "ovn-central" {
+			continue
+		}
+		if found {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 func retirementDigest(set *appsv1.StatefulSet) (string, error) {
