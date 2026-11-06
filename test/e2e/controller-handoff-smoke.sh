@@ -766,6 +766,8 @@ fi
 # Admission has pinned the unique lost endpoint. Keep the Deployment's
 # original desired replica count until the durable operation has removed the
 # old database member; the lifecycle executor rejects an early scale-down.
+kubectl annotate pod "${automatic_survivor_pod}" -n kube-ovn-operator-system \
+  controller.kubernetes.io/pod-deletion-cost=2147483647 --overwrite >/dev/null
 guard_automatic_workload &
 deployment_guard_pid=$!
 guard_automatic_replacements &
@@ -781,14 +783,26 @@ echo "automatic loss replacement admitted: ${automatic_target_pod} on ${automati
 
 automatic_phase=""
 for _ in $(seq 1 240); do
-  # Keep the paused Deployment's ReplicaSet at one while the operator drains
-  # the old database identity. A paused Deployment can otherwise restore its
-  # ReplicaSet count during a reconciliation and recreate the lost endpoint.
-  kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
-  if kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
-    kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
-  fi
   automatic_phase=$(journal_phase "${automatic_journal_name}" 2>/dev/null || true)
+  if [[ "${automatic_phase}" == Retiring || "${automatic_phase}" == Complete ]]; then
+    # Once joint removal has completed, the executor owns the final
+    # Deployment scale-down and deletion-cost decision. The fixture guards
+    # must stop writing before that step.
+    kill "${deployment_guard_pid}" 2>/dev/null || true
+    wait "${deployment_guard_pid}" 2>/dev/null || true
+    deployment_guard_pid=""
+    kill "${replacement_guard_pid}" 2>/dev/null || true
+    wait "${replacement_guard_pid}" 2>/dev/null || true
+    replacement_guard_pid=""
+  else
+    # Keep the paused Deployment's ReplicaSet at one while the operator drains
+    # the old database identity. A paused Deployment can otherwise restore its
+    # ReplicaSet count during a reconciliation and recreate the lost endpoint.
+    kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
+    if kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
+      kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
+    fi
+  fi
   if [[ "${automatic_phase}" == Complete ]]; then
     break
   fi
