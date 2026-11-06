@@ -516,12 +516,12 @@ if [[ "${automatic_candidate_count}" -lt 2 ]]; then
   exit 1
 fi
 
-# Pause the local operator while the ReplicaSet is reduced. Pausing the
-# Deployment keeps its declared two-replica retirement contract intact while
-# preventing the ReplicaSet controller from recreating the lost endpoint.
+# Stop the local operator while the Deployment is reduced. The lifecycle
+# controller will resume before it admits the automatic operation, so the
+# fixture must have a one-replica Deployment contract before that point.
 kill -STOP "${operator_pid}"
 automatic_replicaset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["replicaset"])' "${automatic_candidates_file}")
-kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null
+kubectl scale deployment "${central_deployment}" -n kube-ovn-operator-system --replicas=1 >/dev/null
 kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null
 automatic_target_pod=""
 automatic_target_node=""
@@ -701,7 +701,6 @@ kubectl cordon "${automatic_target_node}" >/dev/null
 # the operator itself remains running and must still drive the lifecycle.
 guard_automatic_workload() {
   while true; do
-    kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null 2>&1 || true
     kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
     kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json 2>/dev/null |
       REPLICA_SET="${automatic_replicaset}" SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
@@ -810,7 +809,6 @@ kill "${replacement_guard_pid}" 2>/dev/null || true
 wait "${replacement_guard_pid}" 2>/dev/null || true
 replacement_guard_pid=""
 
-kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null 2>&1 || true
 kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
 kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
 for _ in $(seq 1 30); do
