@@ -200,7 +200,7 @@ func TestObserveLeaseStreamRearmsAndClearsOnDelete(t *testing.T) {
 	transitions := int32(1)
 	now := metav1.NewMicroTime(time.Now().Add(-time.Second))
 	record := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{Name: "central", Namespace: "default", UID: types.UID("lease-1"), ResourceVersion: "1"},
+		ObjectMeta: metav1.ObjectMeta{Name: "central", Namespace: "default", UID: types.UID("lease-1"), ResourceVersion: "1", OwnerReferences: []metav1.OwnerReference{{APIVersion: "operator.kubeovn.io/v1alpha1", Kind: "KubeOVNInstallation", UID: types.UID("installation-owner")}}},
 		Spec: coordinationv1.LeaseSpec{
 			HolderIdentity:       &holder,
 			LeaseDurationSeconds: &duration,
@@ -218,12 +218,12 @@ func TestObserveLeaseStreamRearmsAndClearsOnDelete(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- observeLeaseStream(ctx, clientset.CoordinationV1().Leases("default"), "central", types.UID("installation"), gate)
+		done <- observeLeaseStream(ctx, clientset.CoordinationV1().Leases("default"), "central", "", gate)
 	}()
 	deadline := time.Now().Add(time.Second)
 	for {
 		if token, armed := gate.Current(); armed {
-			if token.LeaseUID != "lease-1" || token.Epoch != 1 {
+			if token.InstallationUID != "installation-owner" || token.LeaseUID != "lease-1" || token.Epoch != 1 {
 				t.Fatalf("unexpected initial fence token: %+v", token)
 			}
 			break

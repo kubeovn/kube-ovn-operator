@@ -159,8 +159,8 @@ func observeLease(ctx context.Context, leases coordinationclient.LeaseInterface,
 }
 
 func observeLeaseStream(ctx context.Context, leases coordinationclient.LeaseInterface, name string, installationUID types.UID, gate *fencing.Gate) error {
-	if leases == nil || strings.TrimSpace(name) == "" || installationUID == "" || gate == nil {
-		return errors.New("lease observer requires a client, name, installation UID and gate")
+	if leases == nil || strings.TrimSpace(name) == "" || gate == nil {
+		return errors.New("lease observer requires a client, name and gate")
 	}
 	record, err := leases.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {

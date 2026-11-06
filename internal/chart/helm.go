@@ -429,8 +429,11 @@ func injectFenceAgentIntoWorkload(object *unstructured.Unstructured, config Fenc
 			map[string]any{"name": "kube-ovn-fence-client-ca", "mountPath": "/var/run/fence/client-ca", "readOnly": true},
 			map[string]any{"name": "kube-ovn-fence-tmp", "mountPath": "/tmp"},
 		},
-		"readinessProbe": map[string]any{"httpGet": map[string]any{"path": "/readyz", "port": port, "scheme": "HTTPS"}, "periodSeconds": int64(5), "timeoutSeconds": int64(3)},
-		"livenessProbe":  map[string]any{"httpGet": map[string]any{"path": "/healthz", "port": port, "scheme": "HTTPS"}, "periodSeconds": int64(10), "timeoutSeconds": int64(3)},
+		// The fence endpoint requires a client certificate for every TLS
+		// handshake. Kubernetes HTTP probes cannot present one, so use a TCP
+		// probe to check that the mTLS listener is accepting connections.
+		"readinessProbe": map[string]any{"tcpSocket": map[string]any{"port": port}, "periodSeconds": int64(5), "timeoutSeconds": int64(3)},
+		"livenessProbe":  map[string]any{"tcpSocket": map[string]any{"port": port}, "periodSeconds": int64(10), "timeoutSeconds": int64(3)},
 	}
 	templateSpec["containers"] = append(containers, sidecar)
 	volumes, _, err := unstructured.NestedSlice(templateSpec, "volumes")
