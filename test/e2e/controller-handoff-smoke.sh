@@ -762,10 +762,9 @@ if [[ -z "${automatic_request_name}" || "${automatic_request_name}" == "${previo
   cat "${test_dir}/operator.log"
   exit 1
 fi
-# Admission has pinned the unique lost endpoint. Reduce the fixture
-# Deployment's desired replicas now so its controller cannot recreate a second
-# unpinned Pod while the durable operation converges.
-kubectl scale deployment "${central_deployment}" -n kube-ovn-operator-system --replicas=1 >/dev/null
+# Admission has pinned the unique lost endpoint. Keep the Deployment's
+# original desired replica count until the durable operation has removed the
+# old database member; the lifecycle executor rejects an early scale-down.
 guard_automatic_workload &
 deployment_guard_pid=$!
 guard_automatic_replacements &
