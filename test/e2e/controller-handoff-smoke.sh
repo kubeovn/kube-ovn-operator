@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cluster_name="kube-ovn-operator-controller-e2e"
+central_deployment="ovn-central"
 test_dir=$(mktemp -d)
 created_cluster=0
 operator_pid=""
@@ -229,14 +230,14 @@ spec:
 YAML
 
 for _ in $(seq 1 180); do
-  ready=$(kubectl get deployment/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+  ready=$(kubectl get "deployment/${central_deployment}" -n kube-ovn-operator-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
   inventory=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.inventory.name}' 2>/dev/null || true)
   if [[ "${ready}" == 3 && -n "${inventory}" ]]; then
     break
   fi
   sleep 2
 done
-if [[ "$(kubectl get deployment/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.readyReplicas}')" != 3 ]]; then
+if [[ "$(kubectl get "deployment/${central_deployment}" -n kube-ovn-operator-system -o jsonpath='{.status.readyReplicas}')" != 3 ]]; then
   kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
   cat "${test_dir}/operator.log"
   exit 1
@@ -338,7 +339,7 @@ printf '%s\n' "${request_json}" | grep -Fq '"kind":"Deployment"'
 printf '%s\n' "${request_json}" | grep -Fq '"replicaSet"'
 printf '%s\n' "${journal_json}" | grep -Fq "${request_name}"
 
-replicas=$(kubectl get deployment/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
+replicas=$(kubectl get "deployment/${central_deployment}" -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
 if [[ "${replicas}" != 3 ]] || ! kubectl get pod "${target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
   echo 'Deployment changed before lifecycle execution was authorized' >&2
   exit 1
@@ -376,7 +377,7 @@ echo "lifecycle completion receipt verified: ${complete_name}"
 # The completion receipt and journal must retain the same immutable request,
 # while the old Deployment has exactly two survivors and the new member is an
 # independently owned, ready StatefulSet.
-final_replicas=$(kubectl get deployment/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
+final_replicas=$(kubectl get "deployment/${central_deployment}" -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
 if [[ "$final_replicas" != 2 ]]; then
   echo "expected the retained Chart Deployment to converge to two replicas, got $final_replicas" >&2
   exit 1
@@ -646,7 +647,7 @@ if [[ "${automatic_phase}" != Complete ]]; then
   cat "${test_dir}/operator.log"
   exit 1
 fi
-automatic_replicas=$(kubectl get deployment/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
+automatic_replicas=$(kubectl get "deployment/${central_deployment}" -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
 if [[ "${automatic_replicas}" != 1 ]]; then
   echo "expected Chart Deployment to scale to one replica after automatic replacement, got ${automatic_replicas}" >&2
   exit 1
@@ -778,7 +779,7 @@ if [[ "${scale_in_phase}" != Complete ]]; then
   cat "${test_dir}/operator.log"
   exit 1
 fi
-scale_in_replicas=$(kubectl get deployment/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
+scale_in_replicas=$(kubectl get "deployment/${central_deployment}" -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
 if [[ "${scale_in_replicas}" != 1 ]]; then
   echo "expected Chart Deployment to remain at one replica after StatefulSet retirement, got ${scale_in_replicas}" >&2
   exit 1
