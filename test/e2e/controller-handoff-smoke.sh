@@ -784,12 +784,17 @@ echo "automatic loss replacement admitted: ${automatic_target_pod} on ${automati
 automatic_phase=""
 for _ in $(seq 1 240); do
   automatic_phase=$(journal_phase "${automatic_journal_name}" 2>/dev/null || true)
-  if [[ "${automatic_phase}" == Complete ]]; then
-    # Once the durable operation has completed, the fixture guards must stop
-    # writing before the follow-up Chart apply consumes its handoff.
+  if [[ "${automatic_phase}" == Retiring ]]; then
+    # The executor owns the final Deployment scale-down after joint removal
+    # converges. Stop the ReplicaSet/paused-Deployment guard before that step,
+    # but keep the replacement guard alive so a late Kubernetes Pod cannot
+    # violate the pinned lost-endpoint retirement contract.
     kill "${deployment_guard_pid}" 2>/dev/null || true
     wait "${deployment_guard_pid}" 2>/dev/null || true
     deployment_guard_pid=""
+  elif [[ "${automatic_phase}" == Complete ]]; then
+    # Once the durable operation has completed, the remaining fixture guard
+    # must stop writing before the follow-up Chart apply consumes its handoff.
     kill "${replacement_guard_pid}" 2>/dev/null || true
     wait "${replacement_guard_pid}" 2>/dev/null || true
     replacement_guard_pid=""
