@@ -519,7 +519,11 @@ import json
 import os
 
 candidates = json.load(open(os.environ["CANDIDATES_FILE"]))
-current = {item["metadata"]["name"] for item in json.loads(os.environ["CURRENT_PODS"]).get("items", [])}
+current = {
+    item["metadata"]["name"]
+    for item in json.loads(os.environ["CURRENT_PODS"]).get("items", [])
+    if any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in item.get("metadata", {}).get("ownerReferences", []))
+}
 missing = [item for item in candidates if item["name"] not in current]
 if len(current) == 1 and len(missing) == 1:
     print(f'{missing[0]["name"]}|{missing[0]["node"]}')
