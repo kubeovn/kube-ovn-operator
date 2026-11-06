@@ -7,8 +7,13 @@ test_dir=$(mktemp -d)
 created_cluster=0
 operator_pid=""
 server_pid=""
+deployment_guard_pid=""
 
 cleanup() {
+  if [[ -n "${deployment_guard_pid}" ]]; then
+    kill "${deployment_guard_pid}" 2>/dev/null || true
+    wait "${deployment_guard_pid}" 2>/dev/null || true
+  fi
   if [[ -n "${operator_pid}" ]]; then
     kill -CONT "${operator_pid}" 2>/dev/null || true
     kill "${operator_pid}" 2>/dev/null || true
@@ -547,6 +552,21 @@ if [[ -z "${automatic_target_pod}" || -z "${automatic_target_node}" ]]; then
   echo 'Deployment scale-down did not retire exactly one original Pod' >&2
   exit 1
 fi
+automatic_survivor_pod=$(CANDIDATES_FILE="${automatic_candidates_file}" TARGET_POD="${automatic_target_pod}" python3 - <<'PYTHON'
+import json
+import os
+
+for item in json.load(open(os.environ["CANDIDATES_FILE"])):
+    if item["name"] != os.environ["TARGET_POD"]:
+        print(item["name"])
+        break
+PYTHON
+)
+if [[ -z "${automatic_survivor_pod}" ]]; then
+  kill -CONT "${operator_pid}"
+  echo 'could not identify the retained Deployment survivor Pod' >&2
+  exit 1
+fi
 for _ in $(seq 1 30); do
   if ! kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
     break
@@ -667,6 +687,37 @@ cat >"${test_dir}/automatic-replacement.json" <<JSON
 JSON
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/automatic-replacement.json" >/dev/null
 kubectl cordon "${automatic_target_node}" >/dev/null
+
+# The operator owns the rendered Deployment and may reapply its chart while
+# the automatic replacement is preparing. Keep the fixture Deployment paused
+# and its active ReplicaSet at one continuously so the Kubernetes controllers
+# cannot create a second unpinned replacement between lifecycle observations.
+# This is test-only coordination for the deliberate endpoint-loss injection;
+# the operator itself remains running and must still drive the lifecycle.
+guard_automatic_workload() {
+  while true; do
+    kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null 2>&1 || true
+    kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
+    kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json 2>/dev/null |
+      REPLICA_SET="${automatic_replicaset}" SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
+import json
+import os
+import subprocess
+import sys
+
+for item in json.load(sys.stdin).get("items", []):
+    owners = item.get("metadata", {}).get("ownerReferences", [])
+    if not any(owner.get("controller") and owner.get("kind") == "ReplicaSet" and owner.get("name") == os.environ["REPLICA_SET"] for owner in owners):
+        continue
+    if item["metadata"]["name"] == os.environ["SURVIVOR_POD"]:
+        continue
+    subprocess.run(["kubectl", "delete", "pod", item["metadata"]["name"], "-n", "kube-ovn-operator-system", "--grace-period=0", "--force", "--wait=false"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+' || true
+    sleep 0.2
+  done
+}
+guard_automatic_workload &
+deployment_guard_pid=$!
 kill -CONT "${operator_pid}"
 
 previous_request_name=${request_name}
@@ -714,6 +765,9 @@ if [[ "${automatic_phase}" != Complete ]]; then
   cat "${test_dir}/operator.log"
   exit 1
 fi
+kill "${deployment_guard_pid}" 2>/dev/null || true
+wait "${deployment_guard_pid}" 2>/dev/null || true
+deployment_guard_pid=""
 kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null 2>&1 || true
 kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
 kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
