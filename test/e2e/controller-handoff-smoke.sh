@@ -747,8 +747,6 @@ for item in json.load(sys.stdin).get("items", []):
     sleep 0.2
   done
 }
-guard_automatic_workload &
-deployment_guard_pid=$!
 kill -CONT "${operator_pid}"
 
 previous_request_name=${request_name}
@@ -765,6 +763,8 @@ if [[ -z "${automatic_request_name}" || "${automatic_request_name}" == "${previo
   cat "${test_dir}/operator.log"
   exit 1
 fi
+guard_automatic_workload &
+deployment_guard_pid=$!
 guard_automatic_replacements &
 replacement_guard_pid=$!
 automatic_request_json=$(kubectl get configmap "${automatic_request_name}" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
