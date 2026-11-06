@@ -38,7 +38,9 @@ kubectl apply \
 
 docker build --target central-runtime -t kube-ovn-central:e2e . >/dev/null
 docker build -f test/e2e/controller-fixture.Dockerfile -t kube-ovn-central-fixture:e2e . >/dev/null
+docker build --target fence-agent -t kube-ovn-fence-agent:e2e . >/dev/null
 kind load docker-image --name "${cluster_name}" kube-ovn-central-fixture:e2e
+kind load docker-image --name "${cluster_name}" kube-ovn-fence-agent:e2e
 
 # The lifecycle request is digest-pinned. Kind loads the tag on every node,
 # then we add the exact local containerd digest alias so the replacement
@@ -55,6 +57,17 @@ for node in $(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"
   docker exec "${node}" /usr/local/bin/ctr -n k8s.io images tag "${fixture_image_name}" "docker.io/library/kube-ovn-central-fixture@${digest}" >/dev/null
 done
 member_image="docker.io/library/kube-ovn-central-fixture@${fixture_digest}"
+fence_digest=""
+for node in $(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+  digest=$(docker exec "${node}" /usr/local/bin/ctr -n k8s.io images ls | awk '$1 == "docker.io/library/kube-ovn-fence-agent:e2e" {print $3}')
+  if [[ ! "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+    echo "could not read fence-agent image digest on ${node}" >&2
+    exit 1
+  fi
+  fence_digest=${digest}
+  docker exec "${node}" /usr/local/bin/ctr -n k8s.io images tag "docker.io/library/kube-ovn-fence-agent:e2e" "docker.io/library/kube-ovn-fence-agent@${digest}" >/dev/null
+done
+fence_image="docker.io/library/kube-ovn-fence-agent@${fence_digest}"
 
 # ovsdb-tool create-cluster generates the cluster UUID. Generate one shared
 # NB/SB cluster outside the Pods, then create a distinct native member file for
@@ -79,6 +92,42 @@ if [[ "${#control_plane_ips[@]}" -ne 3 ]]; then
   exit 1
 fi
 master_nodes=$(IFS=,; printf '%s' "${control_plane_ips[*]}")
+
+# The handoff exercises the same mTLS fence-agent transport used for
+# production mutation. These short-lived files and Secrets are scoped to the
+# disposable Kind cluster and are removed with it by the trap above.
+fence_dir="${test_dir}/fence"
+mkdir -m 0700 "${fence_dir}"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj '/CN=kube-ovn-fence-test-ca' \
+  -keyout "${fence_dir}/ca.key" -out "${fence_dir}/ca.crt" >/dev/null 2>&1
+serial_file="${fence_dir}/ca.srl"
+printf '01\n' >"${serial_file}"
+san_list=""
+for ip in "${control_plane_ips[@]}"; do
+  if [[ -n "${san_list}" ]]; then san_list+=,; fi
+  san_list+="IP:${ip}"
+done
+openssl req -newkey rsa:2048 -nodes \
+  -subj '/CN=kube-ovn-fence-agent' \
+  -keyout "${fence_dir}/server.key" -out "${fence_dir}/server.csr" >/dev/null 2>&1
+printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\n' "${san_list}" >"${fence_dir}/server.ext"
+openssl x509 -req -days 1 -CAserial "${serial_file}" \
+  -CA "${fence_dir}/ca.crt" -CAkey "${fence_dir}/ca.key" \
+  -in "${fence_dir}/server.csr" -out "${fence_dir}/server.crt" \
+  -extfile "${fence_dir}/server.ext" >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes \
+  -subj '/CN=kube-ovn-operator-test-client' \
+  -keyout "${fence_dir}/client.key" -out "${fence_dir}/client.csr" >/dev/null 2>&1
+printf 'extendedKeyUsage=clientAuth\n' >"${fence_dir}/client.ext"
+openssl x509 -req -days 1 -CAserial "${serial_file}" \
+  -CA "${fence_dir}/ca.crt" -CAkey "${fence_dir}/ca.key" \
+  -in "${fence_dir}/client.csr" -out "${fence_dir}/client.crt" \
+  -extfile "${fence_dir}/client.ext" >/dev/null 2>&1
+kubectl create secret generic fence-server -n kube-ovn-operator-system \
+  --from-file=tls.crt="${fence_dir}/server.crt" --from-file=tls.key="${fence_dir}/server.key" >/dev/null
+kubectl create secret generic fence-client-ca -n kube-ovn-operator-system \
+  --from-file=ca.crt="${fence_dir}/ca.crt" >/dev/null
 docker run --rm --network=none \
   --user 0:0 \
   --env "MASTER_NODES=${master_nodes}" \
@@ -140,6 +189,13 @@ mkdir -m 0700 "${backup_dir}"
   --metrics-bind-address=0 \
   --health-probe-bind-address=:18083 \
   --backup-dir="${backup_dir}" \
+  --fence-endpoint-template='https://{node}:8443' \
+  --fence-ca-file="${fence_dir}/ca.crt" \
+  --fence-client-cert-file="${fence_dir}/client.crt" \
+  --fence-client-key-file="${fence_dir}/client.key" \
+  --fence-agent-image="${fence_image}" \
+  --fence-agent-server-tls-secret=fence-server \
+  --fence-agent-client-ca-secret=fence-client-ca \
   >"${test_dir}/operator.log" 2>&1 &
 operator_pid=$!
 

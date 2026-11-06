@@ -24,7 +24,7 @@ jobs:
           make chart-lint
           helm template kube-ovn-operator charts/kube-ovn-operator --include-crds \
             --set fenceAgent.enabled=true \
-            --set-string 'fenceAgent.endpointTemplate=https://{node}:8443/fence/{pod}' \
+            --set-string 'fenceAgent.endpointTemplate=https://{node}:8443' \
             --set-string 'fenceAgent.image=ghcr.io/kubeovn/kube-ovn-operator:fence-agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
             --set-string fenceAgent.serverTLSSecret=fence-server \
             --set-string fenceAgent.clientCASecret=fence-client-ca \
@@ -105,7 +105,7 @@ jobs:
         run: |
           test "$(docker image inspect --format '{{.Config.User}}' "$FENCE_AGENT_IMAGE")" = "65532:65532"
           docker run --rm --entrypoint /fence-agent "$FENCE_AGENT_IMAGE" --help >/tmp/fence-agent-help.txt 2>&1
-          grep -q -- '--lease-name' /tmp/fence-agent-help.txt
+          grep -Eq -- '(^|[[:space:]])-{1,2}lease-name([[:space:]]|$)' /tmp/fence-agent-help.txt
 
   central-runtime:
     needs: verify

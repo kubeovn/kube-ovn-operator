@@ -15,6 +15,7 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: {{ .Release.Name }}-central
       initContainers:
         - name: prepare-ovn-storage
           image: kube-ovn-central-fixture:e2e

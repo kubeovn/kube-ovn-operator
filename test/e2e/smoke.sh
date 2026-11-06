@@ -22,7 +22,15 @@ if ! kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
   kind create cluster --name "${cluster_name}" --wait 60s
   created_cluster=1
 fi
-kubectl apply -k config
+# The smoke process runs the freshly built operator binary locally. Apply its
+# API and RBAC prerequisites without starting the image-backed manager
+# Deployment, whose default image is intentionally a published-installation
+# concern and is unavailable in an offline kind test cluster.
+kubectl apply \
+  -f config/namespace.yaml \
+  -f config/crd/bases \
+  -f config/rbac/role.yaml \
+  -f config/rbac/service_account.yaml
 go build -o "${operator_binary}" ./cmd/operator
 "${operator_binary}" --leader-elect=false --plan-only >/tmp/kube-ovn-operator-e2e.log 2>&1 &
 operator_pid=$!
