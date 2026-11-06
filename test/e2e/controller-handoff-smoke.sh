@@ -701,9 +701,10 @@ kubectl cordon "${automatic_target_node}" >/dev/null
 # the operator itself remains running and must still drive the lifecycle.
 guard_automatic_workload() {
   while true; do
+    kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null 2>&1 || true
     kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
     kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json 2>/dev/null |
-      REPLICA_SET="${automatic_replicaset}" SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
+      SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
 import json
 import os
 import subprocess
@@ -711,7 +712,7 @@ import sys
 
 for item in json.load(sys.stdin).get("items", []):
     owners = item.get("metadata", {}).get("ownerReferences", [])
-    if not any(owner.get("controller") and owner.get("kind") == "ReplicaSet" and owner.get("name") == os.environ["REPLICA_SET"] for owner in owners):
+    if not any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in owners):
         continue
     if item["metadata"]["name"] == os.environ["SURVIVOR_POD"]:
         continue
@@ -729,7 +730,7 @@ for item in json.load(sys.stdin).get("items", []):
 guard_automatic_replacements() {
   while true; do
     kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json 2>/dev/null |
-      REPLICA_SET="${automatic_replicaset}" SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
+      SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
 import json
 import os
 import subprocess
@@ -737,7 +738,7 @@ import sys
 
 for item in json.load(sys.stdin).get("items", []):
     owners = item.get("metadata", {}).get("ownerReferences", [])
-    if not any(owner.get("controller") and owner.get("kind") == "ReplicaSet" and owner.get("name") == os.environ["REPLICA_SET"] for owner in owners):
+    if not any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in owners):
         continue
     if item["metadata"]["name"] == os.environ["SURVIVOR_POD"]:
         continue
