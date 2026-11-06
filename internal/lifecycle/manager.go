@@ -394,11 +394,20 @@ func (m *Manager) Resume(ctx context.Context, installation *api.KubeOVNInstallat
 		pin.Journal = workload.Reference{Name: pinned.JournalName, UID: pinned.JournalUID}
 		pin.Request = workload.Reference{Name: pinned.RequestName, UID: pinned.RequestUID}
 	}
-	operation, err := Inspect(ctx, m.Client, installation, pin)
+	// A completed operation remains pinned in installation status until the
+	// next lifecycle transition consumes its handoff. Its request is bound to
+	// the generation that admitted that transition, so a later spec change
+	// must not make the already verified completion receipt unreadable. Active
+	// operations still require the current generation before Step can mutate
+	// anything.
+	operation, err := inspect(ctx, m.Client, installation, pin, false)
 	if err != nil || operation == nil {
 		return nil, err
 	}
 	if operation.State.Phase != Complete {
+		if _, err := inspect(ctx, m.Client, installation, &operation.Reference, true); err != nil {
+			return nil, err
+		}
 		executor, closeStore, err := m.executor(installation)
 		if err != nil {
 			return nil, err

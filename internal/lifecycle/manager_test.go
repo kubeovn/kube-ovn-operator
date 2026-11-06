@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -14,7 +15,54 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
 	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+type resumeRunner struct{}
+
+func (resumeRunner) Run(context.Context, string, string, string, []string) ([]byte, error) {
+	return nil, nil
+}
+
+func (resumeRunner) Stream(context.Context, string, string, string, []string, io.Writer) error {
+	return nil
+}
+
+func TestResumeAcceptsCompletedOperationAfterInstallationGenerationChanges(t *testing.T) {
+	f := setup(t)
+	ref := f.started(t)
+	f.join(0, true)
+	f.join(1, true)
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Retiring)
+	f.mustStep(t, ref, Retiring)
+	f.mustStep(t, ref, Complete)
+
+	installation := f.installation.DeepCopy()
+	if err := f.kube.Get(t.Context(), client.ObjectKeyFromObject(installation), installation); err != nil {
+		t.Fatal(err)
+	}
+	installation.Generation++
+	if err := f.kube.Update(t.Context(), installation); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := &Manager{Client: f.kube, Runner: resumeRunner{}}
+	var recovery *Recovery
+	err := f.guarded(t, func(ctx context.Context) error {
+		var err error
+		recovery, err = manager.Resume(ctx, installation, nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("completed operation was rejected after a later spec generation: %v", err)
+	}
+	if recovery == nil || recovery.State.Phase != Complete {
+		t.Fatalf("resume returned incomplete operation: %+v", recovery)
+	}
+}
 
 type restoreFenceFake struct {
 	readyErr error

@@ -32,6 +32,10 @@ type Operation struct {
 // It requires both Leases but no mutation providers or backup storage. A missing
 // pinned journal is an error, never permission to resume ordinary chart apply.
 func Inspect(ctx context.Context, kube client.Client, installation *api.KubeOVNInstallation, pinned *Reference) (*Operation, error) {
+	return inspect(ctx, kube, installation, pinned, true)
+}
+
+func inspect(ctx context.Context, kube client.Client, installation *api.KubeOVNInstallation, pinned *Reference, current bool) (*Operation, error) {
 	if kube == nil || installation == nil || installation.UID == "" {
 		return nil, errors.New("operation inspection requires installation identity and direct client")
 	}
@@ -60,7 +64,7 @@ func Inspect(ctx context.Context, kube client.Client, installation *api.KubeOVNI
 		}
 		ref = Reference{Journal: workload.Reference{Name: object.Name, UID: object.UID}, Request: saved.Request}
 	}
-	_, request, saved, err := e.load(ctx, ref, true)
+	_, request, saved, err := e.load(ctx, ref, current)
 	if err != nil {
 		return nil, err
 	}
