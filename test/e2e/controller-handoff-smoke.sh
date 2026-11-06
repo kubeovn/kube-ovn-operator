@@ -694,6 +694,13 @@ echo "automatic loss replacement admitted: ${automatic_target_pod} on ${automati
 
 automatic_phase=""
 for _ in $(seq 1 240); do
+  # Keep the paused Deployment's ReplicaSet at one while the operator drains
+  # the old database identity. A paused Deployment can otherwise restore its
+  # ReplicaSet count during a reconciliation and recreate the lost endpoint.
+  kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
+  if kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
+    kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
+  fi
   automatic_phase=$(journal_phase "${automatic_journal_name}" 2>/dev/null || true)
   if [[ "${automatic_phase}" == Complete ]]; then
     break
@@ -707,6 +714,15 @@ if [[ "${automatic_phase}" != Complete ]]; then
   cat "${test_dir}/operator.log"
   exit 1
 fi
+kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null 2>&1 || true
+kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
+kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
+for _ in $(seq 1 30); do
+  if ! kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
 automatic_replicas=$(kubectl get "deployment/${central_deployment}" -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}')
 if [[ "${automatic_replicas}" != 1 ]]; then
   echo "expected Chart Deployment to scale to one replica after automatic replacement, got ${automatic_replicas}" >&2
