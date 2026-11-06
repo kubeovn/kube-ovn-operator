@@ -10,6 +10,7 @@ server_pid=""
 
 cleanup() {
   if [[ -n "${operator_pid}" ]]; then
+    kill -CONT "${operator_pid}" 2>/dev/null || true
     kill "${operator_pid}" 2>/dev/null || true
     wait "${operator_pid}" 2>/dev/null || true
   fi
@@ -486,23 +487,54 @@ echo "default controller completed native Deployment replacement: $target_pod ->
 # approval is created before the endpoint is lost, and the replacement request
 # deliberately omits replaceEndpoint. Cordon plus Pod deletion makes the old
 # endpoint uniquely lost while preserving the healthy Deployment survivor.
-automatic_target_pod=$(kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json | python3 -c '
+automatic_candidates_file="${test_dir}/automatic-candidates.json"
+kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json | python3 -c '
 import json
 import sys
 
+items = []
 for item in json.load(sys.stdin).get("items", []):
     owners = item.get("metadata", {}).get("ownerReferences", [])
     if any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in owners):
-        print(item["metadata"]["name"])
-        break
-')
-if [[ -z "${automatic_target_pod}" ]]; then
-  echo 'could not identify a Deployment Pod for automatic loss replacement' >&2
+        items.append({"name": item["metadata"]["name"], "node": item.get("spec", {}).get("nodeName", "")})
+print(json.dumps(items))
+' >"${automatic_candidates_file}"
+automatic_candidate_count=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "${automatic_candidates_file}")
+if [[ "${automatic_candidate_count}" -lt 2 ]]; then
+  echo "expected two Deployment Pods before automatic loss, got ${automatic_candidate_count}" >&2
   exit 1
 fi
-automatic_target_node=$(kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system -o jsonpath='{.spec.nodeName}')
-if [[ -z "${automatic_target_node}" ]]; then
-  echo "Deployment Pod ${automatic_target_pod} has no target Node" >&2
+
+# Pause the local operator while the Deployment is reduced. This lets the
+# ReplicaSet retire one selected endpoint without the operator immediately
+# restoring the chart replica count or creating a replacement Pod.
+kill -STOP "${operator_pid}"
+kubectl scale deployment "${central_deployment}" -n kube-ovn-operator-system --replicas=1 >/dev/null
+automatic_target_pod=""
+automatic_target_node=""
+for _ in $(seq 1 90); do
+  current_pods=$(kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json 2>/dev/null || true)
+  candidate=$(CANDIDATES_FILE="${automatic_candidates_file}" CURRENT_PODS="${current_pods}" python3 - <<'PYTHON'
+import json
+import os
+
+candidates = json.load(open(os.environ["CANDIDATES_FILE"]))
+current = {item["metadata"]["name"] for item in json.loads(os.environ["CURRENT_PODS"]).get("items", [])}
+missing = [item for item in candidates if item["name"] not in current]
+if len(current) == 1 and len(missing) == 1:
+    print(f'{missing[0]["name"]}|{missing[0]["node"]}')
+PYTHON
+  )
+  if [[ -n "${candidate}" ]]; then
+    automatic_target_pod=${candidate%%|*}
+    automatic_target_node=${candidate#*|}
+    break
+  fi
+  sleep 1
+done
+if [[ -z "${automatic_target_pod}" || -z "${automatic_target_node}" ]]; then
+  kill -CONT "${operator_pid}"
+  echo 'Deployment scale-down did not retire exactly one original Pod' >&2
   exit 1
 fi
 
@@ -614,7 +646,7 @@ cat >"${test_dir}/automatic-replacement.json" <<JSON
 JSON
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/automatic-replacement.json" >/dev/null
 kubectl cordon "${automatic_target_node}" >/dev/null
-kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --wait=false >/dev/null
+kill -CONT "${operator_pid}"
 
 previous_request_name=${request_name}
 automatic_request_name=""
