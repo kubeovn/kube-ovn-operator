@@ -712,7 +712,8 @@ import sys
 
 for item in json.load(sys.stdin).get("items", []):
     owners = item.get("metadata", {}).get("ownerReferences", [])
-    if not any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in owners):
+    controller = next((owner for owner in owners if owner.get("controller")), None)
+    if controller is not None and controller.get("kind") != "ReplicaSet":
         continue
     if item["metadata"]["name"] == os.environ["SURVIVOR_POD"]:
         continue
@@ -738,7 +739,8 @@ import sys
 
 for item in json.load(sys.stdin).get("items", []):
     owners = item.get("metadata", {}).get("ownerReferences", [])
-    if not any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in owners):
+    controller = next((owner for owner in owners if owner.get("controller")), None)
+    if controller is not None and controller.get("kind") != "ReplicaSet":
         continue
     if item["metadata"]["name"] == os.environ["SURVIVOR_POD"]:
         continue
