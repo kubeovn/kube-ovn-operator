@@ -522,6 +522,7 @@ fi
 # operator resumes.
 kill -STOP "${operator_pid}"
 automatic_replicaset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["replicaset"])' "${automatic_candidates_file}")
+kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null
 kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null
 automatic_target_pod=""
 automatic_target_node=""
@@ -749,6 +750,14 @@ for item in json.load(sys.stdin).get("items", []):
     sleep 0.2
   done
 }
+# Start both fixture guards before unpausing the Deployment. The Kubernetes
+# Deployment controller may create a replacement immediately after the
+# pause is lifted, before the operator has admitted the automatic request.
+guard_automatic_workload &
+deployment_guard_pid=$!
+guard_automatic_replacements &
+replacement_guard_pid=$!
+kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":false}}' >/dev/null
 kill -CONT "${operator_pid}"
 
 previous_request_name=${request_name}
@@ -770,10 +779,6 @@ fi
 # old database member; the lifecycle executor rejects an early scale-down.
 kubectl annotate pod "${automatic_survivor_pod}" -n kube-ovn-operator-system \
   controller.kubernetes.io/pod-deletion-cost=2147483647 --overwrite >/dev/null
-guard_automatic_workload &
-deployment_guard_pid=$!
-guard_automatic_replacements &
-replacement_guard_pid=$!
 automatic_request_json=$(kubectl get configmap "${automatic_request_name}" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
 printf '%s\n' "${automatic_request_json}" | grep -Fq "${automatic_target_pod}"
 printf '%s\n' "${automatic_request_json}" | grep -Fq '"automaticReplacement":true'
