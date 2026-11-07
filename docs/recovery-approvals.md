@@ -111,6 +111,10 @@ identities, and expose the restored snapshot marker on every node for both
 databases. The API request and controller status are used directly; no backup,
 plan or execution status is fabricated by the test.
 
+The request includes a fractional-second expiration. The persisted plan's
+timestamp uses the API status field's second precision, while its immutable
+digest and expiration admission retain the request's full precision.
+
 This uses the healthy quorum path and needs no destructive recovery approval.
 It does not establish lost-quorum reconstruction, approval consumption during
 that failure, a version-changing rollback, or an application write barrier

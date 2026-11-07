@@ -575,3 +575,32 @@ func findCondition(conditions []metav1.Condition, conditionType string) *metav1.
 }
 
 var _ RecoveryExecutor = recoveryExecutorFunc(nil)
+
+func TestRecoveryPlanSurvivesTimestampWirePrecision(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	request := recoveryRequest(now)
+	request.Spec.ExpiresAt = metav1.NewTime(now.Add(time.Hour + 123456*time.Microsecond))
+	plan, reason, err := buildRecoveryPlan(request, recoveryInstallation(), now)
+	if err != nil {
+		t.Fatalf("build recovery plan: %s: %v", reason, err)
+	}
+	// The API's metav1.Time status field serializes at second precision even
+	// when the incoming request used a fractional RFC3339 expiration.
+	wire, err := stdjson.Marshal(recoveryPlanStatus(plan))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored operatorv1alpha1.RecoveryPlanStatus
+	if err := stdjson.Unmarshal(wire, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if !sameRecoveryPlan(&stored, recoveryPlanStatus(plan)) {
+		t.Fatalf("unchanged request invalidated its serialized plan: wire=%s expiry=%s", wire, plan.ExpiresAt.Format(time.RFC3339Nano))
+	}
+	changed := plan
+	changed.ExpiresAt = changed.ExpiresAt.Add(time.Nanosecond)
+	changed.Digest = recoveryPlanDigest(changed)
+	if sameRecoveryPlan(&stored, recoveryPlanStatus(changed)) {
+		t.Fatal("normalizing the status timestamp hid a changed expiration from the immutable digest")
+	}
+}

@@ -2754,7 +2754,10 @@ func recoveryPlanDigest(plan RecoveryPlan) string {
 }
 
 func recoveryPlanStatus(plan RecoveryPlan) *operatorv1alpha1.RecoveryPlanStatus {
-	return &operatorv1alpha1.RecoveryPlanStatus{Digest: plan.Digest, InstallationUID: plan.InstallationUID, InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest, TargetMemberRef: plan.TargetMemberRef, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest, BackupRef: plan.BackupRef, DatabaseRefs: maps.Clone(plan.DatabaseRefs), ApprovalRef: plan.ApprovalRef, ExpiresAt: metav1.NewTime(plan.ExpiresAt)}
+	// metav1.Time drops fractional seconds on the wire. Normalize the status
+	// projection before comparison; the digest and expiry admission retain
+	// the request's complete timestamp precision.
+	return &operatorv1alpha1.RecoveryPlanStatus{Digest: plan.Digest, InstallationUID: plan.InstallationUID, InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest, TargetMemberRef: plan.TargetMemberRef, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest, BackupRef: plan.BackupRef, DatabaseRefs: maps.Clone(plan.DatabaseRefs), ApprovalRef: plan.ApprovalRef, ExpiresAt: metav1.NewTime(plan.ExpiresAt.Truncate(time.Second))}
 }
 
 func sameRecoveryPlan(left, right *operatorv1alpha1.RecoveryPlanStatus) bool {
