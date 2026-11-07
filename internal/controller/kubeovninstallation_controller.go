@@ -2496,6 +2496,16 @@ func (r *RecoveryRequestReconciler) Reconcile(ctx context.Context, req reconcile
 	if request.Status.Phase == operatorv1alpha1.RecoveryPhaseSucceeded || request.Status.Phase == operatorv1alpha1.RecoveryPhaseFailed || request.Status.Phase == operatorv1alpha1.RecoveryPhaseExpired {
 		return reconcile.Result{}, nil
 	}
+	if request.Spec.Suspend && request.Status.Plan == nil && request.Status.Execution == nil {
+		if request.Spec.ExpiresAt.IsZero() || !request.Spec.ExpiresAt.After(now) {
+			return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "Expired", "suspended recovery request has expired", now, true)
+		}
+		request.Status.Phase = operatorv1alpha1.RecoveryPhasePending
+		for _, kind := range []string{"Accepted", "ExecutionReady"} {
+			setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, kind, metav1.ConditionFalse, "Suspended", "request is suspended before plan admission; bind the independent approval and resume in one spec update", now))
+		}
+		return reconcile.Result{RequeueAfter: request.Spec.ExpiresAt.Sub(now)}, r.updateRecoveryStatus(ctx, request)
+	}
 	installationName := strings.TrimSpace(request.Spec.InstallationRef)
 	if installationName == "" {
 		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "InvalidRequest", "spec.installationRef is required", now, false)
@@ -2570,6 +2580,9 @@ func (r *RecoveryRequestReconciler) Reconcile(ctx context.Context, req reconcile
 func buildRecoveryPlan(request *operatorv1alpha1.KubeOVNRecoveryRequest, installation *operatorv1alpha1.KubeOVNInstallation, now time.Time) (RecoveryPlan, string, error) {
 	if request == nil || installation == nil {
 		return RecoveryPlan{}, "InvalidRequest", errors.New("recovery plan requires a request and installation")
+	}
+	if request.Spec.Suspend {
+		return RecoveryPlan{}, "Suspended", errors.New("suspended recovery request cannot be admitted")
 	}
 	if request.Name == "" || request.Namespace == "" || request.UID == "" || request.Generation < 1 {
 		return RecoveryPlan{}, "InvalidRequest", errors.New("recovery request requires a stable UID, namespace, name and generation")
