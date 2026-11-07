@@ -62,12 +62,13 @@ func TestMembershipPodRunnerPinsOwnerPodAndContainer(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "readiness changed", "restart count changed", "container stopped":
-				if scenario == "readiness changed" {
+				switch scenario {
+				case "readiness changed":
 					pod.Status.Conditions[0].Status = corev1.ConditionFalse
 					pod.Status.ContainerStatuses[0].Ready = false
-				} else if scenario == "restart count changed" {
+				case "restart count changed":
 					pod.Status.ContainerStatuses[0].RestartCount++
-				} else {
+				case "container stopped":
 					pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Terminated: new(corev1.ContainerStateTerminated)}
 				}
 				if err := kube.Status().Update(t.Context(), pod); err != nil {
