@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -42,7 +43,7 @@ func topologyStatus(pod, database string) string {
 }
 
 func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T) {
-	for _, scenario := range []string{"healthy", "dynamic listener", "local config listener", "unsupported listener database", "missing pod", "unhealthy peer", "extra raft member", "cluster drift", "node replaced", "pod replaced", "listener changed", "ephemeral storage", "wrong node address", "wrong node address with explicit replacement", "wrong node address with replacement for another endpoint", "cordoned node", "cordoned node with explicit replacement", "no listener"} {
+	for _, scenario := range []string{"healthy", "unready pod", "readiness changed during discovery", "dynamic listener", "local config listener", "unsupported listener database", "missing pod", "unhealthy peer", "extra raft member", "cluster drift", "node replaced", "pod replaced", "listener changed", "ephemeral storage", "wrong node address", "wrong node address with explicit replacement", "wrong node address with replacement for another endpoint", "cordoned node", "cordoned node with explicit replacement", "no listener"} {
 		t.Run(scenario, func(t *testing.T) {
 			installation, kube, objects := healthFixture(t)
 			if strings.Contains(scenario, "with explicit replacement") || strings.Contains(scenario, "replacement for another endpoint") {
@@ -66,6 +67,10 @@ func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T)
 					t.Fatal(err)
 				}
 				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "ovn-central", ContainerID: "containerd://" + pod.Name, Ready: true, State: corev1.ContainerState{Running: new(corev1.ContainerStateRunning)}}}
+				if scenario == "unready pod" && i == 0 {
+					pod.Status.Conditions[0].Status = corev1.ConditionFalse
+					pod.Status.ContainerStatuses[0].Ready = false
+				}
 				if err := kube.Status().Update(t.Context(), pod); err != nil {
 					t.Fatal(err)
 				}
@@ -88,6 +93,17 @@ func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T)
 			remoteReads := map[string]int{}
 			mutated := false
 			runner := runnerFunc(func(ctx context.Context, _, pod, _ string, command []string) ([]byte, error) {
+				if !mutated && scenario == "readiness changed during discovery" {
+					mutated = true
+					current := new(corev1.Pod)
+					if err := kube.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: pod}, current); err != nil {
+						t.Fatal(err)
+					}
+					current.Status.Conditions[0].Status = corev1.ConditionFalse
+					if err := kube.Status().Update(ctx, current); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if !mutated && (scenario == "node replaced" || scenario == "pod replaced") {
 					mutated = true
 					var target client.Object
@@ -210,5 +226,147 @@ func TestClientConnectionsIgnoreUnreferencedRowsAndRejectMissingReferences(t *te
 	data = []byte(strings.Replace(string(data), "12345678", "00000001", 1))
 	if _, err := connectionTargets(data); err == nil {
 		t.Fatal("missing connection target accepted")
+	}
+}
+
+func TestSameTopologyIdentitySurvivesPodRenameOrdering(t *testing.T) {
+	first := CentralIdentity{Node: ObjectIdentity{Name: "node-a", UID: "node-a"}, Workload: WorkloadIdentity{ObjectIdentity: ObjectIdentity{Name: "central", UID: "deployment"}, Kind: "Deployment"}, Pod: ObjectIdentity{Name: "central-old-a", UID: "old-a"}, ContainerID: "old-a"}
+	second := first
+	second.Node = ObjectIdentity{Name: "node-b", UID: "node-b"}
+	second.Pod = ObjectIdentity{Name: "central-old-b", UID: "old-b"}
+	second.ContainerID = "old-b"
+	before := CentralTopology{Members: []CentralIdentity{first, second}}
+	first.Pod = ObjectIdentity{Name: "central-new-z", UID: "new-a"}
+	first.ContainerID = "new-a"
+	after := CentralTopology{Members: []CentralIdentity{second, first}}
+	if !before.SameIdentity(after) {
+		t.Fatal("Pod rename/order changed retained native identities")
+	}
+	after.Members[1].Node.UID = "replacement-node"
+	if before.SameIdentity(after) {
+		t.Fatal("node replacement was accepted as a process restart")
+	}
+}
+
+func TestRebindRetainedProcessesKeepsUniqueLossAndRejectsIdentityDrift(t *testing.T) {
+	for _, scenario := range []string{"restart and loss", "server changed", "cluster changed", "listener changed", "node replaced", "storage changed", "node changed during sample"} {
+		t.Run(scenario, func(t *testing.T) {
+			installation, kube, objects := healthFixture(t)
+			for i := range 3 {
+				pod := objects[i+2].(*corev1.Pod)
+				pod.Spec.NodeName, pod.Spec.HostNetwork = fmt.Sprintf("node-%d", i), true
+				pod.Spec.Containers = []corev1.Container{{Name: "ovn-central", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/etc/ovn"}}}}
+				pod.Spec.Volumes = []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/etc/origin/ovn"}}}}
+				if err := kube.Update(t.Context(), pod); err != nil {
+					t.Fatal(err)
+				}
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "ovn-central", ContainerID: "containerd://" + pod.Name, Ready: true, State: corev1.ContainerState{Running: new(corev1.ContainerStateRunning)}}}
+				if err := kube.Status().Update(t.Context(), pod); err != nil {
+					t.Fatal(err)
+				}
+				node := &corev1.Node{Name: pod.Spec.NodeName, UID: types.UID(pod.Spec.NodeName), Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}, Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: fmt.Sprintf("192.0.2.%d", i+1)}}}}
+				if err := kube.Create(t.Context(), node); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rebinding := false
+			reads := 0
+			runner := runnerFunc(func(ctx context.Context, _, pod, _ string, command []string) ([]byte, error) {
+				database, port := "OVN_Northbound", 6641
+				if strings.Contains(command[3], "ovnsb") {
+					database, port = "OVN_Southbound", 6642
+				}
+				if rebinding {
+					reads++
+					if scenario == "node changed during sample" {
+						node := new(corev1.Node)
+						if err := kube.Get(ctx, client.ObjectKey{Name: "node-0"}, node); err != nil {
+							t.Fatal(err)
+						}
+						node.UID = "replaced-during-sample"
+						if err := kube.Update(ctx, node); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if command[4] == "ovsdb-server/list-remotes" {
+					if rebinding && scenario == "listener changed" {
+						port += 100
+					}
+					return fmt.Appendf(nil, "ptcp:%d:0.0.0.0", port), nil
+				}
+				if command[4] != "cluster/status" {
+					return nil, errors.New("unexpected mutation")
+				}
+				data := topologyStatus(pod, database)
+				if rebinding && scenario == "server changed" {
+					data = strings.ReplaceAll(data, "aaaa0000", "aaaa0001")
+				}
+				if rebinding && scenario == "cluster changed" {
+					data = strings.ReplaceAll(data, "dddd0000", "dddd0001")
+				}
+				return []byte(data), nil
+			})
+			retained, err := DiscoverCentralTopology(t.Context(), kube, runner, installation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := CentralTopology{Members: append([]CentralIdentity(nil), retained.Members...)}
+			// Two Deployment processes roll over; a third member is truly lost.
+			// Full healthy discovery cannot hide that loss or approve a new baseline.
+			for i := range 3 {
+				pod := new(corev1.Pod)
+				if err := kube.Get(t.Context(), client.ObjectKeyFromObject(objects[i+2]), pod); err != nil {
+					t.Fatal(err)
+				}
+				if err := kube.Delete(t.Context(), pod); err != nil {
+					t.Fatal(err)
+				}
+				if i == 2 {
+					continue
+				}
+				pod.Name, pod.UID, pod.ResourceVersion = fmt.Sprintf("restarted-central-%d", i), types.UID(fmt.Sprintf("restarted-%d", i)), ""
+				pod.Status.ContainerStatuses[0].ContainerID = "containerd://" + pod.Name
+				if scenario == "storage changed" && i == 0 {
+					pod.Spec.Volumes[0].HostPath.Path = "/different-data"
+				}
+				if err := kube.Create(t.Context(), pod); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "node replaced" {
+				node := new(corev1.Node)
+				if err := kube.Get(t.Context(), client.ObjectKey{Name: "node-0"}, node); err != nil {
+					t.Fatal(err)
+				}
+				node.UID = "replaced-node"
+				if err := kube.Update(t.Context(), node); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rebinding = true
+			got, err := RebindRetainedProcesses(t.Context(), kube, runner, installation, retained)
+			if scenario != "restart and loss" {
+				if err == nil {
+					t.Fatalf("identity drift accepted: %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reads != 8 || !retained.SameIdentity(got) || !reflect.DeepEqual(retained, before) {
+				t.Fatalf("unverified process or mutated baseline: reads=%d, topology=%+v", reads, got)
+			}
+			for i, member := range got.Members {
+				if member.Node.Name == "node-2" {
+					if !reflect.DeepEqual(member, retained.Members[i]) {
+						t.Fatal("missing member identity changed")
+					}
+				} else if !strings.HasPrefix(member.Pod.Name, "restarted-central-") || member.Pod.UID == retained.Members[i].Pod.UID || member.ContainerID == retained.Members[i].ContainerID {
+					t.Fatalf("surviving process was not rebound: %+v", member)
+				}
+			}
+		})
 	}
 }

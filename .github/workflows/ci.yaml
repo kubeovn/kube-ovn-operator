@@ -20,6 +20,7 @@ jobs:
       - name: Verify generated and formatted files
         run: |
           test -z "$(gofmt -l .)"
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/e2e -p test_recovery_watch.py
           python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("test/e2e/fence-takeover-restore.py").read_text())'
           bash -n test/e2e/controller-handoff-smoke.sh
           make manifests

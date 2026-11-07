@@ -314,7 +314,10 @@ digest-pinned mTLS `fence-agent` sidecar and the operator can use its remote
 fence client. The disposable three-node Kind handoff test also verifies Lease
 takeover/expiry and native NB/SB restore replication through these agents; see
 [transport fencing](docs/transport-fencing.md). Production deployment, credential
-provisioning and complete lost-quorum recovery acceptance are still required. The standard Kubernetes
+provisioning and complete lost-quorum recovery acceptance are still required.
+The same fixture exercises a healthy-quorum `KubeOVNRecoveryRequest` from
+scheduled native backup through fenced restore, rollout resume and final data
+verification; see [recovery acceptance](docs/recovery-approvals.md#healthy-quorum-controller-acceptance). The standard Kubernetes
 `pods/exec` adapter deliberately does not claim this capability because
 cancelling an already accepted exec request cannot revoke the process command.
 For a same-size request with a UID-bound removal approval, the selector may

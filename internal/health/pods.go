@@ -93,24 +93,32 @@ func ownedWorkload(workload client.Object, installation *operatorv1alpha1.KubeOV
 		labels[apply.InstallationNamespaceLabel] == installation.Namespace
 }
 
+// samePodProcesses checks endpoint identity independently of readiness. A
+// native NB leave can make the shared container unready while its SB process
+// still needs the separately authorized removal. Health observers additionally
+// require Ready; membership commands prove database health through native status.
+func samePodProcesses(a, b corev1.Pod) bool {
+	if a.UID != b.UID || a.Spec.NodeName != b.Spec.NodeName || b.DeletionTimestamp != nil || b.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	if len(a.Status.ContainerStatuses) != len(b.Status.ContainerStatuses) {
+		return false
+	}
+	for _, previous := range a.Status.ContainerStatuses {
+		index := slices.IndexFunc(b.Status.ContainerStatuses, func(current corev1.ContainerStatus) bool { return current.Name == previous.Name })
+		if index < 0 {
+			return false
+		}
+		current := b.Status.ContainerStatuses[index]
+		if current.ContainerID != previous.ContainerID || current.RestartCount != previous.RestartCount {
+			return false
+		}
+	}
+	return true
+}
+
 func samePods(before, after []corev1.Pod) bool {
 	return slices.EqualFunc(before, after, func(a, b corev1.Pod) bool {
-		if a.UID != b.UID || a.Spec.NodeName != b.Spec.NodeName || b.DeletionTimestamp != nil || b.Status.Phase != corev1.PodRunning || !podReady(b) {
-			return false
-		}
-		if len(a.Status.ContainerStatuses) != len(b.Status.ContainerStatuses) {
-			return false
-		}
-		for _, previous := range a.Status.ContainerStatuses {
-			index := slices.IndexFunc(b.Status.ContainerStatuses, func(current corev1.ContainerStatus) bool { return current.Name == previous.Name })
-			if index < 0 {
-				return false
-			}
-			current := b.Status.ContainerStatuses[index]
-			if current.ContainerID != previous.ContainerID || current.RestartCount != previous.RestartCount || !current.Ready {
-				return false
-			}
-		}
-		return true
+		return samePodProcesses(a, b) && podReady(b) && !slices.ContainsFunc(b.Status.ContainerStatuses, func(status corev1.ContainerStatus) bool { return !status.Ready })
 	})
 }

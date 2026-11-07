@@ -22,6 +22,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 )
 
@@ -124,6 +125,30 @@ func (c *FenceHTTPClient) ProbeReady(ctx context.Context, namespace, endpoint, c
 // ProbeReadyAt is ProbeReady with an optional Pod or Node IP for templates
 // that route directly to a host-network sidecar through the {node} placeholder.
 func (c *FenceHTTPClient) ProbeReadyAt(ctx context.Context, namespace, endpoint, node, container string) error {
+	return c.probeReadyAt(ctx, namespace, endpoint, node, container, nil)
+}
+
+// WaitReadyAt waits for the trusted watcher to arm this exact Lease holder.
+// It performs only observations, bounds the wait, and honors Lease cancellation.
+func (c *FenceHTTPClient) WaitReadyAt(ctx context.Context, namespace, endpoint, node, container string, token lease.FenceToken) error {
+	if err := validateFenceToken(token); err != nil {
+		return err
+	}
+	var lastErr error
+	err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+		lastErr = c.probeReadyAt(ctx, namespace, endpoint, node, container, &token)
+		if errors.Is(lastErr, ovnadmin.ErrStaleFence) {
+			return false, nil
+		}
+		return lastErr == nil, lastErr
+	})
+	if err != nil {
+		return fmt.Errorf("wait for current restore fence: %w", errors.Join(err, lastErr))
+	}
+	return nil
+}
+
+func (c *FenceHTTPClient) probeReadyAt(ctx context.Context, namespace, endpoint, node, container string, token *lease.FenceToken) error {
 	if c == nil || c.client == nil {
 		return errors.New("fence HTTP client is not configured")
 	}
@@ -143,6 +168,9 @@ func (c *FenceHTTPClient) ProbeReadyAt(ctx context.Context, namespace, endpoint,
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return fmt.Errorf("create fence readiness request: %w", err)
+	}
+	if token != nil {
+		setFenceHeaders(request, *token)
 	}
 	response, err := c.client.Do(request)
 	if err != nil {
@@ -216,6 +244,11 @@ func (c *FenceHTTPClient) RestoreFencedAt(ctx context.Context, namespace, endpoi
 	if container == "" {
 		container = "ovn-central"
 	}
+	// A new operation Lease can precede the sidecar's watch event. Wait before
+	// constructing the streaming request so retries cannot consume its input.
+	if err := c.WaitReadyAt(ctx, namespace, endpoint, node, container, token); err != nil {
+		return err
+	}
 	requestURL, err := c.endpointURLForAt(namespace, endpoint, node, container, fencing.RestorePath)
 	if err != nil {
 		return err
@@ -226,11 +259,7 @@ func (c *FenceHTTPClient) RestoreFencedAt(ctx context.Context, namespace, endpoi
 	}
 	request.Header.Set("Content-Type", "application/octet-stream")
 	request.Header.Set("X-Kube-OVN-Database", database)
-	request.Header.Set("X-Kube-OVN-Installation-UID", string(token.InstallationUID))
-	request.Header.Set("X-Kube-OVN-Lease-UID", string(token.LeaseUID))
-	request.Header.Set("X-Kube-OVN-Fence-Scope", string(token.Scope))
-	request.Header.Set("X-Kube-OVN-Fence-Holder", token.Holder)
-	request.Header.Set("X-Kube-OVN-Fence-Epoch", strconv.FormatInt(int64(token.Epoch), 10))
+	setFenceHeaders(request, token)
 	response, err := c.client.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -241,6 +270,14 @@ func (c *FenceHTTPClient) RestoreFencedAt(ctx context.Context, namespace, endpoi
 	defer func() { _ = response.Body.Close() }()
 	_, err = decodeFenceResponse(response, "fenced restore")
 	return err
+}
+
+func setFenceHeaders(request *http.Request, token lease.FenceToken) {
+	request.Header.Set("X-Kube-OVN-Installation-UID", string(token.InstallationUID))
+	request.Header.Set("X-Kube-OVN-Lease-UID", string(token.LeaseUID))
+	request.Header.Set("X-Kube-OVN-Fence-Scope", string(token.Scope))
+	request.Header.Set("X-Kube-OVN-Fence-Holder", token.Holder)
+	request.Header.Set("X-Kube-OVN-Fence-Epoch", strconv.FormatInt(int64(token.Epoch), 10))
 }
 
 func (c *FenceHTTPClient) do(ctx context.Context, endpoint, namespace, container string, command []string, token *lease.FenceToken) ([]byte, error) {

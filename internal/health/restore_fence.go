@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 )
 
 // RemoteRestoreFence is the operator-side readiness adapter for the remote
@@ -39,8 +40,12 @@ func (f *RemoteRestoreFence) ReadyFor(ctx context.Context, installation *operato
 	if err := topology.Validate(); err != nil {
 		return fmt.Errorf("restore fence preflight topology: %w", err)
 	}
+	token, err := lease.Token(ctx, lease.Central)
+	if err != nil {
+		return fmt.Errorf("restore fence preflight requires the current central Lease: %w", err)
+	}
 	for _, member := range topology.Members {
-		if err := f.Remote.ProbeReadyAt(ctx, installation.Namespace, member.Pod.Name, retainedFenceHost(member), "ovn-central"); err != nil {
+		if err := f.Remote.WaitReadyAt(ctx, installation.Namespace, member.Pod.Name, retainedFenceHost(member), "ovn-central", token); err != nil {
 			return fmt.Errorf("restore fence for central Pod %s is not ready: %w", member.Pod.Name, err)
 		}
 	}

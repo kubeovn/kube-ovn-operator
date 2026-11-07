@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	stdjson "encoding/json/v2"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -532,6 +533,161 @@ func TestDestructiveRecoveryPersistsRestoreFailureAndStopsRetrying(t *testing.T)
 	}
 }
 
+func TestDestructiveRecoveryPersistsPendingVerificationReason(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	scheme := controllerScheme(t)
+	installation := recoveryInstallation()
+	installation.Status.ObservedVersion = installation.Spec.Version
+	installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{
+		ID: testBackupPairID(), Version: installation.Status.ObservedVersion, TopologyDigest: installation.Status.Topology.Inventory.Digest,
+		DatabaseRefs: testBackupPairRefs(), CompletedAt: metav1.NewTime(now),
+	}
+	request := recoveryRequest(now)
+	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
+	request.Spec.TargetMemberRef = ""
+	request.Spec.BackupRef = installation.Status.LastBackup.ID
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
+	executor := &rollbackExecutorFake{failPhase: operatorv1alpha1.RollbackPhaseVerifying, failErr: fmt.Errorf("%w: northd NorthdUnhealthy: northd disconnected", ErrRollbackInProgress)}
+	lifecycleExecutor := &LifecycleRecoveryExecutor{Client: kube, Leases: lease.New(kube), Topology: &lifecycleTopologyFake{retained: additionTopologyFixture()}, Lifecycle: &lifecycleCoordinatorFake{reader: kube}, Rollback: executor}
+	reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }, Executor: lifecycleExecutor}
+	key := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)}
+	for range 6 {
+		if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := new(operatorv1alpha1.KubeOVNRecoveryRequest)
+	if err := kube.Get(t.Context(), key.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != operatorv1alpha1.RecoveryPhaseExecuting || got.Status.Execution.Phase != operatorv1alpha1.RollbackPhaseVerifying || !strings.Contains(got.Status.Execution.Reason, "northd disconnected") {
+		t.Fatalf("pending verification lost its durable retryable reason: %+v", got.Status)
+	}
+}
+
+func TestDestructiveRecoveryRetriesLeaseContention(t *testing.T) {
+	for _, phase := range []operatorv1alpha1.RollbackPhase{operatorv1alpha1.RollbackPhaseQuiescing, operatorv1alpha1.RollbackPhaseRestoring, operatorv1alpha1.RollbackPhaseWorkloads, operatorv1alpha1.RollbackPhaseVerifying} {
+		t.Run(string(phase), func(t *testing.T) {
+			now := time.Now().UTC().Truncate(time.Second)
+			scheme := controllerScheme(t)
+			installation := recoveryInstallation()
+			installation.Status.ObservedVersion = installation.Spec.Version
+			installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{
+				ID: testBackupPairID(), Version: installation.Status.ObservedVersion, TopologyDigest: installation.Status.Topology.Inventory.Digest,
+				DatabaseRefs: testBackupPairRefs(), CompletedAt: metav1.NewTime(now),
+			}
+			request := recoveryRequest(now)
+			request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
+			request.Spec.TargetMemberRef = ""
+			request.Spec.BackupRef = installation.Status.LastBackup.ID
+			kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
+			steps := &rollbackExecutorFake{}
+			executor := &LifecycleRecoveryExecutor{Client: kube, Leases: lease.New(kube), Topology: &lifecycleTopologyFake{retained: additionTopologyFixture()}, Lifecycle: &lifecycleCoordinatorFake{reader: kube}, Rollback: steps}
+			reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }, Executor: executor}
+			key := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)}
+			if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+				t.Fatal(err)
+			}
+			stored := new(operatorv1alpha1.KubeOVNRecoveryRequest)
+			if err := kube.Get(t.Context(), key.NamespacedName, stored); err != nil {
+				t.Fatal(err)
+			}
+			digest := stored.Status.Plan.Digest
+			stored.Status.Execution = &operatorv1alpha1.RecoveryExecutionStatus{Phase: phase, StartedAt: metav1.NewTime(now)}
+			if err := kube.Status().Update(t.Context(), stored); err != nil {
+				t.Fatal(err)
+			}
+			// Hold the real operation Lease as the installation reconciler would.
+			// No rollback step may run until this independent holder releases it.
+			if err := lease.New(kube).With(t.Context(), installation, lease.Installation, func(ctx context.Context) error {
+				result, err := reconciler.Reconcile(t.Context(), key)
+				if err != nil {
+					return err
+				}
+				if err := kube.Get(ctx, key.NamespacedName, stored); err != nil {
+					return err
+				}
+				if result.RequeueAfter <= 0 || stored.Status.Phase != operatorv1alpha1.RecoveryPhaseExecuting || stored.Status.Execution.Phase != phase || len(steps.phases) != 0 {
+					t.Fatalf("lease contention became terminal or advanced recovery: result=%+v status=%+v steps=%v", result, stored.Status, steps.phases)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			for range 5 {
+				if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := kube.Get(t.Context(), key.NamespacedName, stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status.Phase != operatorv1alpha1.RecoveryPhaseSucceeded || stored.Status.Plan.Digest != digest || len(steps.phases) == 0 || steps.phases[0] != phase {
+				t.Fatalf("recovery did not resume its pinned phase after Lease release: status=%+v steps=%v", stored.Status, steps.phases)
+			}
+		})
+	}
+}
+
+func TestInstallationYieldsToExecutingRecovery(t *testing.T) {
+	now := time.Unix(10000, 0).UTC()
+	installation := scheduledBackupInstallation(now)
+	installation.Spec.Upgrade.Backup.Schedule = ""
+	request := recoveryRequest(now)
+	request.Namespace = installation.Namespace
+	request.Spec.InstallationRef = installation.Name
+	request.Status = operatorv1alpha1.KubeOVNRecoveryRequestStatus{
+		Phase: operatorv1alpha1.RecoveryPhaseExecuting,
+		Plan:  &operatorv1alpha1.RecoveryPlanStatus{InstallationUID: installation.UID},
+	}
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
+	lifecycleFake := &lifecycleCoordinatorFake{reader: kube}
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: controllerScheme(t), Clock: func() time.Time { return now }, Leases: lease.New(kube), Lifecycle: lifecycleFake, Renderer: objectRenderer{}}
+	key := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(installation)}
+	result, err := reconciler.Reconcile(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleFake.resume != 0 || result.RequeueAfter <= 0 {
+		t.Fatalf("installation competed with active recovery: resumes=%d result=%+v", lifecycleFake.resume, result)
+	}
+	stored := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), key.NamespacedName, stored); err != nil {
+		t.Fatal(err)
+	}
+	version := stored.ResourceVersion
+	if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+		t.Fatal(err)
+	}
+	if err := kube.Get(t.Context(), key.NamespacedName, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.ResourceVersion != version {
+		t.Fatal("unchanged recovery wait rewrote installation status and generated another event")
+	}
+	called := false
+	err = reconciler.withInstallationLease(t.Context(), installation, func(context.Context) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, errRecoveryExecuting) || called {
+		t.Fatalf("Lease admission did not recheck active recovery: err=%v called=%t", err, called)
+	}
+	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(request), request); err != nil {
+		t.Fatal(err)
+	}
+	request.Status.Phase = operatorv1alpha1.RecoveryPhaseSucceeded
+	if err := kube.Status().Update(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleFake.resume != 1 {
+		t.Fatal("terminal recovery did not release normal installation reconciliation")
+	}
+}
+
 type recoveryExecutorFunc func(context.Context, RecoveryPlan) error
 
 func (f recoveryExecutorFunc) Execute(ctx context.Context, plan RecoveryPlan) error {
@@ -575,3 +731,32 @@ func findCondition(conditions []metav1.Condition, conditionType string) *metav1.
 }
 
 var _ RecoveryExecutor = recoveryExecutorFunc(nil)
+
+func TestRecoveryPlanSurvivesTimestampWirePrecision(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	request := recoveryRequest(now)
+	request.Spec.ExpiresAt = metav1.NewTime(now.Add(time.Hour + 123456*time.Microsecond))
+	plan, reason, err := buildRecoveryPlan(request, recoveryInstallation(), now)
+	if err != nil {
+		t.Fatalf("build recovery plan: %s: %v", reason, err)
+	}
+	// The API's metav1.Time status field serializes at second precision even
+	// when the incoming request used a fractional RFC3339 expiration.
+	wire, err := stdjson.Marshal(recoveryPlanStatus(plan))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored operatorv1alpha1.RecoveryPlanStatus
+	if err := stdjson.Unmarshal(wire, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if !sameRecoveryPlan(&stored, recoveryPlanStatus(plan)) {
+		t.Fatalf("unchanged request invalidated its serialized plan: wire=%s expiry=%s", wire, plan.ExpiresAt.Format(time.RFC3339Nano))
+	}
+	changed := plan
+	changed.ExpiresAt = changed.ExpiresAt.Add(time.Nanosecond)
+	changed.Digest = recoveryPlanDigest(changed)
+	if sameRecoveryPlan(&stored, recoveryPlanStatus(changed)) {
+		t.Fatal("normalizing the status timestamp hid a changed expiration from the immutable digest")
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -223,7 +224,104 @@ func TestRollbackRestoreFailureDoesNotResumeOrApplyWorkloads(t *testing.T) {
 	}
 }
 
+func TestRollbackVerificationReportsPendingGate(t *testing.T) {
+	for _, gate := range []string{"workloads", "OVN", "northd", "data plane", "ready"} {
+		t.Run(gate, func(t *testing.T) {
+			chartDigest := "sha256:" + strings.Repeat("a", 64)
+			installation := recoveryInstallation()
+			installation.Spec.Version = "v1.16.0"
+			installation.Spec.Chart.Digest = chartDigest
+			installation.Status.ObservedVersion = "v1.17.0"
+			installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{
+				ID: testBackupPairID(), Version: installation.Spec.Version, TopologyDigest: installation.Status.Topology.Inventory.Digest,
+				DatabaseRefs: testBackupPairRefs(), CompletedAt: metav1.NewTime(time.Unix(100, 0).UTC()),
+			}
+			retained := additionTopologyFixture()
+			for i := range retained.Members {
+				retained.Members[i].Workload.Name = "ovn-central"
+			}
+			installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: "previous-spec", ManifestHash: "previous-manifest", Version: installation.Spec.Version}
+			previous := *installation.Status.ApplyCheckpoint
+			kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation).WithObjects(installation).Build()
+			lifecycleFake := &lifecycleCoordinatorFake{reader: kube, restoreErr: errors.New("restore rejected by database fence")}
+			workload := new(rollbackWorkloadFake)
+			executor := &KubernetesRollbackExecutor{
+				Client:    kube,
+				Lifecycle: lifecycleFake,
+				Topology:  &lifecycleTopologyFake{retained: retained},
+				RendererFactory: func(*operatorv1alpha1.KubeOVNInstallation) chart.Renderer {
+					return rollbackRendererFunc(func(context.Context, operatorv1alpha1.KubeOVNInstallationSpec) (chart.Rendered, error) {
+						return chart.Rendered{Digest: chartDigest, Objects: []*unstructured.Unstructured{{Object: map[string]any{
+							"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "ovn-central"},
+							"spec": map[string]any{"replicas": int64(3)},
+						}}}}, nil
+					})
+				},
+				WorkloadFactory: func(apply.InstallationIdentity) apply.ApplyClient { return workload },
+				OVN: ovnProviderFunc(func(context.Context, *operatorv1alpha1.KubeOVNInstallation) (health.OVNReport, error) {
+					return health.OVNReport{Ready: true}, nil
+				}),
+			}
+			plan := RollbackPlan{
+				InstallationNamespace: installation.Namespace, InstallationName: installation.Name, InstallationUID: installation.UID, InstallationGeneration: installation.Generation,
+				SourceVersion: installation.Status.ObservedVersion, TargetVersion: installation.Spec.Version, BackupID: installation.Status.LastBackup.ID,
+				DatabaseRefs: testBackupPairRefs(), Destination: installation.Status.LastBackup.Destination, TopologyDigest: installation.Status.Topology.Inventory.Digest,
+				ChartDigest: chartDigest, Mode: "reconvert", RequestUID: "recovery-request",
+			}
+
+			workload.observation = &apply.Observation{Ready: gate != "workloads", Message: "Deployment still rolling out"}
+			executor.OVN = ovnProviderFunc(func(context.Context, *operatorv1alpha1.KubeOVNInstallation) (health.OVNReport, error) {
+				return health.OVNReport{Ready: gate != "OVN", Reason: "CentralPodsPending", Message: "expected three central pods"}, nil
+			})
+			executor.Runtime = runtimeProviderFunc(func(context.Context, *operatorv1alpha1.KubeOVNInstallation) health.RuntimeReport {
+				report := health.RuntimeReport{Northd: metav1.Condition{Status: metav1.ConditionTrue}, DataPlane: metav1.Condition{Status: metav1.ConditionTrue}}
+				if gate == "northd" {
+					report.Northd = metav1.Condition{Status: metav1.ConditionFalse, Reason: "NorthdUnhealthy", Message: "northd disconnected"}
+				}
+				if gate == "data plane" {
+					report.DataPlane = metav1.Condition{Status: metav1.ConditionFalse, Reason: "DataPlaneUnhealthy", Message: "chassis disconnected"}
+				}
+				return report
+			})
+			next, err := executor.Step(t.Context(), plan, operatorv1alpha1.RollbackPhaseVerifying)
+			if gate == "ready" {
+				if err != nil || next != operatorv1alpha1.RollbackPhaseSucceeded {
+					t.Fatalf("healthy verification did not complete: phase=%s err=%v", next, err)
+				}
+				current := new(operatorv1alpha1.KubeOVNInstallation)
+				if err := kube.Get(t.Context(), client.ObjectKeyFromObject(installation), current); err != nil {
+					t.Fatal(err)
+				}
+				rendered, err := executor.renderRollbackTarget(t.Context(), current, retained, chartDigest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reconciler := &KubeOVNInstallationReconciler{Client: kube}
+				if err := reconciler.ensureApplyCheckpoint(t.Context(), current, rendered); err != nil {
+					t.Fatalf("verified recovery still blocks routine reconciliation: %v", err)
+				}
+				current.Spec.NetworkStack = "dual_stack"
+				if err := reconciler.ensureApplyCheckpoint(t.Context(), current, rendered); err == nil {
+					t.Fatal("recovery checkpoint authorized a later spec change")
+				}
+				return
+			}
+			current := new(operatorv1alpha1.KubeOVNInstallation)
+			if err := kube.Get(t.Context(), client.ObjectKeyFromObject(installation), current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.ApplyCheckpoint == nil || *current.Status.ApplyCheckpoint != previous {
+				t.Fatal("pending verification changed the apply checkpoint")
+			}
+			if next != operatorv1alpha1.RollbackPhaseVerifying || !errors.Is(err, ErrRollbackInProgress) || !strings.Contains(err.Error(), gate) {
+				t.Fatalf("pending %s gate lost its retryable diagnostic: phase=%s err=%v", gate, next, err)
+			}
+		})
+	}
+}
+
 type rollbackWorkloadFake struct {
+	observation    *apply.Observation
 	applyCalls     int
 	quiesceCalls   int
 	unquiesceCalls int
@@ -239,6 +337,9 @@ func (f *rollbackWorkloadFake) Apply(context.Context, []*unstructured.Unstructur
 }
 
 func (f *rollbackWorkloadFake) Observe(context.Context, []*unstructured.Unstructured) (apply.Observation, error) {
+	if f.observation != nil {
+		return *f.observation, nil
+	}
 	return apply.Observation{Ready: true}, nil
 }
 

@@ -22,6 +22,38 @@ func writeFenceHeaders(request *http.Request, token lease.FenceToken) {
 	request.Header.Set("X-Kube-OVN-Fence-Epoch", strconv.FormatInt(int64(token.Epoch), 10))
 }
 
+func TestHandlerReadinessMatchesRequestedLease(t *testing.T) {
+	gate := new(Gate)
+	token := testToken(4)
+	if err := gate.Arm(token); err != nil {
+		t.Fatal(err)
+	}
+	handler := &Handler{Gate: gate}
+	for _, scenario := range []string{"probe", "current", "stale", "partial"} {
+		t.Run(scenario, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, ReadyPath, nil)
+			want := http.StatusOK
+			switch scenario {
+			case "current":
+				writeFenceHeaders(request, token)
+			case "stale":
+				previous := token
+				previous.Holder = "previous-holder"
+				writeFenceHeaders(request, previous)
+				want = http.StatusConflict
+			case "partial":
+				request.Header.Set("X-Kube-OVN-Fence-Epoch", "4")
+				want = http.StatusBadRequest
+			}
+			reply := httptest.NewRecorder()
+			handler.ServeHTTP(reply, request)
+			if reply.Code != want {
+				t.Fatalf("readiness status=%d, want %d", reply.Code, want)
+			}
+		})
+	}
+}
+
 func TestHandlerRestoreRequiresCurrentFenceAndStreamsInput(t *testing.T) {
 	gate := new(Gate)
 	token := testToken(3)

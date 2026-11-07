@@ -4,7 +4,7 @@ set -eu
 # The controller handoff test uses the same native OVSDB processes as the
 # member provisioner. The smoke script pre-seeds one durable clustered database
 # member on each control-plane node before the Chart starts.
-master_nodes=${MASTER_NODES:?MASTER_NODES is required}
+master_nodes=${NODE_IPS:?NODE_IPS is required}
 node_ip=${NODE_IP:?NODE_IP is required}
 
 index=-1
