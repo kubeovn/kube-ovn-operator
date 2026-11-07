@@ -30,9 +30,10 @@ type OVNObserver struct {
 
 func (o *OVNObserver) Observe(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (OVNReport, error) {
 	report := OVNReport{Reason: "OVNVerificationPending", Message: "Waiting for OVN database health evidence"}
-	if installation.Spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly || installation.Spec.HCP.Enabled {
-		report.Reason = "PeerVerificationPending"
-		report.Message = "External or hosted OVN requires a peer health provider"
+	if installation.Spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
+		report.Ready = true
+		report.Reason = "NotRequired"
+		report.Message = "This installation uses an external OVN central"
 		return report, nil
 	}
 	if o.Reader == nil || o.Runner == nil {
@@ -77,7 +78,7 @@ func (o *OVNObserver) Observe(ctx context.Context, installation *operatorv1alpha
 			if db.Connected {
 				state = "Connected"
 			}
-			report.Members = append(report.Members, operatorv1alpha1.CentralMemberStatus{Database: name, ServerID: db.ServerID, Pod: pod.Name, State: state, Leader: db.Leader, AppliedIndex: db.Index})
+			report.Members = append(report.Members, operatorv1alpha1.CentralMemberStatus{Database: name, ServerID: db.ServerID, Pod: pod.Name, Node: pod.Spec.NodeName, State: state, Leader: db.Leader, AppliedIndex: db.Index})
 		}
 		summary, err := assessDatabase(name, installation.Spec.Central.Mode, states)
 		report.Databases = append(report.Databases, summary)

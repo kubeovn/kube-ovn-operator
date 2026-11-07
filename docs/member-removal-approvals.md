@@ -8,6 +8,14 @@ literal-IP RAFT address, a reason and an expiry. Each database may appear once.
 The lifecycle executor must pin the returned approval name and UID; a record
 recreated with the same name cannot replace it.
 
+For automatic replacement after a retained Deployment endpoint is lost, create
+this approval before adding the replacement `memberRequest`. The selector reads
+the decision's operation UUID and uses that same UUID for the durable lifecycle
+request, so the approval never has to predict a separately generated ID. An
+explicit replacement or `retireEndpoint` request that carries
+`removalApprovalRef` follows the same binding rule. The approval remains
+single-use and is reserved only after the lifecycle request has been admitted.
+
 ## Deployment prerequisites
 
 Permission to create this resource is permission to approve permanent loss.

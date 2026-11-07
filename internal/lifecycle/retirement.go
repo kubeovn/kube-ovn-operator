@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -32,13 +33,15 @@ const (
 // retirement pins one Pod and its ReplicaSet, then scales the Deployment down
 // by one only after the joint database removal has completed.
 type Retirement struct {
-	Kind       string               `json:"kind,omitempty"`
-	Workload   workload.Reference   `json:"workload"`
-	Endpoint   workload.Reference   `json:"endpoint,omitempty"`
-	ReplicaSet workload.Reference   `json:"replicaSet,omitempty"`
-	Survivors  []workload.Reference `json:"survivors,omitempty"`
-	Replicas   int32                `json:"replicas,omitzero"`
-	SpecDigest string               `json:"specDigest"`
+	Kind            string               `json:"kind,omitempty"`
+	Workload        workload.Reference   `json:"workload"`
+	Endpoint        workload.Reference   `json:"endpoint,omitempty"`
+	EndpointMissing bool                 `json:"endpointMissing,omitempty"`
+	Replacement     workload.Reference   `json:"replacement,omitempty"`
+	ReplicaSet      workload.Reference   `json:"replicaSet,omitempty"`
+	Survivors       []workload.Reference `json:"survivors,omitempty"`
+	Replicas        int32                `json:"replicas,omitzero"`
+	SpecDigest      string               `json:"specDigest"`
 }
 
 // PinRetirement reads a one-member StatefulSet without modifying it. Its
@@ -131,13 +134,98 @@ func PinDeploymentRetirement(ctx context.Context, kube client.Reader, installati
 		Replicas: *deployment.Spec.Replicas, SpecDigest: digest}, err
 }
 
+// PinDeploymentRetirementAfterLoss admits a Deployment replacement whose
+// retained endpoint has disappeared or been replaced. The old endpoint
+// remains UID-pinned from the retained topology, while every surviving Pod is
+// pinned and at most one replacement Pod is allowed. The caller must provide
+// an explicit permanent-loss approval in the lifecycle inventory; this helper
+// never infers that authority from the changed Pod alone.
+func PinDeploymentRetirementAfterLoss(ctx context.Context, kube client.Reader, installation *api.KubeOVNInstallation, ref, endpoint workload.Reference, survivors []workload.Reference) (Retirement, error) {
+	if kube == nil || installation == nil || installation.UID == "" || ref.Name == "" || ref.UID == "" || endpoint.Name == "" || endpoint.UID == "" {
+		return Retirement{}, errors.New("lost deployment retirement requires installation, workload and endpoint identities")
+	}
+	deployment := new(appsv1.Deployment)
+	if err := kube.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: ref.Name}, deployment); err != nil {
+		return Retirement{}, err
+	}
+	if err := checkDeploymentRetirement(deployment, installation, ref); err != nil {
+		return Retirement{}, err
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas < 2 {
+		return Retirement{}, errors.New("lost deployment retirement requires at least two replicas")
+	}
+	currentEndpoint := new(corev1.Pod)
+	if err := kube.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: endpoint.Name}, currentEndpoint); err == nil {
+		if currentEndpoint.UID == endpoint.UID {
+			return Retirement{}, errors.New("lost deployment retirement endpoint still exists")
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return Retirement{}, err
+	}
+	if len(survivors) != int(*deployment.Spec.Replicas)-1 {
+		return Retirement{}, errors.New("lost deployment retirement requires every retained survivor")
+	}
+	seen := make(map[string]workload.Reference, len(survivors))
+	for _, survivor := range survivors {
+		if survivor.Name == "" || survivor.UID == "" || seen[survivor.Name] != (workload.Reference{}) {
+			return Retirement{}, errors.New("lost deployment retirement survivors must be unique and UID-pinned")
+		}
+		seen[survivor.Name] = survivor
+	}
+	pods, replicaSets, err := deploymentPods(ctx, kube, deployment)
+	if err != nil {
+		return Retirement{}, err
+	}
+	var targetRS *appsv1.ReplicaSet
+	var replacement workload.Reference
+	for index := range pods {
+		pod := &pods[index]
+		owner := metav1.GetControllerOf(pod)
+		if owner == nil || replicaSets[owner.UID] == nil {
+			return Retirement{}, errors.New("lost deployment retirement requires one stable ReplicaSet")
+		}
+		if targetRS == nil {
+			targetRS = replicaSets[owner.UID]
+		} else if targetRS.UID != owner.UID {
+			return Retirement{}, errors.New("lost deployment retirement requires one stable ReplicaSet")
+		}
+		if retained, ok := seen[pod.Name]; ok {
+			if retained.UID != pod.UID || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || !podReady(pod) {
+				return Retirement{}, errors.New("lost deployment retirement requires every surviving Pod to be healthy and unchanged")
+			}
+			delete(seen, pod.Name)
+			continue
+		}
+		if replacement.Name != "" {
+			return Retirement{}, errors.New("lost deployment retirement found more than one unpinned replacement Pod")
+		}
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || !podReady(pod) {
+			return Retirement{}, errors.New("lost deployment retirement replacement Pod is not healthy")
+		}
+		replacement = workload.Reference{Name: pod.Name, UID: pod.UID}
+	}
+	if len(seen) != 0 {
+		return Retirement{}, errors.New("lost deployment retirement lost a retained survivor Pod")
+	}
+	if len(pods) != int(*deployment.Spec.Replicas) && len(pods) != int(*deployment.Spec.Replicas)-1 {
+		return Retirement{}, errors.New("lost deployment retirement has an unexpected Pod count")
+	}
+	if targetRS == nil {
+		return Retirement{}, errors.New("lost deployment retirement has no active ReplicaSet")
+	}
+	digest, err := deploymentRetirementDigest(deployment)
+	return Retirement{Kind: deploymentRetirementKind, Workload: ref, Endpoint: endpoint, EndpointMissing: true,
+		Replacement: replacement, ReplicaSet: workload.Reference{Name: targetRS.Name, UID: targetRS.UID}, Survivors: slices.Clone(survivors),
+		Replicas: *deployment.Spec.Replicas, SpecDigest: digest}, err
+}
+
 func checkRetirement(set *appsv1.StatefulSet, installation *api.KubeOVNInstallation, ref workload.Reference) error {
 	owner := metav1.GetControllerOf(set)
 	if set.Name != ref.Name || set.UID != ref.UID || set.DeletionTimestamp != nil || owner == nil || owner.UID != installation.UID || owner.Name != installation.Name || owner.APIVersion != api.GroupVersion.String() || owner.Kind != "KubeOVNInstallation" ||
 		set.Labels[apply.ManagedByLabel] != apply.ManagedByValue || set.Labels[apply.InstallationUIDLabel] != string(installation.UID) || set.Labels[apply.InstallationLabel] != installation.Name || set.Labels[apply.InstallationNamespaceLabel] != installation.Namespace {
 		return errors.New("retirement workload identity or installation ownership changed")
 	}
-	if set.Spec.Replicas == nil || (*set.Spec.Replicas != 0 && *set.Spec.Replicas != 1) || len(set.Spec.VolumeClaimTemplates) != 0 || set.Spec.UpdateStrategy.Type != appsv1.OnDeleteStatefulSetStrategyType || len(set.Spec.Template.Spec.Containers) != 1 || set.Spec.Template.Spec.Containers[0].Name != "ovn-central" || set.Spec.Ordinals != nil && set.Spec.Ordinals.Start != 0 {
+	if set.Spec.Replicas == nil || (*set.Spec.Replicas != 0 && *set.Spec.Replicas != 1) || len(set.Spec.VolumeClaimTemplates) != 0 || set.Spec.UpdateStrategy.Type != appsv1.OnDeleteStatefulSetStrategyType || !hasCentralContainer(set.Spec.Template.Spec.Containers) || set.Spec.Ordinals != nil && set.Spec.Ordinals.Start != 0 {
 		return errors.New("retirement requires an independent single-member StatefulSet with retained external storage")
 	}
 	return nil
@@ -149,10 +237,24 @@ func checkDeploymentRetirement(deployment *appsv1.Deployment, installation *api.
 		deployment.Labels[apply.ManagedByLabel] != apply.ManagedByValue || deployment.Labels[apply.InstallationUIDLabel] != string(installation.UID) || deployment.Labels[apply.InstallationLabel] != installation.Name || deployment.Labels[apply.InstallationNamespaceLabel] != installation.Namespace {
 		return errors.New("deployment retirement workload identity or installation ownership changed")
 	}
-	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas < 1 || deployment.Spec.Selector == nil || len(deployment.Spec.Template.Spec.Containers) != 1 || deployment.Spec.Template.Spec.Containers[0].Name != "ovn-central" || !deployment.Spec.Template.Spec.HostNetwork {
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas < 1 || deployment.Spec.Selector == nil || !hasCentralContainer(deployment.Spec.Template.Spec.Containers) || !deployment.Spec.Template.Spec.HostNetwork {
 		return errors.New("deployment retirement requires a multi-replica host-network ovn-central workload")
 	}
 	return nil
+}
+
+func hasCentralContainer(containers []corev1.Container) bool {
+	found := false
+	for _, container := range containers {
+		if container.Name != "ovn-central" {
+			continue
+		}
+		if found {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 func retirementDigest(set *appsv1.StatefulSet) (string, error) {
@@ -201,11 +303,12 @@ func deploymentPods(ctx context.Context, reader client.Reader, deployment *appsv
 }
 
 type retirementState struct {
-	kind             string
-	statefulSet      *appsv1.StatefulSet
-	deployment       *appsv1.Deployment
-	endpointPresent  bool
-	survivorsPresent int
+	kind               string
+	statefulSet        *appsv1.StatefulSet
+	deployment         *appsv1.Deployment
+	endpointPresent    bool
+	replacementPresent bool
+	survivorsPresent   int
 }
 
 func (e *Executor) retirementTarget(ctx context.Context, target Retirement) (*retirementState, error) {
@@ -267,6 +370,13 @@ func (e *Executor) retirementTarget(ctx context.Context, target Retirement) (*re
 				return nil, errors.New("retirement Deployment ReplicaSet changed")
 			}
 			if pod.Name == target.Endpoint.Name {
+				if target.EndpointMissing {
+					if target.Replacement.Name != pod.Name || target.Replacement.UID != pod.UID {
+						return nil, errors.New("retirement endpoint unexpectedly reappeared")
+					}
+					state.replacementPresent = true
+					continue
+				}
 				if pod.UID != target.Endpoint.UID {
 					return nil, errors.New("retirement endpoint was replaced")
 				}
@@ -280,17 +390,27 @@ func (e *Executor) retirementTarget(ctx context.Context, target Retirement) (*re
 				state.survivorsPresent++
 				continue
 			}
+			if target.EndpointMissing && target.Replacement.Name == pod.Name && target.Replacement.UID == pod.UID {
+				state.replacementPresent = true
+				continue
+			}
 			return nil, errors.New("retirement Deployment contains an unexpected Pod")
 		}
-		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == target.Replicas && len(pods) != int(target.Replicas) {
+		if target.EndpointMissing && state.endpointPresent {
+			return nil, errors.New("retirement endpoint unexpectedly reappeared")
+		}
+		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == target.Replicas && len(pods) != int(target.Replicas) && (!target.EndpointMissing || len(pods) != int(target.Replicas)-1) {
 			return nil, errors.New("retirement Deployment has an unexpected Pod count")
 		}
 		if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == target.Replicas-1 {
 			if len(pods) < int(target.Replicas-1) || len(pods) > int(target.Replicas) {
 				return nil, errors.New("retirement Deployment has an unexpected Pod count during scale-down")
 			}
-			if !state.endpointPresent && len(pods) != int(target.Replicas-1) {
+			if !state.endpointPresent && !target.EndpointMissing && len(pods) != int(target.Replicas-1) {
 				return nil, errors.New("retirement Deployment has a replacement Pod after target removal")
+			}
+			if target.EndpointMissing && (state.endpointPresent || state.replacementPresent || len(pods) != int(target.Replicas-1)) {
+				return nil, errors.New("retirement Deployment lost endpoint replacement has not converged")
 			}
 		}
 		return state, nil
@@ -326,17 +446,10 @@ func (e *Executor) retire(ctx context.Context, target Retirement) (bool, error) 
 			return false, errors.New("retirement Deployment has no replica count")
 		}
 		if *state.deployment.Spec.Replicas == target.Replicas {
-			if state.survivorsPresent != len(target.Survivors) || !state.endpointPresent {
+			if state.survivorsPresent != len(target.Survivors) || !target.EndpointMissing && !state.endpointPresent {
 				return false, errors.New("retirement Deployment changed before scale-down")
 			}
-			if err := e.prioritizeDeploymentTarget(ctx, target); err != nil {
-				return false, err
-			}
-			if err := e.guard(ctx); err != nil {
-				return false, err
-			}
-			state.deployment.Spec.Replicas = new(target.Replicas - 1)
-			if err := e.kube.Update(ctx, state.deployment); err != nil {
+			if err := e.scaleDeployment(ctx, target); err != nil {
 				return false, err
 			}
 			return false, nil
@@ -344,7 +457,7 @@ func (e *Executor) retire(ctx context.Context, target Retirement) (bool, error) 
 		if *state.deployment.Spec.Replicas != target.Replicas-1 {
 			return false, errors.New("retirement Deployment replica count changed during scale-down")
 		}
-		if state.endpointPresent {
+		if state.endpointPresent || state.replacementPresent {
 			if state.survivorsPresent != len(target.Survivors) {
 				return false, errors.New("retirement Deployment lost a non-target Pod during scale-down")
 			}
@@ -368,12 +481,51 @@ func (e *Executor) retire(ctx context.Context, target Retirement) (bool, error) 
 	return !state.endpointPresent, nil
 }
 
+// scaleDeployment retries the final scale-down against a fresh Deployment.
+// The Deployment controller updates status while the lifecycle executor is
+// removing the database member, so a resourceVersion read immediately before
+// Update can become stale even though the pinned workload is still valid.
+func (e *Executor) scaleDeployment(ctx context.Context, target Retirement) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		state, err := e.retirementTarget(ctx, target)
+		if err != nil {
+			return err
+		}
+		if state.deployment.Spec.Replicas == nil {
+			return errors.New("retirement Deployment has no replica count")
+		}
+		if *state.deployment.Spec.Replicas == target.Replicas-1 {
+			return nil
+		}
+		if *state.deployment.Spec.Replicas != target.Replicas {
+			return errors.New("retirement Deployment replica count changed during scale-down")
+		}
+		if !target.EndpointMissing || state.replacementPresent {
+			if err := e.prioritizeDeploymentTarget(ctx, target); err != nil {
+				return err
+			}
+		}
+		if err := e.guard(ctx); err != nil {
+			return err
+		}
+		state.deployment.Spec.Replicas = new(target.Replicas - 1)
+		return e.kube.Update(ctx, state.deployment)
+	})
+}
+
 func (e *Executor) prioritizeDeploymentTarget(ctx context.Context, target Retirement) error {
+	endpoint := target.Endpoint
+	if target.EndpointMissing {
+		endpoint = target.Replacement
+		if endpoint.Name == "" {
+			return nil
+		}
+	}
 	pod := new(corev1.Pod)
-	if err := e.kube.Get(ctx, client.ObjectKey{Namespace: e.installation.Namespace, Name: target.Endpoint.Name}, pod); err != nil {
+	if err := e.kube.Get(ctx, client.ObjectKey{Namespace: e.installation.Namespace, Name: endpoint.Name}, pod); err != nil {
 		return err
 	}
-	if pod.UID != target.Endpoint.UID {
+	if pod.UID != endpoint.UID {
 		return errors.New("retirement endpoint changed before Deployment scale-down")
 	}
 	if err := e.guard(ctx); err != nil {

@@ -12,13 +12,13 @@ func TestValuesRendererIncludesModeCentralAndHCPWithoutCredentials(t *testing.T)
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly,
 		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
 		DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example", SBEndpoint: "sb.example"}},
-		HCP:       operatorv1alpha1.HCPConfig{Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "tenant-a", NBEndpoint: "hcp-nb", SBEndpoint: "hcp-sb", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"}},
+		HCP:       operatorv1alpha1.HCPConfig{Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "tenant-a", CentralNamespace: "hcp", NBEndpoint: "tcp:hcp-nb:6641", SBEndpoint: "tcp:hcp-sb:6642", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(rendered.ValuesYAML)
-	for _, want := range []string{"installMode: dataPlaneOnly", "OVN_CENTRAL_MODE: cluster", "tag: v1.17.0", "nbEndpoint: nb.example"} {
+	for _, want := range []string{"installMode: dataPlaneOnly", "OVN_CENTRAL_MODE: cluster", "tag: v1.17.0", "nbEndpoint: hcp-nb", "nbPort: 6641"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("rendered values missing %q:\n%s", want, text)
 		}

@@ -78,9 +78,17 @@ adapters can follow its installation owner and `app=ovn-central` Pod labels,
 but the lifecycle executor must provide the complete temporary member inventory
 instead of enforcing only the installation's final replica count.
 
-The current adapter accepts TCP only. SSL requests fail explicitly until a
-Secret UID/mount and credential lifecycle provider is available. It never
-creates credentials or silently downgrades SSL.
+TLS member requests use `central.memberRequests[].tlsSecretRef` to bind one
+Secret UID and resourceVersion before preparation. The Secret must contain
+either `tls.key`/`tls.crt`/`ca.crt` or the native `key`/`cert`/`cacert` keys.
+The Job and StatefulSet mount those selected keys read-only at
+`/etc/ovn/tls/{key,cert,ca}`, and the Pod template records the Secret
+resourceVersion so a rotation cannot be silently ignored. Any Secret
+replacement, rotation, deletion or key mapping change fails closed on the
+next lifecycle write and requires a newly selected member request. All four
+NB/SB listener and client addresses must use one protocol; `ssl` requires the
+reference and `tcp` forbids it. Credentials are never copied into lifecycle
+records or status.
 
 ## Limits and verification
 
@@ -92,11 +100,12 @@ to the joint lifecycle executor and are not implemented by this adapter.
 
 Leases and pre-write identity checks do not revoke an API or native request
 already accepted remotely. Kubernetes name-based scheduling and PVC mounts also
-cannot atomically bind Node/PVC UIDs. Strict fencing during name reuse, API
-in-flight races and runtime rescheduling remains a lifecycle/deployment concern;
-this adapter rejects changes it observes, rather than claiming to prevent all
-possible races. Trusted API writers, admission and storage administrators are
-part of the deployment contract.
+cannot atomically bind Node/PVC UIDs. The membership mutation adapter therefore
+requires `ovnadmin.FencedRunner` and forwards the current `lease.FenceToken`;
+ordinary `pods/exec` is rejected for leave/kick because it has no atomic
+server-side revocation. A production remote executor must bind the token to its
+current fence before starting the command. Trusted API writers, admission and
+storage administrators remain part of the deployment contract.
 
 Tests cover controller restart, absent and modified native results, competing
 storage consumers/reservations, Node/PVC/PV/workload identity changes, installation

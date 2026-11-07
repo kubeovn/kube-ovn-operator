@@ -24,12 +24,22 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 type membershipRunFunc func(context.Context, string, []string) ([]byte, error)
 
 func (f membershipRunFunc) Run(ctx context.Context, endpoint string, command []string) ([]byte, error) {
+	return f(ctx, endpoint, command)
+}
+
+func (f membershipRunFunc) RunFenced(ctx context.Context, endpoint string, command []string, token lease.FenceToken) ([]byte, error) {
+	if token.Scope != lease.Central || token.LeaseUID == "" || token.Holder == "" || token.Epoch < 1 {
+		return nil, fmt.Errorf("invalid test fence token")
+	}
 	return f(ctx, endpoint, command)
 }
 
@@ -150,7 +160,16 @@ func TestLiveOVNMembershipReplacementAndKick(t *testing.T) {
 	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&operatorv1alpha1.KubeOVNMemberRemovalApproval{}).Build()
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&operatorv1alpha1.KubeOVNMemberRemovalApproval{}).WithInterceptorFuncs(interceptor.Funcs{
+		// A real API server allocates Lease UIDs. The fake client does not, but
+		// the transport fence token deliberately requires that identity.
+		Create: func(ctx context.Context, kube client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+			if _, ok := object.(*coordinationv1.Lease); ok && object.GetUID() == "" {
+				object.SetUID(types.UID("lease-" + object.GetName()))
+			}
+			return kube.Create(ctx, object, opts...)
+		},
+	}).Build()
 	leases := lease.New(kube)
 	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "membership", Namespace: "test", UID: "test-installation"}
 	guarded := func(fn func(context.Context) error) error {

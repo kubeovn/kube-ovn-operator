@@ -29,6 +29,8 @@ type Credentials struct {
 	Endpoint        string
 }
 
+var errS3ObjectNotFound = errors.New("S3 object not found")
+
 func CredentialsFromEnvironment() (Credentials, error) {
 	credentials := Credentials{
 		AccessKeyID:     strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID")),
@@ -271,9 +273,10 @@ func (s *S3Store) parseListedKey(key, prefix string) (string, string, bool) {
 	return parts[0], parts[1], true
 }
 
-// Delete authenticates a complete pair before removing both objects. Both
-// DELETE requests are attempted so a transient failure can be retried by the
-// caller without leaving the first request unissued.
+// Delete authenticates a complete pair when it is available before removing
+// both objects. If an earlier attempt left a partial pair, the digest-scoped
+// deletes are retried idempotently; the reference cannot address objects
+// outside this store's configured destination.
 func (s *S3Store) Delete(ctx context.Context, reference string) error {
 	if s == nil || s.client == nil || s.endpoint == nil || s.clock == nil {
 		return errors.New("S3 store is not configured")
@@ -283,15 +286,23 @@ func (s *S3Store) Delete(ctx context.Context, reference string) error {
 		return errors.New("invalid backup reference")
 	}
 	record, snapshot, err := s.Open(ctx, reference)
-	if err != nil {
+	if err != nil && !errors.Is(err, errS3ObjectNotFound) {
 		return err
 	}
-	_ = snapshot.Close()
-	if record.FormatVersion != 1 || record.CompletedAt.IsZero() {
+	if err == nil {
+		_ = snapshot.Close()
+	}
+	if err == nil && (record.FormatVersion != 1 || record.CompletedAt.IsZero()) {
 		return errors.New("backup pair is not complete")
 	}
 	snapshotErr := s.do(ctx, http.MethodDelete, s.objectKey(name, "snapshot.db"), nil, 0, "", "")
 	manifestErr := s.do(ctx, http.MethodDelete, s.objectKey(name, "record.json"), nil, 0, "", "")
+	if errors.Is(snapshotErr, errS3ObjectNotFound) {
+		snapshotErr = nil
+	}
+	if errors.Is(manifestErr, errS3ObjectNotFound) {
+		manifestErr = nil
+	}
 	return errors.Join(snapshotErr, manifestErr)
 }
 
@@ -439,6 +450,9 @@ func (s *S3Store) requestAt(ctx context.Context, method string, requestURL *url.
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		_ = response.Body.Close()
+		if response.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: S3 request %s %s failed with HTTP %d", errS3ObjectNotFound, method, requestURL.Path, response.StatusCode)
+		}
 		return nil, fmt.Errorf("S3 request %s %s failed with HTTP %d", method, requestURL.Path, response.StatusCode)
 	}
 	return response.Body, nil

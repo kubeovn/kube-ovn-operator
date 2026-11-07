@@ -26,7 +26,14 @@ spec:
                 installationRef: {type: string}
                 reason: {type: string}
                 mode: {type: string, enum: [rejoin, reconvert, freshBootstrap]}
+                targetMemberRef: {type: string}
                 backupRef: {type: string}
+                approvalRef:
+                  type: object
+                  required: [name, uid]
+                  properties:
+                    name: {type: string, minLength: 1, maxLength: 253}
+                    uid: {type: string, minLength: 1, maxLength: 128}
                 approvedBy: {type: string}
                 expiresAt: {type: string, format: date-time}
             status:
@@ -44,8 +51,30 @@ spec:
                     installationGeneration: {type: integer, format: int64}
                     requestGeneration: {type: integer, format: int64}
                     mode: {type: string, enum: [rejoin, reconvert, freshBootstrap]}
+                    sourceVersion: {type: string}
+                    targetVersion: {type: string}
+                    chartDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                    targetMemberRef: {type: string}
+                    targetMemberDigest: {type: string}
+                    topologyDigest: {type: string}
                     backupRef: {type: string}
+                    databaseRefs: {type: object, additionalProperties: {type: string}}
+                    approvalRef:
+                      type: object
+                      required: [name, uid]
+                      properties:
+                        name: {type: string, minLength: 1, maxLength: 253}
+                        uid: {type: string, minLength: 1, maxLength: 128}
                     expiresAt: {type: string, format: date-time}
+                execution:
+                  type: object
+                  properties:
+                    phase: {type: string, enum: [Blocked, Quiescing, Restoring, Workloads, Verifying, Succeeded, Failed]}
+                    startedAt: {type: string, format: date-time}
+                    completedAt: {type: string, format: date-time}
+                    rpoSeconds: {type: integer, format: int64}
+                    rtoSeconds: {type: integer, format: int64}
+                    reason: {type: string}
                 conditions:
                   type: array
                   items:

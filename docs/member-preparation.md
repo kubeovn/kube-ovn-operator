@@ -3,8 +3,9 @@
 `internal/prepare` and the Linux `member-prepare` command prepare local files
 for a new central member. The [Kubernetes workload adapter](member-workloads.md)
 persists the handoff to a preparation Job and explicit launcher. The persistent
-NB/SB lifecycle executor is still required; default dynamic membership remains
-restricted to the safe one-member reduction selector.
+NB/SB lifecycle executor is still required. Default dynamic membership admits
+one explicitly prepared addition or replacement at a time, and keeps automatic
+reduction restricted to the safe one-member selector.
 
 ## Plan and invocation
 
@@ -93,11 +94,13 @@ is outside this storage contract.
 
 ## Required lifecycle integration
 
-The future executor must hold both operation Leases, verify live NB/SB quorum,
-cluster identities and backups, persist the preparation request/result, then
-authorize startup. Both new members must reach the committed fence before old
-members are removed or the old workload changes. Partial NB/SB convergence is
-not permission to advance. This helper alone never authorizes cluster changes.
+The lifecycle Manager and default controller hold both operation Leases, verify
+live NB/SB quorum, cluster identities and backups, persist the preparation
+request/result, then authorize startup. Both new members must reach the
+committed fence before old members are removed or the old workload changes.
+Partial NB/SB convergence is not permission to advance. This helper alone never
+authorizes cluster changes; the controller's lifecycle path supplies that
+authorization and resumes the durable journal after a restart.
 
 Do not run unmodified upstream `start-db.sh` recovery logic over these files.
 The pinned v1.16.13 script can archive an unjoined file after 120 seconds and has

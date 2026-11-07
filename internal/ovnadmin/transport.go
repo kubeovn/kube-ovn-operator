@@ -20,6 +20,15 @@ type Runner interface {
 
 var ErrTargetIdentity = errors.New("member process identity changed")
 
+// ErrFencingUnavailable means the transport can perform observations but has
+// no server-side capability to atomically reject a stale mutation token.
+var ErrFencingUnavailable = errors.New("server-side transport fencing is unavailable")
+
+// ErrStaleFence means the remote executor rejected a request because its
+// token is missing, revoked or older than the fence currently armed for the
+// installation. Callers must reobserve before retrying an uncertain mutation.
+var ErrStaleFence = errors.New("remote transport fence is stale")
+
 type unavailableError struct{ error }
 
 type Endpoint struct {
@@ -35,6 +44,15 @@ type CommandClient struct {
 	Runner    Runner
 	ClusterID string
 	Endpoints []Endpoint
+}
+
+// FencedRunner is the capability boundary for mutating OVN requests. The
+// implementation must validate token against its current server-side fence and
+// execute the command under that same fence. Checking the Lease in this
+// process, or merely putting token fields in command arguments, is not enough.
+type FencedRunner interface {
+	Runner
+	RunFenced(context.Context, string, []string, lease.FenceToken) ([]byte, error)
 }
 
 var _ Client = (*CommandClient)(nil)
@@ -275,7 +293,15 @@ func (c *CommandClient) mutate(ctx context.Context, endpoint string, expected Sn
 	if err := lease.Check(ctx, lease.Central); err != nil {
 		return fmt.Errorf("guard unixctl dispatch: %w", err)
 	}
-	_, err = c.Runner.Run(ctx, targetEndpoint, command)
+	fenced, ok := c.Runner.(FencedRunner)
+	if !ok {
+		return fmt.Errorf("%w: OVN membership mutation requires an atomic remote fence", ErrFencingUnavailable)
+	}
+	token, err := lease.Token(ctx, lease.Central)
+	if err != nil {
+		return fmt.Errorf("create membership fence token: %w", err)
+	}
+	_, err = fenced.RunFenced(ctx, targetEndpoint, command, token)
 	if err != nil {
 		return fmt.Errorf("membership dispatch outcome is uncertain; reobserve before retrying: %w", err)
 	}

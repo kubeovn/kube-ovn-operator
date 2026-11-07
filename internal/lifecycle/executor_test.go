@@ -22,6 +22,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/workload"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -120,15 +121,16 @@ func (a *approvalFake) Complete(_ context.Context, _ membership.ApprovalReferenc
 }
 
 type fixture struct {
-	kube         client.Client
-	installation *api.KubeOVNInstallation
-	request      Request
-	dbs          [2]*databaseFake
-	members      memberFake
-	approvals    approvalFake
-	inventories  [2]Inventory
-	failUpdate   func(client.Object) bool
-	failCreate   func(client.Object) bool
+	kube            client.Client
+	installation    *api.KubeOVNInstallation
+	request         Request
+	dbs             [2]*databaseFake
+	members         memberFake
+	approvals       approvalFake
+	inventories     [2]Inventory
+	failUpdate      func(client.Object) bool
+	failCreate      func(client.Object) bool
+	conflictUpdates int
 }
 
 func setup(t *testing.T) *fixture {
@@ -155,6 +157,12 @@ func setup(t *testing.T) *fixture {
 				return nil
 			},
 			Update: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
+				if f.conflictUpdates > 0 {
+					if _, ok := object.(*appsv1.Deployment); ok {
+						f.conflictUpdates--
+						return apierrors.NewConflict(appsv1.Resource("deployments"), object.GetName(), errors.New("test conflict"))
+					}
+				}
 				if f.failUpdate != nil && f.failUpdate(object) {
 					return errors.New("journal write failed")
 				}
@@ -579,6 +587,7 @@ func TestDeploymentRetirementPinsTargetAndScalesOnlyThatPod(t *testing.T) {
 	f.mustStep(t, ref, Removing)
 	f.mustStep(t, ref, Removing)
 	f.mustStep(t, ref, Removing)
+	f.conflictUpdates = 1
 	f.mustStep(t, ref, Retiring)
 	f.mustStep(t, ref, Retiring)
 	current := new(appsv1.Deployment)
@@ -597,6 +606,60 @@ func TestDeploymentRetirementPinsTargetAndScalesOnlyThatPod(t *testing.T) {
 	}
 	if err := f.kube.Delete(t.Context(), target); err != nil {
 		t.Fatal(err)
+	}
+	f.mustStep(t, ref, Complete)
+}
+
+func TestLostDeploymentRetirementScalesAfterNodeLoss(t *testing.T) {
+	f := setup(t)
+	old := new(appsv1.StatefulSet)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: "old"}, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.kube.Delete(t.Context(), old); err != nil {
+		t.Fatal(err)
+	}
+	controller := true
+	labels := map[string]string{"app": "ovn-central"}
+	owner := metav1.OwnerReference{APIVersion: api.GroupVersion.String(), Kind: "KubeOVNInstallation", Name: f.installation.Name, UID: f.installation.UID, Controller: &controller}
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: "test", UID: "deployment-uid", Labels: map[string]string{apply.ManagedByLabel: apply.ManagedByValue, apply.InstallationLabel: f.installation.Name, apply.InstallationNamespaceLabel: f.installation.Namespace, apply.InstallationUIDLabel: string(f.installation.UID)}, OwnerReferences: []metav1.OwnerReference{owner}}, Spec: appsv1.DeploymentSpec{Replicas: new(int32(2)), Selector: &metav1.LabelSelector{MatchLabels: labels}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}, Spec: corev1.PodSpec{HostNetwork: true, Containers: []corev1.Container{{Name: "ovn-central", Image: f.request.Add.Workload.Image}}}}}}
+	if err := f.kube.Create(t.Context(), deployment); err != nil {
+		t.Fatal(err)
+	}
+	deploymentOwner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "Deployment", Name: deployment.Name, UID: deployment.UID, Controller: &controller}
+	replicaSet := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "old-rs", Namespace: "test", UID: "old-rs-uid", OwnerReferences: []metav1.OwnerReference{deploymentOwner}}, Spec: appsv1.ReplicaSetSpec{Replicas: new(int32(2)), Selector: &metav1.LabelSelector{MatchLabels: labels}, Template: deployment.Spec.Template}}
+	if err := f.kube.Create(t.Context(), replicaSet); err != nil {
+		t.Fatal(err)
+	}
+	podOwner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: replicaSet.Name, UID: replicaSet.UID, Controller: &controller}
+	ready := corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+	survivor := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "old-1", Namespace: "test", UID: "survivor-uid", OwnerReferences: []metav1.OwnerReference{podOwner}}, Spec: corev1.PodSpec{NodeName: "node-b", HostNetwork: true, Containers: []corev1.Container{{Name: "ovn-central", Image: f.request.Add.Workload.Image}}}, Status: ready}
+	if err := f.kube.Create(t.Context(), survivor); err != nil {
+		t.Fatal(err)
+	}
+	retirement, err := PinDeploymentRetirementAfterLoss(t.Context(), f.kube, f.installation, workload.Reference{Name: "old", UID: deployment.UID}, workload.Reference{Name: "old-0", UID: "lost-pod-uid"}, []workload.Reference{{Name: "old-1", UID: survivor.UID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retirement.EndpointMissing || retirement.Replacement.Name != "" {
+		t.Fatalf("unexpected lost retirement pin: %+v", retirement)
+	}
+	f.request.Retirement = &retirement
+	ref := f.started(t)
+	for i := range 2 {
+		f.join(i, true)
+	}
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Retiring)
+	f.mustStep(t, ref, Retiring)
+	current := new(appsv1.Deployment)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: "old"}, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Spec.Replicas == nil || *current.Spec.Replicas != 1 {
+		t.Fatalf("lost Deployment was not scaled by one: %v", current.Spec.Replicas)
 	}
 	f.mustStep(t, ref, Complete)
 }

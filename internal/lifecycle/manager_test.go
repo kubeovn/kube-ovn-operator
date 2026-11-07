@@ -1,13 +1,116 @@
 package lifecycle
 
 import (
+	"context"
+	"errors"
+	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/health"
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
+	"github.com/kubeovn/kube-ovn-operator/internal/membership"
+	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+type resumeRunner struct{}
+
+func (resumeRunner) Run(context.Context, string, string, string, []string) ([]byte, error) {
+	return nil, nil
+}
+
+func (resumeRunner) Stream(context.Context, string, string, string, []string, io.Writer) error {
+	return nil
+}
+
+func TestResumeAcceptsCompletedOperationAfterInstallationGenerationChanges(t *testing.T) {
+	f := setup(t)
+	ref := f.started(t)
+	f.join(0, true)
+	f.join(1, true)
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Removing)
+	f.mustStep(t, ref, Retiring)
+	f.mustStep(t, ref, Retiring)
+	f.mustStep(t, ref, Complete)
+
+	installation := f.installation.DeepCopy()
+	if err := f.kube.Get(t.Context(), client.ObjectKeyFromObject(installation), installation); err != nil {
+		t.Fatal(err)
+	}
+	installation.Generation++
+	if err := f.kube.Update(t.Context(), installation); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := &Manager{Client: f.kube, Runner: resumeRunner{}}
+	var recovery *Recovery
+	err := f.guarded(t, func(ctx context.Context) error {
+		var err error
+		recovery, err = manager.Resume(ctx, installation, nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("completed operation was rejected after a later spec generation: %v", err)
+	}
+	if recovery == nil || recovery.State.Phase != Complete {
+		t.Fatalf("resume returned incomplete operation: %+v", recovery)
+	}
+}
+
+type restoreFenceFake struct {
+	readyErr error
+}
+
+func (f restoreFenceFake) Ready() error { return f.readyErr }
+
+func (restoreFenceFake) Restore(context.Context, *api.KubeOVNInstallation, string, func(context.Context) error) error {
+	return nil
+}
+
+type restoreFencePreflightFake struct {
+	restoreFenceFake
+	preflightErr error
+	calls        int
+}
+
+func (f *restoreFencePreflightFake) ReadyFor(context.Context, *api.KubeOVNInstallation, health.CentralTopology) error {
+	f.calls++
+	return f.preflightErr
+}
+
+func TestRestoreFenceReadyRequiresAtomicTransport(t *testing.T) {
+	manager := new(Manager)
+	if err := manager.RestoreFenceReady(); err == nil || !strings.Contains(err.Error(), "atomic restore fence") {
+		t.Fatalf("missing restore fence was accepted: %v", err)
+	}
+	manager.RestoreFence = restoreFenceFake{readyErr: errors.New("remote service unavailable")}
+	if err := manager.RestoreFenceReady(); err == nil || !strings.Contains(err.Error(), "remote service unavailable") {
+		t.Fatalf("unready restore fence was accepted: %v", err)
+	}
+	manager.RestoreFence = restoreFenceFake{}
+	if err := manager.RestoreFenceReady(); err != nil {
+		t.Fatalf("ready restore fence was rejected: %v", err)
+	}
+}
+
+func TestRestoreFenceReadyForRunsLivePreflight(t *testing.T) {
+	fence := &restoreFencePreflightFake{preflightErr: errors.New("sidecar is not armed")}
+	manager := &Manager{RestoreFence: fence}
+	err := manager.RestoreFenceReadyFor(t.Context(), &api.KubeOVNInstallation{}, health.CentralTopology{})
+	if err == nil || !strings.Contains(err.Error(), "sidecar is not armed") {
+		t.Fatalf("live restore fence failure was accepted: %v", err)
+	}
+	if fence.calls != 1 {
+		t.Fatalf("live restore fence preflight calls = %d, want 1", fence.calls)
+	}
+}
 
 func TestBackupPairReferencesAreCompleteAndContentAddressed(t *testing.T) {
 	refs := map[string]string{
@@ -27,5 +130,53 @@ func TestBackupPairReferencesAreCompleteAndContentAddressed(t *testing.T) {
 	delete(status.DatabaseRefs, "OVN_Southbound")
 	if err := validateBackupReferences(status); err == nil {
 		t.Fatal("partial backup pair was accepted")
+	}
+}
+
+type restoreDatabaseAdapter struct{}
+
+func (restoreDatabaseAdapter) Observe(context.Context) (ovnadmin.Snapshot, error) {
+	return ovnadmin.Snapshot{}, nil
+}
+
+func (restoreDatabaseAdapter) Capture(context.Context) (string, error) { return "", nil }
+
+func (restoreDatabaseAdapter) Verify(context.Context, ovnadmin.Snapshot, string) error { return nil }
+
+func (restoreDatabaseAdapter) Remove(context.Context, membership.Change, func(context.Context, ovnadmin.Snapshot) error) error {
+	return nil
+}
+
+type fencedRestoreDatabaseAdapter struct {
+	restoreDatabaseAdapter
+	restoreCalls int
+}
+
+func (a *fencedRestoreDatabaseAdapter) RestoreFenced(context.Context, string, lease.FenceToken) error {
+	a.restoreCalls++
+	return nil
+}
+
+func TestPreflightFencedRestoreAdaptersRejectsPartialCapabilityBeforeRestore(t *testing.T) {
+	first := new(fencedRestoreDatabaseAdapter)
+	second := restoreDatabaseAdapter{}
+	opened := make([]string, 0, 2)
+	inventories := []Inventory{{Database: "OVN_Northbound"}, {Database: "OVN_Southbound"}}
+
+	_, err := preflightFencedRestoreAdapters(t.Context(), inventories, func(_ context.Context, inventory Inventory) (Database, error) {
+		opened = append(opened, inventory.Database)
+		if inventory.Database == "OVN_Northbound" {
+			return first, nil
+		}
+		return second, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "OVN_Southbound restore adapter does not expose atomic fencing") {
+		t.Fatalf("partial fenced restore capability was accepted: %v", err)
+	}
+	if !slices.Equal(opened, []string{"OVN_Northbound", "OVN_Southbound"}) {
+		t.Fatalf("preflight did not inspect both adapters: %v", opened)
+	}
+	if first.restoreCalls != 0 {
+		t.Fatalf("first database received restore input before second adapter was validated: %d calls", first.restoreCalls)
 	}
 }

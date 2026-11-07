@@ -36,6 +36,10 @@ type TLSFiles struct {
 	CA          string `json:"ca"`
 }
 
+// TLSMountPath is the fixed, read-only mount used by member workloads. The
+// Secret itself is never copied into a lifecycle record or launch request.
+const TLSMountPath = "/etc/ovn/tls"
+
 func (r Request) validate() error {
 	if err := r.Validate(); err != nil {
 		return err

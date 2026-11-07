@@ -24,8 +24,14 @@ trap cleanup EXIT
 kubectl config use-context "kind-${cluster_name}"
 bash test/e2e/probe-image.sh "${cluster_name}"
 for image in docker.io/kubeovn/kube-ovn:v1.16.13 registry.k8s.io/e2e-test-images/agnhost:2.53 docker.io/library/busybox:1.37.0; do
-  docker pull "${image}"
-  kind load docker-image --name "${cluster_name}" "${image}"
+  docker pull --platform=linux/amd64 "${image}"
+  image_archive=$(mktemp)
+  # kind's Docker-image loader imports every manifest platform. Some upstream
+  # multi-platform images carry attestations whose child blobs are not present
+  # in the runner's local store, so export the exact node platform first.
+  docker image save --platform=linux/amd64 --output "${image_archive}" "${image}"
+  kind load image-archive --name "${cluster_name}" "${image_archive}"
+  rm -f "${image_archive}"
 done
 kubectl apply -f config/crd/bases
 go build -o "${operator_binary}" ./cmd/operator

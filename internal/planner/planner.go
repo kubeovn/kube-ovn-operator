@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/hcp"
 	"github.com/kubeovn/kube-ovn-operator/internal/validation"
 )
 
@@ -31,7 +32,7 @@ func Build(spec operatorv1alpha1.KubeOVNInstallationSpec, observedVersion string
 	if observedVersion != "" && observedVersion != spec.Version {
 		phase = operatorv1alpha1.PhaseUpgrading
 		step = "Validate"
-		actions = append(actions, "PreflightUpgrade", "CreateBackupCheckpoint", "MigrateCRDs", "RollCentralBeforeDataPlane", "VerifyNetworkProbes")
+		actions = append(actions, "PreflightUpgrade", "CreateBackupCheckpoint", "MigrateCRDs", "WaitForCRDsReady", "RollCentralBeforeDataPlane", "VerifyCentralReadiness", "RollDataPlane", "VerifyNetworkProbes")
 		if spec.Upgrade.AllowRollback {
 			actions = append(actions, "RecordRollbackCheckpoint")
 		}
@@ -49,9 +50,24 @@ func Build(spec operatorv1alpha1.KubeOVNInstallationSpec, observedVersion string
 		"centralReplicas": fmt.Sprintf("%d", spec.Central.Replicas),
 		"version":         spec.Version,
 	}
-	if spec.DataPlane.ExternalOVNCentral.NBEndpoint != "" {
-		values["externalOvnCentral.nbEndpoint"] = spec.DataPlane.ExternalOVNCentral.NBEndpoint
-		values["externalOvnCentral.sbEndpoint"] = spec.DataPlane.ExternalOVNCentral.SBEndpoint
+	external := spec.DataPlane.ExternalOVNCentral
+	if spec.HCP.Enabled && spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
+		if northbound, err := hcp.ParseEndpoint(spec.HCP.NBEndpoint); err == nil {
+			if southbound, err := hcp.ParseEndpoint(spec.HCP.SBEndpoint); err == nil {
+				external.NBEndpoint, external.NBPort = northbound.Host, northbound.Port
+				external.SBEndpoint, external.SBPort = southbound.Host, southbound.Port
+			}
+		}
+	}
+	if external.NBEndpoint != "" {
+		values["externalOvnCentral.nbEndpoint"] = external.NBEndpoint
+		values["externalOvnCentral.sbEndpoint"] = external.SBEndpoint
+		if external.NBPort != 0 {
+			values["externalOvnCentral.nbPort"] = fmt.Sprintf("%d", external.NBPort)
+		}
+		if external.SBPort != 0 {
+			values["externalOvnCentral.sbPort"] = fmt.Sprintf("%d", external.SBPort)
+		}
 	}
 	return Plan{Phase: phase, Step: step, Actions: actions, Values: values}
 }

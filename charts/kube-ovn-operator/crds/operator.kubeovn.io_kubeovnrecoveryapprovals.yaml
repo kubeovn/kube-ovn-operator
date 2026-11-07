@@ -1,0 +1,66 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kubeovnrecoveryapprovals.operator.kubeovn.io
+spec:
+  group: operator.kubeovn.io
+  scope: Namespaced
+  names:
+    plural: kubeovnrecoveryapprovals
+    singular: kubeovnrecoveryapproval
+    kind: KubeOVNRecoveryApproval
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      additionalPrinterColumns:
+        - {name: Phase, type: string, jsonPath: .status.phase}
+        - {name: Revoked, type: boolean, jsonPath: .spec.revoked}
+        - {name: Expires, type: date, jsonPath: .spec.expiresAt}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [installationRef, installationGeneration, mode, sourceVersion, targetVersion, backupRef, topologyDigest, chartDigest, reason, expiresAt]
+              x-kubernetes-validations:
+                - rule: self == oldSelf
+                  message: The recovery approval decision is immutable.
+                - rule: '!has(self.requestRef) || (self.requestRef.name != "" && self.requestRef.uid != "" && self.requestRef.generation > 0)'
+                  message: requestRef must contain a name, UID and positive generation.
+                - rule: '!oldSelf.revoked || self.revoked'
+                  message: Revocation cannot be reversed.
+              properties:
+                installationRef:
+                  type: object
+                  required: [name, uid]
+                  properties:
+                    name: {type: string, minLength: 1, maxLength: 253}
+                    uid: {type: string, minLength: 1, maxLength: 128}
+                installationGeneration: {type: integer, format: int64, minimum: 1}
+                requestRef:
+                  type: object
+                  required: [name, uid, generation]
+                  properties:
+                    name: {type: string, minLength: 1, maxLength: 253}
+                    uid: {type: string, minLength: 1, maxLength: 128}
+                    generation: {type: integer, format: int64, minimum: 1}
+                mode: {type: string, enum: [rollback, reconvert, freshBootstrap]}
+                sourceVersion: {type: string, minLength: 1, maxLength: 128}
+                targetVersion: {type: string, minLength: 1, maxLength: 128}
+                backupRef: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                topologyDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                chartDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                reason: {type: string, minLength: 1, maxLength: 2048, pattern: '\S'}
+                expiresAt: {type: string, format: date-time}
+                revoked: {type: boolean, default: false}
+            status:
+              type: object
+              properties:
+                phase: {type: string, enum: [Reserved, Completed]}
+                decisionDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                reservedAt: {type: string, format: date-time}
+                completedAt: {type: string, format: date-time}

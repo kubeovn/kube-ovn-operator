@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/hcp"
 	"github.com/kubeovn/kube-ovn-operator/internal/validation"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
@@ -62,6 +63,22 @@ func installationValues(spec operatorv1alpha1.KubeOVNInstallationSpec) (map[stri
 	}
 	if spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
 		endpoint := spec.DataPlane.ExternalOVNCentral
+		if spec.HCP.Enabled {
+			northbound, err := hcp.ParseEndpoint(spec.HCP.NBEndpoint)
+			if err != nil {
+				return nil, fmt.Errorf("parse HCP northbound endpoint: %w", err)
+			}
+			southbound, err := hcp.ParseEndpoint(spec.HCP.SBEndpoint)
+			if err != nil {
+				return nil, fmt.Errorf("parse HCP southbound endpoint: %w", err)
+			}
+			if northbound.Protocol != southbound.Protocol {
+				return nil, fmt.Errorf("HCP northbound and southbound endpoints must use the same protocol")
+			}
+			endpoint.NBEndpoint, endpoint.NBPort = northbound.Host, northbound.Port
+			endpoint.SBEndpoint, endpoint.SBPort = southbound.Host, southbound.Port
+			values["networking"] = map[string]any{"ENABLE_SSL": northbound.Protocol == "ssl"}
+		}
 		external := map[string]any{"nbEndpoint": endpoint.NBEndpoint, "sbEndpoint": endpoint.SBEndpoint}
 		if endpoint.NBPort != 0 {
 			external["nbPort"] = endpoint.NBPort

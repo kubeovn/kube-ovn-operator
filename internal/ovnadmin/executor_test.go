@@ -10,7 +10,9 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -167,8 +169,18 @@ func withCentralLease(t *testing.T, operation func(context.Context) error) error
 	if err := coordinationv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	manager := lease.New(fake.NewClientBuilder().WithScheme(scheme).Build())
+	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
+	manager := lease.New(kube)
 	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "ovn", Namespace: "default", UID: "installation-uid"}
+	controller := true
+	for _, scope := range []lease.Scope{lease.Installation, lease.Central} {
+		if err := kube.Create(t.Context(), &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+			Name: lease.Name(scope, installation.Name), Namespace: installation.Namespace, UID: types.UID(string(scope) + "-lease-uid"),
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation", Name: installation.Name, UID: installation.UID, Controller: &controller}},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return manager.With(t.Context(), installation, lease.Installation, func(ctx context.Context) error { return manager.With(ctx, installation, lease.Central, operation) })
 }
 

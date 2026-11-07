@@ -1,0 +1,32 @@
+# Optional namespace-scoped Lease reader for an independently deployed
+# fence-agent. The Operator Helm renderer creates installation-scoped
+# equivalents when sidecar injection is enabled.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-ovn-fence-agent
+  namespace: kube-ovn-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-ovn-fence-agent-lease-reader
+  namespace: kube-ovn-operator-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kube-ovn-fence-agent-lease-reader
+  namespace: kube-ovn-operator-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kube-ovn-fence-agent-lease-reader
+subjects:
+  - kind: ServiceAccount
+    name: kube-ovn-fence-agent
+    namespace: kube-ovn-operator-system

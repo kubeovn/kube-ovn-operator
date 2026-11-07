@@ -22,6 +22,16 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --leader-elect={{ .Values.leaderElect }}
+            {{- if .Values.fenceAgent.enabled }}
+            - --fence-endpoint-template={{ required "fenceAgent.endpointTemplate is required when fenceAgent.enabled" .Values.fenceAgent.endpointTemplate }}
+            - --fence-agent-image={{ required "fenceAgent.image is required when fenceAgent.enabled" .Values.fenceAgent.image }}
+            - --fence-agent-server-tls-secret={{ required "fenceAgent.serverTLSSecret is required when fenceAgent.enabled" .Values.fenceAgent.serverTLSSecret }}
+            - --fence-agent-client-ca-secret={{ required "fenceAgent.clientCASecret is required when fenceAgent.enabled" .Values.fenceAgent.clientCASecret }}
+            - --fence-agent-port={{ .Values.fenceAgent.port }}
+            - --fence-ca-file=/var/run/kube-ovn/fence-client/ca.crt
+            - --fence-client-cert-file=/var/run/kube-ovn/fence-client/tls.crt
+            - --fence-client-key-file=/var/run/kube-ovn/fence-client/tls.key
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 8080
@@ -31,7 +41,31 @@ spec:
             httpGet: {path: /readyz, port: probes}
           livenessProbe:
             httpGet: {path: /healthz, port: probes}
+          {{- if .Values.fenceAgent.enabled }}
+          volumeMounts:
+            - name: fence-client-ca
+              mountPath: /var/run/kube-ovn/fence-client/ca.crt
+              subPath: ca.crt
+              readOnly: true
+            - name: fence-client-cert
+              mountPath: /var/run/kube-ovn/fence-client/tls.crt
+              subPath: tls.crt
+              readOnly: true
+            - name: fence-client-cert
+              mountPath: /var/run/kube-ovn/fence-client/tls.key
+              subPath: tls.key
+              readOnly: true
+          {{- end }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
       nodeSelector: {{- toYaml .Values.nodeSelector | nindent 8 }}
       tolerations: {{- toYaml .Values.tolerations | nindent 8 }}
       affinity: {{- toYaml .Values.affinity | nindent 8 }}
+      {{- if .Values.fenceAgent.enabled }}
+      volumes:
+        - name: fence-client-ca
+          secret:
+            secretName: {{ required "fenceAgent.clientCASecret is required when fenceAgent.enabled" .Values.fenceAgent.clientCASecret }}
+        - name: fence-client-cert
+          secret:
+            secretName: {{ required "fenceAgent.clientCertSecret is required when fenceAgent.enabled" .Values.fenceAgent.clientCertSecret }}
+      {{- end }}

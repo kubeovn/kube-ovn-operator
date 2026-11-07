@@ -7,6 +7,9 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"strings"
@@ -16,6 +19,7 @@ import (
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/backup"
+	"github.com/kubeovn/kube-ovn-operator/internal/fencing"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
@@ -59,7 +63,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	exec, err := health.NewPodExecutor(config)
+	podExecutor, err := health.NewPodExecutor(config)
+	if err != nil {
+		return err
+	}
+	fenceServer, err := newFenceTestServer(podExecutor)
+	if err != nil {
+		return err
+	}
+	defer fenceServer.Close()
+	remote, err := health.NewFenceHTTPClient(fenceServer.URL+"/{pod}", fenceServer.Client())
+	if err != nil {
+		return err
+	}
+	exec, err := health.NewFencedPodExecutorWithRemote(config, remote)
 	if err != nil {
 		return err
 	}
@@ -204,7 +221,18 @@ func run() error {
 	}
 	m := lease.New(kube)
 	guarded := func(fn func(context.Context) error) error {
-		return m.With(ctx, installation, lease.Installation, func(ctx context.Context) error { return m.With(ctx, installation, lease.Central, fn) })
+		return m.With(ctx, installation, lease.Installation, func(ctx context.Context) error {
+			return m.With(ctx, installation, lease.Central, func(ctx context.Context) error {
+				token, err := lease.Token(ctx, lease.Central)
+				if err != nil {
+					return err
+				}
+				if err := fenceServer.Gate.Arm(token); err != nil {
+					return err
+				}
+				return fn(ctx)
+			})
+		})
 	}
 	var ref lifecycle.Reference
 	if err := wait(ctx, func() (bool, error) {
@@ -401,6 +429,48 @@ func wait(ctx context.Context, observe func() (bool, error)) error {
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+type fenceTestServer struct {
+	*httptest.Server
+	Gate *fencing.Gate
+}
+
+// newFenceTestServer provides the atomic remote boundary required by the
+// lifecycle executor while keeping the member smoke self-contained. It uses
+// TLS like the production transport and routes each request to the Pod named
+// by the URL template; the Kubernetes Pod executor remains the only native
+// process transport underneath the test fence.
+func newFenceTestServer(executor *health.PodExecutor) (*fenceTestServer, error) {
+	if executor == nil {
+		return nil, errors.New("fence test server requires a Pod executor")
+	}
+	gate := new(fencing.Gate)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		pod, path, ok := strings.Cut(strings.TrimPrefix(request.URL.Path, "/"), "/")
+		if !ok || pod == "" {
+			http.NotFound(writer, request)
+			return
+		}
+		delegate := &fencing.Handler{
+			Gate: gate,
+			Execute: func(ctx context.Context, command []string) ([]byte, error) {
+				return executor.Run(ctx, "kube-ovn-operator-system", pod, "ovn-central", command)
+			},
+			Restore: func(ctx context.Context, database string, source io.Reader) error {
+				socket := "unix:/var/run/ovn/ovnnb_db.sock"
+				if database == "OVN_Southbound" {
+					socket = "unix:/var/run/ovn/ovnsb_db.sock"
+				}
+				return executor.StreamInput(ctx, "kube-ovn-operator-system", pod, "ovn-central", []string{"ovsdb-client", "restore", socket, database}, source)
+			},
+			Timeout: 30 * time.Second,
+		}
+		copyRequest := request.Clone(request.Context())
+		copyRequest.URL.Path = "/" + path
+		delegate.ServeHTTP(writer, copyRequest)
+	}))
+	return &fenceTestServer{Server: server, Gate: gate}, nil
 }
 
 func seedCommand(ip string) string {

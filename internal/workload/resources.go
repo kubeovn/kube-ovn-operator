@@ -9,6 +9,7 @@ import (
 	"reflect"
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/central"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -24,6 +25,7 @@ func (p *Provisioner) owner() []metav1.OwnerReference {
 
 func (p *Provisioner) pod(request Request, ref Reference, configName string, running bool) corev1.PodTemplateSpec {
 	labels := p.labels(&ref)
+	annotations := map[string]string{}
 	name := "prepare"
 	command := "exec /member-prepare --root=" + dataPath + " --request=/member-request/request.json > /dev/termination-log"
 	restart := corev1.RestartPolicyOnFailure
@@ -32,6 +34,20 @@ func (p *Provisioner) pod(request Request, ref Reference, configName string, run
 		{Name: "request", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: configName}, DefaultMode: new(int32(0444)), Items: []corev1.KeyToPath{{Key: "request.json", Path: "request.json"}}}}},
 	}
 	mounts := []corev1.VolumeMount{{Name: "data", MountPath: dataPath}, {Name: "request", MountPath: "/member-request", ReadOnly: true}}
+	if request.TLSSecret != nil {
+		annotations["operator.kubeovn.io/tls-secret-resource-version"] = request.TLSSecret.ResourceVersion
+		items := []corev1.KeyToPath{
+			{Key: request.TLSSecret.PrivateKeyKey, Path: "key"},
+			{Key: request.TLSSecret.CertificateKey, Path: "cert"},
+			{Key: request.TLSSecret.CAKey, Path: "ca"},
+		}
+		volumes = append(volumes, corev1.Volume{Name: "tls", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName:  request.TLSSecret.Name,
+			Items:       items,
+			DefaultMode: new(int32(0440)),
+		}}})
+		mounts = append(mounts, corev1.VolumeMount{Name: "tls", MountPath: central.TLSMountPath, ReadOnly: true})
+	}
 	if running {
 		name, restart = "ovn-central", corev1.RestartPolicyAlways
 		labels["app"] = "ovn-central"
@@ -46,7 +62,7 @@ func (p *Provisioner) pod(request Request, ref Reference, configName string, run
 		mounts = append(mounts, corev1.VolumeMount{Name: "runtime", MountPath: "/var/run"}, corev1.VolumeMount{Name: "temporary", MountPath: "/tmp"})
 	}
 	return corev1.PodTemplateSpec{
-		Labels: labels,
+		ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations},
 		Spec: corev1.PodSpec{
 			NodeName: request.Node.Name, HostNetwork: true, DNSPolicy: corev1.DNSClusterFirstWithHostNet,
 			AutomountServiceAccountToken: new(false), EnableServiceLinks: new(false), RestartPolicy: restart,

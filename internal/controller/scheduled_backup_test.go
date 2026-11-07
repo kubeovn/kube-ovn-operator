@@ -12,12 +12,14 @@ import (
 	"time"
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
 	"github.com/kubeovn/kube-ovn-operator/internal/topology"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -101,6 +103,33 @@ func TestProtectedBackupReferencesIncludesLastBackupAndUpgradeCheckpoint(t *test
 	}
 }
 
+func TestEnsureBackupRetentionProtectsActiveRecoveryRequest(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	installation := scheduledBackupInstallation(now)
+	installation.Spec.Upgrade.Backup.Retention.KeepLast = 1
+	recoveryRef := "sha256:" + strings.Repeat("d", 64)
+	request := &api.KubeOVNRecoveryRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "recover", Namespace: installation.Namespace, UID: types.UID("request-uid"), Generation: 1},
+		Spec:       api.KubeOVNRecoveryRequestSpec{InstallationRef: installation.Name, BackupRef: recoveryRef},
+		Status: api.KubeOVNRecoveryRequestStatus{
+			Phase: api.RecoveryPhaseAwaitingExecution,
+			Plan:  &api.RecoveryPlanStatus{InstallationUID: installation.UID, BackupRef: recoveryRef},
+		},
+	}
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
+	coordinator := &lifecycleCoordinatorFake{reader: kube}
+	reconciler := scheduledBackupReconciler(new(int), nil)
+	reconciler.Client = kube
+	reconciler.Lifecycle = coordinator
+	due, _, err := reconciler.ensureBackupRetention(t.Context(), installation, now)
+	if err != nil || !due {
+		t.Fatalf("retention did not inspect active recovery request: due=%t err=%v", due, err)
+	}
+	if !slices.Contains(coordinator.cleanupProtected, recoveryRef) {
+		t.Fatalf("active recovery backup was not protected: %v", coordinator.cleanupProtected)
+	}
+}
+
 func TestEnsureScheduledBackupFailurePreservesVerifiedPair(t *testing.T) {
 	now := time.Unix(1000, 0).UTC()
 	installation := scheduledBackupInstallation(now)
@@ -180,6 +209,59 @@ func TestReconcileScheduledBackupReturnsBeforeChartApply(t *testing.T) {
 	}
 }
 
+func TestReconcileScheduledBackupUsesNextDueTime(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	installation := scheduledBackupInstallation(now)
+	installation.Status.LastBackup.CompletedAt = metav1.NewTime(now.Add(-10 * time.Minute))
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation).WithObjects(installation).Build()
+	captures := 0
+	reconciler := scheduledBackupReconciler(&captures, func(context.Context, *api.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding) (*api.BackupStatus, error) {
+		return nil, errors.New("backup should not run before the interval")
+	})
+	reconciler.Client, reconciler.Scheme, reconciler.Clock = kube, controllerScheme(t), func() time.Time { return now }
+	result, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(installation)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != 50*time.Minute || captures != 0 {
+		t.Fatalf("scheduled backup did not use the next due time: result=%+v captures=%d", result, captures)
+	}
+}
+
+func TestReconcileRunsRetentionBeforeFutureScheduledBackup(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	installation := scheduledBackupInstallation(now)
+	installation.Spec.Upgrade.Backup.Retention.KeepLast = 1
+	installation.Status.LastBackup.CompletedAt = metav1.NewTime(now.Add(-10 * time.Minute))
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation).WithObjects(installation).Build()
+	coordinator := &lifecycleCoordinatorFake{reader: kube, cleanupResult: backup.RetentionResult{Scanned: 3, Protected: 2, Deleted: 1}}
+	captures := 0
+	reconciler := scheduledBackupReconciler(&captures, func(context.Context, *api.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding) (*api.BackupStatus, error) {
+		return nil, errors.New("backup should not run before the interval")
+	})
+	reconciler.Client, reconciler.Scheme, reconciler.Clock = kube, controllerScheme(t), func() time.Time { return now }
+	reconciler.Lifecycle = coordinator
+	reconciler.Topology = scheduledTopologyProvider{topology: threeMemberScheduledTopology()}
+	reconciler.Renderer = objectRenderer{}
+	result, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(installation)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coordinator.cleanup != 1 || captures != 0 {
+		t.Fatalf("retention/scheduled backup ordering was wrong: cleanup=%d captures=%d", coordinator.cleanup, captures)
+	}
+	if result.RequeueAfter != 50*time.Minute {
+		t.Fatalf("future scheduled backup deadline was not preserved: result=%+v", result)
+	}
+	got := new(api.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.BackupRetention == nil || !got.Status.BackupRetention.LastSuccess.Time.Equal(now) || got.Status.BackupRetention.Deleted != 1 {
+		t.Fatalf("retention result was not persisted before scheduled requeue: %+v", got.Status.BackupRetention)
+	}
+}
+
 func scheduledBackupReconciler(captures *int, capture func(context.Context, *api.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding) (*api.BackupStatus, error)) *KubeOVNInstallationReconciler {
 	return &KubeOVNInstallationReconciler{
 		Leases: scheduledLeaseRunner{}, Topology: scheduledTopologyProvider{topology: validScheduledTopology()},
@@ -206,4 +288,29 @@ func validScheduledTopology() health.CentralTopology {
 		Pod:      health.ObjectIdentity{Name: "central-0", UID: "pod-uid"}, ContainerID: "containerd://central",
 		Databases: [2]health.DatabaseIdentity{{Database: "OVN_Northbound", ClusterID: "11111111-2222-3333-4444-555555555555", ServerID: "11111111-2222-3333-4444-555555555556", Address: "tcp:10.0.0.1:6643", ClientAddress: "tcp:10.0.0.1:6641"}, {Database: "OVN_Southbound", ClusterID: "11111111-2222-3333-4444-555555555555", ServerID: "11111111-2222-3333-4444-555555555557", Address: "tcp:10.0.0.1:6644", ClientAddress: "tcp:10.0.0.1:6642"}},
 	}}}
+}
+
+func threeMemberScheduledTopology() health.CentralTopology {
+	topology := validScheduledTopology()
+	base := topology.Members[0]
+	for index, ids := range [][2]string{
+		{"11111111-2222-3333-4444-555555555557", "11111111-2222-3333-4444-555555555558"},
+		{"11111111-2222-3333-4444-555555555558", "11111111-2222-3333-4444-555555555559"},
+	} {
+		member := base
+		suffix := index + 2
+		member.Node = health.ObjectIdentity{Name: fmt.Sprintf("node-%d", suffix), UID: types.UID(fmt.Sprintf("node-uid-%d", suffix))}
+		member.Workload.ObjectIdentity = health.ObjectIdentity{Name: fmt.Sprintf("central-%d", suffix), UID: types.UID(fmt.Sprintf("central-uid-%d", suffix))}
+		member.Pod = health.ObjectIdentity{Name: fmt.Sprintf("central-%d-0", suffix), UID: types.UID(fmt.Sprintf("pod-uid-%d", suffix))}
+		member.Storage[0].HostPath = fmt.Sprintf("/var/lib/ovn-member-%d", suffix)
+		member.ContainerID = fmt.Sprintf("containerd://central-%d", suffix)
+		member.Databases[0].ServerID = ids[0]
+		member.Databases[1].ServerID = ids[1]
+		member.Databases[0].Address = fmt.Sprintf("tcp:10.0.0.%d:6643", suffix)
+		member.Databases[0].ClientAddress = fmt.Sprintf("tcp:10.0.0.%d:6641", suffix)
+		member.Databases[1].Address = fmt.Sprintf("tcp:10.0.0.%d:6644", suffix)
+		member.Databases[1].ClientAddress = fmt.Sprintf("tcp:10.0.0.%d:6642", suffix)
+		topology.Members = append(topology.Members, member)
+	}
+	return topology
 }

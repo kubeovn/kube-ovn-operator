@@ -11,3 +11,15 @@ resources: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+fenceAgent:
+  # When enabled, the operator injects a fence-agent sidecar into every
+  # rendered ovn-central workload and configures its mTLS client transport.
+  enabled: false
+  endpointTemplate: ""
+  # This image must contain /fence-agent and be pinned by digest. The default
+  # is empty so ordinary installations remain fail-closed without fencing.
+  image: ""
+  clientCertSecret: ""
+  clientCASecret: ""
+  serverTLSSecret: ""
+  port: 8443

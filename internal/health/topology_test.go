@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,9 +42,18 @@ func topologyStatus(pod, database string) string {
 }
 
 func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T) {
-	for _, scenario := range []string{"healthy", "dynamic listener", "missing pod", "unhealthy peer", "extra raft member", "cluster drift", "node replaced", "pod replaced", "listener changed", "ephemeral storage", "wrong node address", "no listener"} {
+	for _, scenario := range []string{"healthy", "dynamic listener", "missing pod", "unhealthy peer", "extra raft member", "cluster drift", "node replaced", "pod replaced", "listener changed", "ephemeral storage", "wrong node address", "wrong node address with explicit replacement", "wrong node address with replacement for another endpoint", "cordoned node", "cordoned node with explicit replacement", "no listener"} {
 		t.Run(scenario, func(t *testing.T) {
 			installation, kube, objects := healthFixture(t)
+			if strings.Contains(scenario, "with explicit replacement") || strings.Contains(scenario, "replacement for another endpoint") {
+				installation.Spec.Central.DynamicMembership = true
+				installation.Status.Topology.Inventory = &operatorv1alpha1.CentralTopologyReference{Name: "retained", UID: "retained-uid", Digest: "sha256:retained"}
+				target := "ovn-central-0"
+				if strings.Contains(scenario, "another endpoint") {
+					target = "ovn-central-1"
+				}
+				installation.Spec.Central.MemberRequests = []operatorv1alpha1.CentralMemberSpec{{Name: "replacement", ReplaceEndpoint: target}}
+			}
 			for i := range 3 {
 				pod := objects[i+2].(*corev1.Pod)
 				pod.Spec.NodeName, pod.Spec.HostNetwork = fmt.Sprintf("node-%d", i), true
@@ -60,8 +70,11 @@ func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T)
 					t.Fatal(err)
 				}
 				node := &corev1.Node{Name: pod.Spec.NodeName, UID: types.UID(pod.Spec.NodeName), Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}, Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: fmt.Sprintf("192.0.2.%d", i+1)}}}}
-				if scenario == "wrong node address" {
+				if strings.Contains(scenario, "wrong node address") && i == 0 {
 					node.Status.Addresses[0].Address = "192.0.2.99"
+				}
+				if strings.Contains(scenario, "cordoned node") && i == 0 {
+					node.Spec.Unschedulable = true
 				}
 				if err := kube.Create(t.Context(), node); err != nil {
 					t.Fatal(err)
@@ -132,7 +145,18 @@ func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T)
 				return []byte(data), nil
 			})
 			result, err := DiscoverCentralTopology(t.Context(), kube, runner, installation)
-			if scenario != "healthy" && scenario != "dynamic listener" {
+			accepted := scenario == "healthy" || scenario == "dynamic listener" || scenario == "wrong node address with explicit replacement" || scenario == "cordoned node with explicit replacement"
+			if !accepted {
+				if scenario == "wrong node address" {
+					if _, ok := errors.AsType[*EndpointDriftError](err); !ok {
+						t.Fatalf("expected a typed endpoint drift error, got %v", err)
+					}
+				}
+				if scenario == "cordoned node" {
+					if _, ok := errors.AsType[*NodeLifecycleError](err); !ok {
+						t.Fatalf("expected a typed node lifecycle error, got %v", err)
+					}
+				}
 				if err == nil || len(result.Members) != 0 {
 					t.Fatalf("unsafe topology accepted: %+v, %v", result, err)
 				}

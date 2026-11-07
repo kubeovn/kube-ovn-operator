@@ -26,6 +26,22 @@ count. The replacement pins the old workload UID, ReplicaSet UID when
 applicable and admitted spec before preparation and reuses the same joint
 NB/SB catch-up, backup, quorum and retirement gates.
 
+If the retained Chart Deployment Pod has already disappeared because its Node
+was deleted, replaced, cordoned or became NotReady, or has been replaced by a
+different Pod UID, the request must carry a pre-created
+`KubeOVNMemberRemovalApproval` reference in
+`central.memberRequests[].removalApprovalRef`. The request may omit
+`replaceEndpoint`; the selector then chooses exactly one proven lost endpoint
+and rejects ambiguity. Admission keeps the old Pod UID from the retained
+topology, fixes every surviving Pod UID and allows at most one healthy
+replacement Pod from the pinned ReplicaSet. The executor uses the approval only
+if the old database member is unhealthy, then removes the unplanned replacement
+Pod by a guarded one-step Deployment scale-down after both NB/SB configurations
+converge. The selector reuses the approval decision's `operationID` for the
+durable lifecycle request, allowing the approval to be created before the
+replacement request. A missing endpoint on a stable Ready Node is rejected
+rather than treated as permanent loss.
+
 ## Durable contract
 
 `Begin(ctx, Request)` admits an immutable request containing installation UID and
@@ -97,8 +113,7 @@ runtime image and listener addresses, and is therefore not synthesized from
 Chart values. Member requests are additions to an installation with a retained
 topology; the initial Chart install must establish that baseline first. The
 provisioner creates the native preparation result during the durable `Preparing` phase; callers do not inject generated server IDs.
-Runtime image publication/selection, automatic storage and TLS Secret lifecycle,
-node placement/changes, lifecycle-authorized inventory transitions and generation transitions,
+Runtime image publication/selection, automatic storage and node placement/changes,
 broader automatic Chart workload migration and post-transition network checks
 remain part of controller integration. The selected one-step reduction path
 authorizes and records its next apply checkpoint after the immutable completion
@@ -107,8 +122,10 @@ receipt and successor topology are pinned.
 Backup pairs are conservative sampled fences, not atomic cross-database snapshots
 or an application write barrier. Continuous writes can prevent a matching pair
 from being authorized. Joint observations and Kubernetes writes are not an atomic
-transaction, and Lease cancellation cannot retract already accepted API or OVN
-commands. Transport-level fencing is still required for strict in-flight isolation.
+transaction. The OVN mutation path now requires the explicit
+`ovnadmin.FencedRunner` capability and passes a `lease.FenceToken`; a plain
+`pods/exec` runner fails closed. The remote executor must atomically validate
+that token to fence a request already in flight.
 
 Unit tests cover partial NB/SB catch-up, lost startup/removal responses, journal
 write failures, late peer failure at dispatch, identity/generation drift, approvals,

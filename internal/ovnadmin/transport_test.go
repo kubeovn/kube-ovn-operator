@@ -2,11 +2,13 @@ package ovnadmin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
 )
 
@@ -14,6 +16,29 @@ type runFunc func(context.Context, string, []string) ([]byte, error)
 
 func (f runFunc) Run(ctx context.Context, endpoint string, command []string) ([]byte, error) {
 	return f(ctx, endpoint, command)
+}
+
+func (f runFunc) RunFenced(ctx context.Context, endpoint string, command []string, token lease.FenceToken) ([]byte, error) {
+	if token.Scope != lease.Central || token.LeaseUID == "" || token.Holder == "" || token.Epoch < 1 {
+		return nil, fmt.Errorf("invalid test fence token")
+	}
+	return f(ctx, endpoint, command)
+}
+
+type rawRunFunc runFunc
+
+func (f rawRunFunc) Run(ctx context.Context, endpoint string, command []string) ([]byte, error) {
+	return f(ctx, endpoint, command)
+}
+
+type capturingFencedRunner struct {
+	runFunc
+	token lease.FenceToken
+}
+
+func (r *capturingFencedRunner) RunFenced(ctx context.Context, endpoint string, command []string, token lease.FenceToken) ([]byte, error) {
+	r.token = token
+	return r.runFunc(ctx, endpoint, command)
 }
 
 func testStatus(endpoint string) string {
@@ -192,6 +217,35 @@ func TestCommandTransportRechecksBeforeDispatch(t *testing.T) {
 				t.Fatalf("unsafe write=%d err=%v", writes, err)
 			}
 		})
+	}
+}
+
+func TestCommandTransportFailsClosedWithoutServerFence(t *testing.T) {
+	writes := 0
+	c := &CommandClient{ClusterID: testClusterID, Endpoints: testEndpoints(), Runner: rawRunFunc(func(_ context.Context, endpoint string, command []string) ([]byte, error) {
+		if command[4] != "cluster/status" {
+			writes++
+		}
+		return []byte(testStatus(endpoint)), nil
+	})}
+	change := membership.Change{Operation: membership.OperationLeave, ClusterID: testClusterID, Member: testSnapshot().Members[1], Reason: "fence capability", BackupRef: "verified-backup"}
+	err := withCentralLease(t, func(ctx context.Context) error { return approvedExecutor(t, c).Execute(ctx, "server-0", change) })
+	if err == nil || !errors.Is(err, ErrFencingUnavailable) || writes != 0 {
+		t.Fatalf("unfenced mutation was not rejected: writes=%d err=%v", writes, err)
+	}
+}
+
+func TestCommandTransportPassesCurrentFenceTokenToMutation(t *testing.T) {
+	runner := &capturingFencedRunner{runFunc: runFunc(func(_ context.Context, endpoint string, command []string) ([]byte, error) {
+		return []byte(testStatus(endpoint)), nil
+	})}
+	c := &CommandClient{ClusterID: testClusterID, Endpoints: testEndpoints(), Runner: runner}
+	change := membership.Change{Operation: membership.OperationLeave, ClusterID: testClusterID, Member: testSnapshot().Members[1], Reason: "fence token", BackupRef: "verified-backup"}
+	if err := withCentralLease(t, func(ctx context.Context) error { return approvedExecutor(t, c).Execute(ctx, "server-0", change) }); err != nil {
+		t.Fatal(err)
+	}
+	if runner.token.Scope != lease.Central || runner.token.InstallationUID == "" || runner.token.LeaseUID == "" || runner.token.Holder == "" || runner.token.Epoch < 1 {
+		t.Fatalf("mutation did not receive a complete fence token: %+v", runner.token)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/approval"
 	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
 	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 	"github.com/kubeovn/kube-ovn-operator/internal/workload"
@@ -91,6 +92,14 @@ func (d *kubernetesDatabase) Capture(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return d.backups.Capture(ctx, d.inventory.Database, leader)
+}
+
+func (d *kubernetesDatabase) RestoreFenced(ctx context.Context, ref string, token lease.FenceToken) error {
+	leader, err := d.leader(ctx)
+	if err != nil {
+		return err
+	}
+	return d.backups.RestoreFenced(ctx, d.inventory.Database, leader, ref, token)
 }
 
 func (d *kubernetesDatabase) Verify(ctx context.Context, snapshot ovnadmin.Snapshot, ref string) error {

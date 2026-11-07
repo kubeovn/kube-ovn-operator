@@ -1,0 +1,25 @@
+# Optional namespace-scoped roles. No bindings are supplied or installed by the
+# default Kustomize/Helm path. Bind each role to a separately reviewed human or
+# automation principal.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-ovn-recovery-approver
+  namespace: kube-ovn-operator-system
+rules:
+  - apiGroups: [operator.kubeovn.io]
+    resources: [kubeovnrecoveryapprovals]
+    verbs: [create, get, list, watch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-ovn-recovery-recorder
+  namespace: kube-ovn-operator-system
+rules:
+  - apiGroups: [operator.kubeovn.io]
+    resources: [kubeovnrecoveryapprovals]
+    verbs: [get, list, watch]
+  - apiGroups: [operator.kubeovn.io]
+    resources: [kubeovnrecoveryapprovals/status]
+    verbs: [get, update, patch]

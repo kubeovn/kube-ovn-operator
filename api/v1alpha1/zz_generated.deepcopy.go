@@ -58,6 +58,9 @@ func (in *KubeOVNRecoveryRequest) DeepCopyInto(out *KubeOVNRecoveryRequest) {
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 	out.Spec = in.Spec
 	out.Spec.ExpiresAt = *in.Spec.ExpiresAt.DeepCopy()
+	if in.Spec.ApprovalRef != nil {
+		out.Spec.ApprovalRef = in.Spec.ApprovalRef.DeepCopy()
+	}
 	in.Status.DeepCopyInto(&out.Status)
 }
 func (in *KubeOVNRecoveryRequest) DeepCopy() *KubeOVNRecoveryRequest {
@@ -127,15 +130,38 @@ func (in *CentralSpec) DeepCopyInto(out *CentralSpec) {
 	in.Storage.DeepCopyInto(&out.Storage)
 	if in.MemberRequests != nil {
 		out.MemberRequests = make([]CentralMemberSpec, len(in.MemberRequests))
-		copy(out.MemberRequests, in.MemberRequests)
+		for i := range in.MemberRequests {
+			in.MemberRequests[i].DeepCopyInto(&out.MemberRequests[i])
+		}
 	}
 }
-func (in *CentralMemberSpec) DeepCopyInto(out *CentralMemberSpec) { *out = *in }
+func (in *CentralMemberSpec) DeepCopyInto(out *CentralMemberSpec) {
+	*out = *in
+	if in.RemovalApprovalRef != nil {
+		out.RemovalApprovalRef = new(MemberRemovalApprovalReference)
+		*out.RemovalApprovalRef = *in.RemovalApprovalRef
+	}
+	if in.TLSSecretRef != nil {
+		out.TLSSecretRef = new(LocalObjectReference)
+		*out.TLSSecretRef = *in.TLSSecretRef
+	}
+}
 func (in *CentralMemberSpec) DeepCopy() *CentralMemberSpec {
 	if in == nil {
 		return nil
 	}
 	out := new(CentralMemberSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+func (in *MemberRemovalApprovalReference) DeepCopyInto(out *MemberRemovalApprovalReference) {
+	*out = *in
+}
+func (in *MemberRemovalApprovalReference) DeepCopy() *MemberRemovalApprovalReference {
+	if in == nil {
+		return nil
+	}
+	out := new(MemberRemovalApprovalReference)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -170,6 +196,9 @@ func (in *HCPConfig) DeepCopyInto(out *HCPConfig) {
 func (in *UpgradeSpec) DeepCopyInto(out *UpgradeSpec) {
 	*out = *in
 	in.Backup.DeepCopyInto(&out.Backup)
+	if in.RollbackApprovalRef != nil {
+		out.RollbackApprovalRef = in.RollbackApprovalRef.DeepCopy()
+	}
 }
 func (in *BackupSpec) DeepCopyInto(out *BackupSpec) {
 	*out = *in
@@ -271,6 +300,31 @@ func (in *UpgradeStatus) DeepCopyInto(out *UpgradeStatus) {
 			}
 		}
 	}
+	if in.Rollback != nil {
+		out.Rollback = new(RollbackStatus)
+		*out.Rollback = *in.Rollback
+		out.Rollback.StartedAt = *in.Rollback.StartedAt.DeepCopy()
+		out.Rollback.CompletedAt = *in.Rollback.CompletedAt.DeepCopy()
+		if in.Rollback.ApprovalRef != nil {
+			out.Rollback.ApprovalRef = in.Rollback.ApprovalRef.DeepCopy()
+		}
+	}
+}
+func (in *RollbackStatus) DeepCopyInto(out *RollbackStatus) {
+	*out = *in
+	out.StartedAt = *in.StartedAt.DeepCopy()
+	out.CompletedAt = *in.CompletedAt.DeepCopy()
+	if in.ApprovalRef != nil {
+		out.ApprovalRef = in.ApprovalRef.DeepCopy()
+	}
+}
+func (in *RollbackStatus) DeepCopy() *RollbackStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(RollbackStatus)
+	in.DeepCopyInto(out)
+	return out
 }
 func (in *HCPStatus) DeepCopyInto(out *HCPStatus) { *out = *in }
 func (in *BackupStatus) DeepCopyInto(out *BackupStatus) {
@@ -290,6 +344,9 @@ func (in *BackupRetentionStatus) DeepCopyInto(out *BackupRetentionStatus) {
 func (in *KubeOVNRecoveryRequestSpec) DeepCopyInto(out *KubeOVNRecoveryRequestSpec) {
 	*out = *in
 	out.ExpiresAt = *in.ExpiresAt.DeepCopy()
+	if in.ApprovalRef != nil {
+		out.ApprovalRef = in.ApprovalRef.DeepCopy()
+	}
 }
 func (in *KubeOVNRecoveryRequestStatus) DeepCopyInto(out *KubeOVNRecoveryRequestStatus) {
 	*out = *in
@@ -297,6 +354,29 @@ func (in *KubeOVNRecoveryRequestStatus) DeepCopyInto(out *KubeOVNRecoveryRequest
 		out.Plan = new(RecoveryPlanStatus)
 		*out.Plan = *in.Plan
 		out.Plan.ExpiresAt = *in.Plan.ExpiresAt.DeepCopy()
+		if in.Plan.DatabaseRefs != nil {
+			out.Plan.DatabaseRefs = make(map[string]string, len(in.Plan.DatabaseRefs))
+			for key, value := range in.Plan.DatabaseRefs {
+				out.Plan.DatabaseRefs[key] = value
+			}
+		}
+		if in.Plan.ApprovalRef != nil {
+			out.Plan.ApprovalRef = in.Plan.ApprovalRef.DeepCopy()
+		}
+	}
+	if in.Execution != nil {
+		out.Execution = new(RecoveryExecutionStatus)
+		*out.Execution = *in.Execution
+		out.Execution.StartedAt = *in.Execution.StartedAt.DeepCopy()
+		out.Execution.CompletedAt = *in.Execution.CompletedAt.DeepCopy()
+		if in.Execution.Operation != nil {
+			out.Execution.Operation = new(CentralOperationReference)
+			*out.Execution.Operation = *in.Execution.Operation
+			if in.Execution.Operation.HandoffInventory != nil {
+				out.Execution.Operation.HandoffInventory = new(CentralTopologyReference)
+				*out.Execution.Operation.HandoffInventory = *in.Execution.Operation.HandoffInventory
+			}
+		}
 	}
 	if in.Conditions != nil {
 		out.Conditions = make([]metav1.Condition, len(in.Conditions))
@@ -305,4 +385,26 @@ func (in *KubeOVNRecoveryRequestStatus) DeepCopyInto(out *KubeOVNRecoveryRequest
 	if in.CompletedAt != nil {
 		out.CompletedAt = in.CompletedAt.DeepCopy()
 	}
+}
+
+func (in *RecoveryExecutionStatus) DeepCopyInto(out *RecoveryExecutionStatus) {
+	*out = *in
+	out.StartedAt = *in.StartedAt.DeepCopy()
+	out.CompletedAt = *in.CompletedAt.DeepCopy()
+	if in.Operation != nil {
+		out.Operation = new(CentralOperationReference)
+		*out.Operation = *in.Operation
+		if in.Operation.HandoffInventory != nil {
+			out.Operation.HandoffInventory = new(CentralTopologyReference)
+			*out.Operation.HandoffInventory = *in.Operation.HandoffInventory
+		}
+	}
+}
+func (in *RecoveryExecutionStatus) DeepCopy() *RecoveryExecutionStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(RecoveryExecutionStatus)
+	in.DeepCopyInto(out)
+	return out
 }

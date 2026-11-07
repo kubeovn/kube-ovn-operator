@@ -1,6 +1,6 @@
 IMG ?= ghcr.io/kubeovn/kube-ovn-operator:dev
 
-.PHONY: all build test vet lint manifests chart-lint docker-build docker-push e2e
+.PHONY: all build test vet lint manifests chart-lint docker-build docker-push e2e e2e-controller-handoff
 
 all: test build
 
@@ -19,6 +19,8 @@ lint:
 manifests:
 	@cmp config/crd/bases/operator.kubeovn.io_kubeovnmemberremovalapprovals.yaml charts/kube-ovn-operator/crds/operator.kubeovn.io_kubeovnmemberremovalapprovals.yaml
 	@test -s config/crd/bases/operator.kubeovn.io_kubeovnmemberremovalapprovals.yaml
+	@cmp config/crd/bases/operator.kubeovn.io_kubeovnrecoveryapprovals.yaml charts/kube-ovn-operator/crds/operator.kubeovn.io_kubeovnrecoveryapprovals.yaml
+	@test -s config/crd/bases/operator.kubeovn.io_kubeovnrecoveryapprovals.yaml
 	@cmp config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml charts/kube-ovn-operator/crds/operator.kubeovn.io_kubeovninstallations.yaml
 	@cmp config/crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml charts/kube-ovn-operator/crds/operator.kubeovn.io_kubeovnrecoveryrequests.yaml
 	@test -s config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml
@@ -31,6 +33,8 @@ manifests:
 	@grep -q '^kind: CustomResourceDefinition$$' config/crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml
 	@grep -q 'name: kubeovninstallations.operator.kubeovn.io' config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml
 	@grep -q 'name: kubeovnrecoveryrequests.operator.kubeovn.io' config/crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml
+	@grep -q '^kind: CustomResourceDefinition$$' config/crd/bases/operator.kubeovn.io_kubeovnrecoveryapprovals.yaml
+	@grep -q 'name: kubeovnrecoveryapprovals.operator.kubeovn.io' config/crd/bases/operator.kubeovn.io_kubeovnrecoveryapprovals.yaml
 
 chart-lint:
 	helm lint charts/kube-ovn-operator
@@ -43,3 +47,6 @@ docker-push:
 
 e2e:
 	bash test/e2e/smoke.sh
+
+e2e-controller-handoff:
+	bash test/e2e/controller-handoff-smoke.sh

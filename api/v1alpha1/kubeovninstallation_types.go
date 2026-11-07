@@ -84,17 +84,35 @@ type CentralSpec struct {
 // may set retireEndpoint to select one retained Chart Deployment Pod for a
 // one-member scale-in transition.
 type CentralMemberSpec struct {
-	Name                    string `json:"name"`
-	ReplaceEndpoint         string `json:"replaceEndpoint,omitempty"`
-	RetireEndpoint          string `json:"retireEndpoint,omitempty"`
-	NodeName                string `json:"nodeName,omitempty"`
-	ClaimName               string `json:"claimName,omitempty"`
-	VolumeName              string `json:"volumeName,omitempty"`
-	Image                   string `json:"image,omitempty"`
-	NorthboundAddress       string `json:"northboundAddress,omitempty"`
-	SouthboundAddress       string `json:"southboundAddress,omitempty"`
-	NorthboundClientAddress string `json:"northboundClientAddress,omitempty"`
-	SouthboundClientAddress string `json:"southboundClientAddress,omitempty"`
+	Name            string `json:"name"`
+	ReplaceEndpoint string `json:"replaceEndpoint,omitempty"`
+	RetireEndpoint  string `json:"retireEndpoint,omitempty"`
+	// RemovalApprovalRef authorizes a permanent-loss kick when the retained
+	// endpoint has disappeared or been replaced. Without replaceEndpoint, the
+	// reference opts into automatic same-size replacement only when exactly one
+	// retained endpoint is proven lost. The operator never creates this approval
+	// and only forwards its immutable name/UID to the joint lifecycle executor.
+	RemovalApprovalRef      *MemberRemovalApprovalReference `json:"removalApprovalRef,omitempty"`
+	NodeName                string                          `json:"nodeName,omitempty"`
+	ClaimName               string                          `json:"claimName,omitempty"`
+	VolumeName              string                          `json:"volumeName,omitempty"`
+	Image                   string                          `json:"image,omitempty"`
+	NorthboundAddress       string                          `json:"northboundAddress,omitempty"`
+	SouthboundAddress       string                          `json:"southboundAddress,omitempty"`
+	NorthboundClientAddress string                          `json:"northboundClientAddress,omitempty"`
+	SouthboundClientAddress string                          `json:"southboundClientAddress,omitempty"`
+	// TLSSecretRef names an existing Secret containing either tls.key/tls.crt/ca.crt
+	// or the native key/cert/cacert keys. The lifecycle executor records its
+	// identity before creating a workload and never copies Secret data.
+	TLSSecretRef *LocalObjectReference `json:"tlsSecretRef,omitempty"`
+}
+
+// MemberRemovalApprovalReference identifies a pre-created
+// KubeOVNMemberRemovalApproval. Both fields are required so a name reuse
+// cannot redirect a replacement operation to a different approval record.
+type MemberRemovalApprovalReference struct {
+	Name string    `json:"name"`
+	UID  types.UID `json:"uid"`
 }
 
 type PlacementSpec struct {
@@ -139,6 +157,9 @@ type UpgradeSpec struct {
 	PauseOnDegraded bool       `json:"pauseOnDegraded,omitempty"`
 	Backup          BackupSpec `json:"backup,omitempty"`
 	AllowRollback   bool       `json:"allowRollback,omitempty"`
+	// RollbackApprovalRef is required when a rollback observes unavailable
+	// quorum and must use an explicit human-created recovery approval.
+	RollbackApprovalRef *RecoveryApprovalReference `json:"rollbackApprovalRef,omitempty"`
 }
 
 type BackupSpec struct {
@@ -166,7 +187,12 @@ type AdoptionSpec struct {
 // ApplyCheckpointStatus pins the inputs before the first workload write.
 // A lifecycle executor must authorize changes after this checkpoint exists.
 type ApplyCheckpointStatus struct {
-	SpecHash     string `json:"specHash"`
+	SpecHash string `json:"specHash"`
+	// BaseSpecHash is the hash of the installation spec with lifecycle member
+	// requests omitted. It lets a later explicit retirement or replacement
+	// change only that lifecycle input and the replica count without weakening
+	// the checkpoint for version, chart, placement, storage or network changes.
+	BaseSpecHash string `json:"baseSpecHash,omitempty"`
 	ManifestHash string `json:"manifestHash"`
 	Version      string `json:"version"`
 }
@@ -242,9 +268,13 @@ type DataPlaneNodeStatus struct {
 }
 
 type CentralMemberStatus struct {
-	Database     string      `json:"database"`
-	ServerID     string      `json:"serverID"`
-	Pod          string      `json:"pod,omitempty"`
+	Database string `json:"database"`
+	ServerID string `json:"serverID"`
+	Pod      string `json:"pod,omitempty"`
+	// Node is the last observed Kubernetes node hosting the central Pod. It is
+	// retained in status so a node label change, cordon or deletion still
+	// wakes reconciliation after the Node no longer matches placement.
+	Node         string      `json:"node,omitempty"`
 	Address      string      `json:"address,omitempty"`
 	State        string      `json:"state,omitempty"`
 	Leader       bool        `json:"leader,omitzero"`
@@ -300,12 +330,52 @@ type UpgradeStatus struct {
 	TargetVersion        string                   `json:"targetVersion,omitempty"`
 	CheckpointAuthorized bool                     `json:"checkpointAuthorized,omitzero"`
 	Checkpoint           *UpgradeCheckpointStatus `json:"checkpoint,omitempty"`
+	Rollback             *RollbackStatus          `json:"rollback,omitempty"`
+}
+
+// RollbackPhase records the durable progress of a version-aware rollback.
+// Blocked is used while the target is lower than the observed version but one
+// of the restore, workload or fencing capabilities is unavailable.
+type RollbackPhase string
+
+const (
+	RollbackPhaseBlocked   RollbackPhase = "Blocked"
+	RollbackPhaseQuiescing RollbackPhase = "Quiescing"
+	RollbackPhaseRestoring RollbackPhase = "Restoring"
+	RollbackPhaseWorkloads RollbackPhase = "Workloads"
+	RollbackPhaseVerifying RollbackPhase = "Verifying"
+	RollbackPhaseSucceeded RollbackPhase = "Succeeded"
+	RollbackPhaseFailed    RollbackPhase = "Failed"
+)
+
+// RollbackStatus is an auditable, installation-bound summary of rollback
+// admission and execution. RPOSeconds is the age of the verified pair at
+// admission; RTOSeconds is measured from StartedAt after execution completes.
+type RollbackStatus struct {
+	Phase          RollbackPhase              `json:"phase,omitempty"`
+	SourceVersion  string                     `json:"sourceVersion,omitempty"`
+	TargetVersion  string                     `json:"targetVersion,omitempty"`
+	BackupID       string                     `json:"backupID,omitempty"`
+	TopologyDigest string                     `json:"topologyDigest,omitempty"`
+	ChartDigest    string                     `json:"chartDigest,omitempty"`
+	ApprovalRef    *RecoveryApprovalReference `json:"approvalRef,omitempty"`
+	StartedAt      metav1.Time                `json:"startedAt,omitzero"`
+	CompletedAt    metav1.Time                `json:"completedAt,omitzero"`
+	RPOSeconds     int64                      `json:"rpoSeconds,omitzero"`
+	RTOSeconds     int64                      `json:"rtoSeconds,omitzero"`
+	Reason         string                     `json:"reason,omitempty"`
 }
 
 type HCPStatus struct {
 	Paired              bool   `json:"paired,omitempty"`
 	PeerObservedVersion string `json:"peerObservedVersion,omitempty"`
 	EndpointReady       bool   `json:"endpointReady,omitempty"`
+	// TLSSecretUID and TLSSecretResourceVersion identify the exact Secret
+	// generation used by the last accepted peer observation. They contain no
+	// credential material and force a fresh HCP gate after Secret replacement
+	// or rotation.
+	TLSSecretUID             types.UID `json:"tlsSecretUID,omitempty"`
+	TLSSecretResourceVersion string    `json:"tlsSecretResourceVersion,omitempty"`
 }
 
 // BackupStatus records a verified pair captured by the durable lifecycle
@@ -361,9 +431,17 @@ type KubeOVNRecoveryRequestSpec struct {
 	InstallationRef string       `json:"installationRef"`
 	Reason          string       `json:"reason"`
 	Mode            RecoveryMode `json:"mode"`
-	BackupRef       string       `json:"backupRef,omitempty"`
-	ApprovedBy      string       `json:"approvedBy"`
-	ExpiresAt       metav1.Time  `json:"expiresAt"`
+	// TargetMemberRef is required for rejoin. It names one explicit
+	// Central.MemberRequests entry and prevents recovery from inferring a
+	// target from replica count or whichever Pod happens to be available.
+	TargetMemberRef string `json:"targetMemberRef,omitempty"`
+	BackupRef       string `json:"backupRef,omitempty"`
+	// ApprovalRef may authorize destructive recovery only after the executor
+	// proves that live quorum is unavailable. It is never inferred from
+	// approvedBy.
+	ApprovalRef *RecoveryApprovalReference `json:"approvalRef,omitempty"`
+	ApprovedBy  string                     `json:"approvedBy"`
+	ExpiresAt   metav1.Time                `json:"expiresAt"`
 }
 
 type RecoveryPhase string
@@ -382,20 +460,42 @@ const (
 // complete request, including the self-reported approver; that field is never
 // treated as authority by the operator.
 type RecoveryPlanStatus struct {
-	Digest                 string       `json:"digest"`
-	InstallationUID        types.UID    `json:"installationUID"`
-	InstallationGeneration int64        `json:"installationGeneration"`
-	RequestGeneration      int64        `json:"requestGeneration"`
-	Mode                   RecoveryMode `json:"mode"`
-	BackupRef              string       `json:"backupRef,omitempty"`
-	ExpiresAt              metav1.Time  `json:"expiresAt"`
+	Digest                 string                     `json:"digest"`
+	InstallationUID        types.UID                  `json:"installationUID"`
+	InstallationGeneration int64                      `json:"installationGeneration"`
+	RequestGeneration      int64                      `json:"requestGeneration"`
+	Mode                   RecoveryMode               `json:"mode"`
+	SourceVersion          string                     `json:"sourceVersion,omitempty"`
+	TargetVersion          string                     `json:"targetVersion,omitempty"`
+	ChartDigest            string                     `json:"chartDigest,omitempty"`
+	TargetMemberRef        string                     `json:"targetMemberRef,omitempty"`
+	TargetMemberDigest     string                     `json:"targetMemberDigest,omitempty"`
+	TopologyDigest         string                     `json:"topologyDigest,omitempty"`
+	BackupRef              string                     `json:"backupRef,omitempty"`
+	DatabaseRefs           map[string]string          `json:"databaseRefs,omitempty"`
+	ApprovalRef            *RecoveryApprovalReference `json:"approvalRef,omitempty"`
+	ExpiresAt              metav1.Time                `json:"expiresAt"`
 }
 
 type KubeOVNRecoveryRequestStatus struct {
-	Phase       RecoveryPhase       `json:"phase,omitempty"`
-	Plan        *RecoveryPlanStatus `json:"plan,omitempty"`
-	Conditions  []metav1.Condition  `json:"conditions,omitempty"`
-	CompletedAt *metav1.Time        `json:"completedAt,omitempty"`
+	Phase       RecoveryPhase            `json:"phase,omitempty"`
+	Plan        *RecoveryPlanStatus      `json:"plan,omitempty"`
+	Execution   *RecoveryExecutionStatus `json:"execution,omitempty"`
+	Conditions  []metav1.Condition       `json:"conditions,omitempty"`
+	CompletedAt *metav1.Time             `json:"completedAt,omitempty"`
+}
+
+// RecoveryExecutionStatus records restart-safe recovery execution. Destructive
+// modes persist their phase and timing; rejoin persists the admitted lifecycle
+// operation reference so a retry resumes the same journal after a restart.
+type RecoveryExecutionStatus struct {
+	Phase       RollbackPhase              `json:"phase,omitempty"`
+	StartedAt   metav1.Time                `json:"startedAt,omitzero"`
+	CompletedAt metav1.Time                `json:"completedAt,omitzero"`
+	RPOSeconds  int64                      `json:"rpoSeconds,omitzero"`
+	RTOSeconds  int64                      `json:"rtoSeconds,omitzero"`
+	Reason      string                     `json:"reason,omitempty"`
+	Operation   *CentralOperationReference `json:"operation,omitempty"`
 }
 
 // +kubebuilder:object:root=true
