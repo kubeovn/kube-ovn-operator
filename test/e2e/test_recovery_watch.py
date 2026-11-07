@@ -17,12 +17,14 @@ spec.loader.exec_module(acceptance)
 class RecoveryWatchTest(unittest.TestCase):
     request = {"metadata": {"name": "restore", "uid": "request-uid", "resourceVersion": "123"}}
 
-    def watch(self, events, *, wait=False, timeout=2):
+    def watch(self, events, *, wait=False, timeout=2, api_server=None):
         payload = b"".join(json.dumps(event).encode() + b"\n" for event in events)
         launch = subprocess.Popen
         children = []
 
         def fake_kubectl(command, **kwargs):
+            if api_server:
+                self.assertIn("--server=" + api_server, command)
             self.assertIn("resourceVersion=123", command[-1])
             self.assertIn("metadata.name%3Drestore", command[-1])
             script = f"import os,time; os.write(1, {payload!r}); time.sleep({10 if wait else 0})"
@@ -52,6 +54,15 @@ class RecoveryWatchTest(unittest.TestCase):
                 if seen[-1] == "Succeeded":
                     break
         self.assertEqual(seen, phases)
+
+    def test_request_and_watch_share_selected_api_server(self):
+        api_server = "https://192.0.2.10:6443"
+        with patch.dict(acceptance.os.environ, {"KUBE_OVN_ACCEPTANCE_API_SERVER": api_server}):
+            with patch.object(acceptance.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"{}")) as execute:
+                acceptance.kubectl("create", "-f", "-", data=b"{}")
+            self.assertIn("--server=" + api_server, execute.call_args.args[0])
+            with contextlib.closing(self.watch([self.event("Succeeded")], wait=True, api_server=api_server)) as statuses:
+                self.assertEqual(next(statuses)["execution"]["phase"], "Succeeded")
 
     def test_api_error_and_replaced_request_are_rejected(self):
         for event, reason in [({"type": "ERROR", "object": {"code": 410}}, "API error"),
