@@ -91,8 +91,10 @@ The checkpoint retains a second hash with `central.memberRequests` removed, so
 later explicit retirement or replacement requests can update only lifecycle
 inputs and the central replica count; version, chart, placement, storage and
 network changes still require a fresh lifecycle authorization.
-Explicit additions are selected one at a time from pinned member requests;
-the ordinary Chart Deployment handoff is now explicit and UID-bound. Broader
+Explicit additions are selected one at a time from pinned member requests; a
+single desired replica increase may contain several prepared slots, which are
+converged sequentially after each completion receipt and apply handoff. The
+ordinary Chart Deployment handoff is now explicit and UID-bound. Broader
 automatic multi-step changes, node lifecycle handling and generation transitions
 remain open.
 There is no online `cluster/join` unixctl primitive: `ovsdb-tool join-cluster` prepares
