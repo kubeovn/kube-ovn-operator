@@ -298,6 +298,13 @@ def controller_state(objects):
 
 
 def create_recovery(name, backup_ref):
+    # Wait for the CRD watch cache before creating a request. A create can
+    # precede lazy cache initialization, making its resourceVersion too old
+    # for a subsequent watch even when only a few seconds have elapsed.
+    path = f"/apis/operator.kubeovn.io/v1alpha1/namespaces/{NAMESPACE}/kubeovnrecoveryrequests"
+    cached = json.loads(kubectl("get", "--raw", path + "?resourceVersion=0"))
+    check(cached.get("metadata", {}).get("resourceVersion"), "recovery cache list lacks a resourceVersion")
+    print(f"Recovery watch cache ready at {cached['metadata']['resourceVersion']} before creating {name}", flush=True)
     request = {"apiVersion": "operator.kubeovn.io/v1alpha1", "kind": "KubeOVNRecoveryRequest",
                "metadata": {"name": name, "namespace": NAMESPACE},
                "spec": {"installationRef": INSTALLATION, "reason": "Disposable Kind native restore acceptance",

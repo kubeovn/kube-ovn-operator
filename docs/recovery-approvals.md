@@ -124,6 +124,11 @@ unrelated later inputs still require their own lifecycle authorization. The
 API request and controller status are used directly; no backup, plan or
 execution status is fabricated by the test.
 
+Acceptance primes the CRD watch cache with a cached list before creating a
+recovery request, then watches from that create response's resource version.
+A watch error, including expired history, remains a failure; the fixture never
+substitutes a later status for missing durable phase evidence.
+
 The request includes a fractional-second expiration. The persisted plan's
 timestamp uses the API status field's second precision, while its immutable
 digest and expiration admission retain the request's full precision.
