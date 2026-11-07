@@ -91,9 +91,9 @@ derived from the Lease owner reference; an explicit `--installation-uid`
 remains available for independently deployed agents. It clears the Gate on
 missing, expired or unreadable Lease state, so an observation failure fails
 closed. The resource-version watcher also arms an expiry timer so a quiet
-Lease cannot remain armed after its renewal deadline. Production acceptance
-still needs a cluster-level test proving that Lease takeover and command
-admission are fenced by the chosen control-plane design.
+Lease cannot remain armed after its renewal deadline. The controller-handoff Kind acceptance exercises Lease takeover and expiry
+against real agents on three nodes, as described below. Production acceptance
+still needs to validate the chosen control-plane design in its target environment.
 
 The same agent exposes `POST /v1/fence/restore` for destructive NB/SB restore.
 The operator sends the verified backup as the request body, the database name in
@@ -143,9 +143,32 @@ contains a `fence-agent` reference binary that wires `Gate.Arm` to the named
 Lease, requires mutual TLS, and invokes the fixed native membership and restore
 commands. The Helm renderer and Chart wiring now support deploying that agent
 beside each central workload with the OVN socket, Lease reader binding, and
-certificate mounts required by the contract. The remaining production work is
-deploying it in a real cluster, configuring the endpoint template and
-credentials, and proving Lease takeover, membership mutation, and destructive
-restore behavior across multiple nodes. Until that deployment is active and
-the remote service has passed readiness, membership leave/kick and destructive
-restore remain intentionally unavailable to the normal `pods/exec` path.
+certificate mounts required by the contract.
+
+`test/e2e/controller-handoff-smoke.sh` deploys real agents with test-only mTLS
+credentials in a disposable Kind cluster. After two native member replacements,
+it pauses the operator and runs `fence-takeover-restore.py` against the final
+three-node topology (one Chart Deployment and two replacement StatefulSets):
+
+- Replace the named central Lease holder and epoch, wait until every agent
+  admits the new token, then require HTTP 409 for the old holder's NB/SB
+  `cluster/leave` requests. Reject each independently mismatched installation,
+  Lease UID, scope, holder and epoch. Preserve native cluster/server identities
+  and the three-member configuration.
+- Capture native NB/SB backups with a marker in each global row, change the
+  marker, reject old-token restores on all agents, and restore through the
+  current leader's real `ovsdb-client` endpoint with the new token. Require the
+  snapshot marker on all three nodes and unchanged RAFT membership identities.
+- Let a short Lease expire without renewal. Require readiness 503 while
+  liveness remains 200, and reject membership and restore with
+  `fence_not_armed`. Reacquire the Lease and require all agents to admit the new
+  token while rejecting the expired token.
+
+These checks cover the agent's observed Lease state and native admission in a
+healthy replicated cluster. They do not prove instantaneous revocation of an
+already admitted command, revoke a command during a disconnected watcher, or
+exercise the controller's lost-quorum recovery/approval workflow. Production
+work still includes credential provisioning, deployment and failure acceptance
+in the target environment. Until that deployment is active and the remote
+service has passed readiness, membership leave/kick and destructive restore
+remain intentionally unavailable to the normal `pods/exec` path.

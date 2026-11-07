@@ -92,3 +92,6 @@ jobs:
           kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
           kubectl get events -A --sort-by=.metadata.creationTimestamp || true
           kubectl logs -n kube-ovn-operator-system -l app=ovn-central --all-containers --prefix --tail=100 || true
+      - name: Recycle disposable controller Kind cluster
+        if: always()
+        run: kind delete cluster --name kube-ovn-operator-controller-e2e

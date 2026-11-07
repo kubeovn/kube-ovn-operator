@@ -80,11 +80,14 @@ spec:
 
 The approval object does not contain credentials, private keys, database files,
 or shell commands. The repository ships the operator-side fenced transport and
-an optional mTLS `fence-agent` reference deployment, but production deployment
-and multi-node takeover/restore acceptance are still required. Until a live
+an optional mTLS `fence-agent` deployment. Disposable three-node Kind
+acceptance covers Lease takeover/expiry and native NB/SB restore with healthy
+quorum; see [transport fencing](transport-fencing.md). Production deployment
+and acceptance in the target failure environment are still required. Until a live
 fence endpoint passes readiness, the operator remains fail-closed even when an
 approval exists.
 
 The provider and binding rules are covered by unit tests. A real lost-quorum
 restore still requires the configured fenced executor and a multi-node
-acceptance test.
+acceptance test of the complete controller recovery/approval workflow; the
+healthy-quorum agent transport test does not establish that capability.
