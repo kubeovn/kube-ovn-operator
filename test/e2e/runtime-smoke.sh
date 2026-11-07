@@ -5,8 +5,14 @@ set -euo pipefail
 # This fixture exercises the real operator binary without installing a CNI.
 test_dir=$(mktemp -d)
 cleanup() {
-  if [[ -n "${operator_pid:-}" ]]; then kill "${operator_pid}" 2>/dev/null || true; fi
-  if [[ -n "${server_pid:-}" ]]; then kill "${server_pid}" 2>/dev/null || true; fi
+  if [[ -n "${operator_pid:-}" ]]; then
+    kill "${operator_pid}" 2>/dev/null || true
+    wait "${operator_pid}" 2>/dev/null || true
+  fi
+  if [[ -n "${server_pid:-}" ]]; then
+    kill "${server_pid}" 2>/dev/null || true
+    wait "${server_pid}" 2>/dev/null || true
+  fi
   rm -rf "${test_dir}"
 }
 trap cleanup EXIT

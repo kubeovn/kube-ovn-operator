@@ -124,6 +124,9 @@ unrelated later inputs still require their own lifecycle authorization. The
 API request and controller status are used directly; no backup, plan or
 execution status is fabricated by the test.
 
+Smoke fixtures wait for their operator process to exit before handing the
+cluster to subsequent Lease/approval checks.
+
 Acceptance primes the CRD watch cache with a cached list before creating a
 recovery request, then watches from that create response's resource version.
 A watch error, including expired history, remains a failure; the fixture never

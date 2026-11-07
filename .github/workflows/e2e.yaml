@@ -63,6 +63,9 @@ jobs:
           kubectl get events -n kube-ovn-operator-system --sort-by=.metadata.creationTimestamp
           kubectl logs -n kube-ovn-operator-system member-seed-0 --all-containers --tail=100 || true
           kubectl logs -n kube-ovn-operator-system -l app=ovn-central --all-containers --tail=100 || true
+      - name: Recycle disposable smoke Kind cluster
+        if: always()
+        run: kind delete cluster --name kube-ovn-operator-e2e
 
   controller-deployment-handoff:
     runs-on: ubuntu-24.04
