@@ -42,7 +42,7 @@ func topologyStatus(pod, database string) string {
 }
 
 func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T) {
-	for _, scenario := range []string{"healthy", "dynamic listener", "missing pod", "unhealthy peer", "extra raft member", "cluster drift", "node replaced", "pod replaced", "listener changed", "ephemeral storage", "wrong node address", "wrong node address with explicit replacement", "wrong node address with replacement for another endpoint", "cordoned node", "cordoned node with explicit replacement", "no listener"} {
+	for _, scenario := range []string{"healthy", "dynamic listener", "local config listener", "unsupported listener database", "missing pod", "unhealthy peer", "extra raft member", "cluster drift", "node replaced", "pod replaced", "listener changed", "ephemeral storage", "wrong node address", "wrong node address with explicit replacement", "wrong node address with replacement for another endpoint", "cordoned node", "cordoned node with explicit replacement", "no listener"} {
 		t.Run(scenario, func(t *testing.T) {
 			installation, kube, objects := healthFixture(t)
 			if strings.Contains(scenario, "with explicit replacement") || strings.Contains(scenario, "replacement for another endpoint") {
@@ -109,9 +109,18 @@ func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T)
 					database, port = "OVN_Southbound", 6642
 				}
 				if command[0] == "ovsdb-client" {
+					if scenario == "local config listener" && !strings.Contains(command[4], `["Local_Config",{"op":"select","table":"Config"`) {
+						t.Fatalf("local listener query used the wrong database or table: %v", command)
+					}
 					return fmt.Appendf(nil, `[{"rows":[{"connections":["uuid","12345678-1111-2222-3333-444444444444"]}]},{"rows":[{"_uuid":["uuid","12345678-1111-2222-3333-444444444444"],"target":"ptcp:%d:0.0.0.0"}]}]`, port), nil
 				}
 				if command[4] == "ovsdb-server/list-remotes" {
+					if scenario == "local config listener" {
+						return []byte("db:Local_Config,Config,connections\npunix:/var/run/ovn/db.sock"), nil
+					}
+					if scenario == "unsupported listener database" {
+						return []byte("db:Unexpected,Config,connections"), nil
+					}
 					if scenario == "no listener" {
 						return []byte("punix:/var/run/ovn/db.sock"), nil
 					}
@@ -145,7 +154,7 @@ func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T)
 				return []byte(data), nil
 			})
 			result, err := DiscoverCentralTopology(t.Context(), kube, runner, installation)
-			accepted := scenario == "healthy" || scenario == "dynamic listener" || scenario == "wrong node address with explicit replacement" || scenario == "cordoned node with explicit replacement"
+			accepted := scenario == "healthy" || scenario == "dynamic listener" || scenario == "local config listener" || scenario == "wrong node address with explicit replacement" || scenario == "cordoned node with explicit replacement"
 			if !accepted {
 				if scenario == "wrong node address" {
 					if _, ok := errors.AsType[*EndpointDriftError](err); !ok {

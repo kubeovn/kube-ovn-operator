@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"strings"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -49,7 +50,8 @@ type Adopter interface {
 	Adopt(context.Context, []*unstructured.Unstructured, map[string]string) error
 }
 
-// Client uses uncached reads and server-side apply without force ownership.
+// Client uses uncached reads and server-side apply. A conflict is force retried
+// only when the API server identifies this adapter as the conflicting manager.
 // New objects use create-only semantics after dry-run to prevent an SSA upsert
 // from overwriting a resource created concurrently by another actor.
 type Client struct {
@@ -66,8 +68,10 @@ var _ Adopter = (*Client)(nil)
 type preparedObject struct {
 	object                  *unstructured.Unstructured
 	resource                dynamic.ResourceInterface
+	live                    *unstructured.Unstructured
 	exists                  bool
 	expectedResourceVersion string
+	force                   bool
 }
 
 type preparedAdoption struct {
@@ -100,14 +104,15 @@ func (c *Client) Apply(ctx context.Context, objects []*unstructured.Unstructured
 	if err := dryRunAll(ctx, prepared); err != nil {
 		return err
 	}
-	for _, item := range prepared {
+	for index := range prepared {
+		item := &prepared[index]
 		if c.BeforeWrite != nil {
 			if err := c.BeforeWrite(ctx); err != nil {
 				return fmt.Errorf("guard workload write: %w", err)
 			}
 		}
 		if item.exists {
-			_, err = patch(ctx, item, false)
+			err = c.persist(ctx, item)
 		} else {
 			_, err = item.resource.Create(ctx, item.object, metav1.CreateOptions{
 				FieldManager: DefaultFieldManager, FieldValidation: metav1.FieldValidationStrict,
@@ -117,6 +122,52 @@ func (c *Client) Apply(ctx context.Context, objects []*unstructured.Unstructured
 			return fmt.Errorf("apply %s: %w", objectKey(item.object), err)
 		}
 	}
+	return nil
+}
+
+func (c *Client) persist(ctx context.Context, item *preparedObject) error {
+	for attempt := 0; ; attempt++ {
+		if _, err := patch(ctx, *item, false); err != nil {
+			if attempt >= 2 || !isResourceVersionConflict(err) {
+				return err
+			}
+			if refreshErr := refreshPreparedObject(ctx, item); refreshErr != nil {
+				return fmt.Errorf("refresh %s after resource version conflict: %w", objectKey(item.object), refreshErr)
+			}
+			refreshed := []preparedObject{*item}
+			if err := dryRunAll(ctx, refreshed); err != nil {
+				return err
+			}
+			*item = refreshed[0]
+			if c.BeforeWrite != nil {
+				if guardErr := c.BeforeWrite(ctx); guardErr != nil {
+					return fmt.Errorf("guard workload retry: %w", guardErr)
+				}
+			}
+			continue
+		}
+		return nil
+	}
+}
+
+func refreshPreparedObject(ctx context.Context, item *preparedObject) error {
+	live, err := item.resource.Get(ctx, item.object.GetName(), metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if item.live == nil || live.GetUID() == "" || live.GetUID() != item.live.GetUID() || live.GetResourceVersion() == "" || live.GetDeletionTimestamp() != nil || live.GetName() != item.object.GetName() || live.GetNamespace() != item.object.GetNamespace() {
+		return ownershipConflict(item.object, "resource identity changed during apply")
+	}
+	labels := item.object.GetLabels()
+	identity := InstallationIdentity{Namespace: labels[InstallationNamespaceLabel], Name: labels[InstallationLabel], UID: types.UID(labels[InstallationUIDLabel])}
+	if err := checkOwnership(live, identity, true, len(item.object.GetOwnerReferences()) != 0); err != nil {
+		return err
+	}
+	item.live = live.DeepCopy()
+	item.expectedResourceVersion = live.GetResourceVersion()
+	// A newer version can include fields taken over by another manager. Never
+	// carry the old Force decision across a resourceVersion boundary.
+	item.force = false
 	return nil
 }
 
@@ -148,9 +199,40 @@ func (c *Client) Adopt(ctx context.Context, objects []*unstructured.Unstructured
 }
 
 func dryRunAll(ctx context.Context, objects []preparedObject) error {
-	for _, item := range objects {
-		if _, err := patch(ctx, item, true); err != nil {
-			return fmt.Errorf("server-side dry-run %s: %w", objectKey(item.object), err)
+	for index := range objects {
+		item := &objects[index]
+		var lastErr error
+		forced := false
+		// A self-conflict retry belongs to one resource version. Budget version
+		// refreshes independently so an intervening status update cannot consume
+		// the retry needed to migrate that version's Update ownership.
+		for refreshes := 0; ; {
+			if _, err := patch(ctx, *item, true); err == nil {
+				lastErr = nil
+				break
+			} else {
+				lastErr = err
+				if isResourceVersionConflict(err) && item.exists && refreshes < 2 {
+					if refreshErr := refreshPreparedObject(ctx, item); refreshErr != nil {
+						return fmt.Errorf("server-side dry-run %s: %w", objectKey(item.object), refreshErr)
+					}
+					refreshes++
+					continue
+				}
+				if !item.force && canForceSelfOwnedConflict(err, item.live) {
+					item.force = true
+					forced = true
+					continue
+				}
+				break
+			}
+		}
+		if lastErr != nil {
+			prefix := "server-side dry-run"
+			if forced {
+				prefix = "server-side forced dry-run"
+			}
+			return fmt.Errorf("%s %s: %w", prefix, objectKey(item.object), lastErr)
 		}
 		// Admission can distinguish CREATE from PATCH. Validate the exact
 		// persistence operation as well when the object does not exist yet.
@@ -176,10 +258,45 @@ func patch(ctx context.Context, item preparedObject, dryRun bool) (*unstructured
 		return nil, err
 	}
 	options := metav1.PatchOptions{FieldManager: DefaultFieldManager, FieldValidation: metav1.FieldValidationStrict}
+	if item.force {
+		options.Force = &item.force
+	}
 	if dryRun {
 		options.DryRun = []string{metav1.DryRunAll}
 	}
 	return item.resource.Patch(ctx, item.object.GetName(), types.ApplyPatchType, payload, options)
+}
+
+func isResourceVersionConflict(err error) bool {
+	return err != nil && apierrors.IsConflict(err) && strings.Contains(err.Error(), "object has been modified; please apply your changes to the latest version")
+}
+
+// canForceSelfOwnedConflict permits Force only when the API server identifies
+// every conflicting manager as this adapter. This repairs objects initially
+// created through Create (which records Update ownership) without claiming
+// fields owned by another controller.
+func canForceSelfOwnedConflict(err error, live *unstructured.Unstructured) bool {
+	if err == nil || !apierrors.IsConflict(err) || live == nil {
+		return false
+	}
+	status, ok := errors.AsType[*apierrors.StatusError](err)
+	if !ok || status.Status().Details == nil || len(status.Status().Details.Causes) == 0 {
+		return false
+	}
+	for _, cause := range status.Status().Details.Causes {
+		// Check each structured cause, including the singular conflict form.
+		// An unknown cause or mixed ownership must remain fail-closed.
+		suffix, self := strings.CutPrefix(cause.Message, `conflict with "`+DefaultFieldManager+`" using `+live.GetAPIVersion())
+		if cause.Type != metav1.CauseTypeFieldManagerConflict || cause.Field == "" || !self || (suffix != "" && !strings.HasPrefix(suffix, " at ")) {
+			return false
+		}
+	}
+	for _, entry := range live.GetManagedFields() {
+		if entry.Manager == DefaultFieldManager && entry.Operation == metav1.ManagedFieldsOperationUpdate && entry.APIVersion == live.GetAPIVersion() && entry.Subresource == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, objects []*unstructured.Unstructured) ([]preparedObject, error) {
@@ -265,6 +382,7 @@ func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, obj
 				return nil, fmt.Errorf("%s is deleting or has no UID/resourceVersion", objectKey(copy))
 			}
 			item.exists = true
+			item.live = existing.DeepCopy()
 			item.expectedResourceVersion = existing.GetResourceVersion()
 		}
 		prepared = append(prepared, item)

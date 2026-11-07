@@ -79,6 +79,9 @@ func main() {
 	if err := adapter.Apply(context.Background(), []*unstructured.Unstructured{workload(false, namespace, name)}); err != nil {
 		fatalf("repeat workload apply: %v", err)
 	}
+	if err := verifyDeploymentApply(context.Background(), adapter); err != nil {
+		fatalf("deployment apply regression: %v", err)
+	}
 	fmt.Println("server-side dry-run/apply succeeded")
 }
 

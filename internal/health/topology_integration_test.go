@@ -18,6 +18,15 @@ func TestLiveOVNDatabaseBackedClientListener(t *testing.T) {
 	if schemaDir == "" {
 		t.Skip("set OVN_TEST_SCHEMA_DIR for the native OVN schema")
 	}
+	for _, localConfig := range []bool{false, true} {
+		t.Run(fmt.Sprintf("local-config=%t", localConfig), func(t *testing.T) {
+			testLiveDatabaseBackedClientListener(t, schemaDir, localConfig)
+		})
+	}
+}
+
+func testLiveDatabaseBackedClientListener(t *testing.T, schemaDir string, localConfig bool) {
+	t.Helper()
 	root := t.TempDir()
 	db := filepath.Join(root, "nb.db")
 	runOVSDBTool(t, "create", db, filepath.Join(schemaDir, "ovn-nb.ovsschema"))
@@ -28,8 +37,23 @@ func TestLiveOVNDatabaseBackedClientListener(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
 	socket, ctl := filepath.Join(root, "socket"), filepath.Join(root, "ctl")
-	startTestProcess(t, root, exec.Command(ovsdbBinary(t, "ovsdb-server"), "--no-chdir", "--pidfile="+filepath.Join(root, "pid"), "--unixctl="+ctl, "--remote=punix:"+socket, "--remote=db:OVN_Northbound,NB_Global,connections", db))
-	transaction := fmt.Sprintf(`["OVN_Northbound",{"op":"insert","table":"Connection","uuid-name":"listener","row":{"target":"ptcp:%d:127.0.0.1"}},{"op":"insert","table":"NB_Global","row":{"connections":["set",[["named-uuid","listener"]]]}}]`, port)
+	listenerDB, listenerTable := "OVN_Northbound", "NB_Global"
+	args := []string{"--no-chdir", "--pidfile=" + filepath.Join(root, "pid"), "--unixctl=" + ctl, "--remote=punix:" + socket, db}
+	if localConfig {
+		listenerDB, listenerTable = "Local_Config", "Config"
+		schema := filepath.Join(root, "local-config.ovsschema")
+		// The listener tables mirror the local-config schema used by start-db.sh.
+		data := []byte(`{"name":"Local_Config","version":"1.0.0","tables":{"Config":{"isRoot":true,"maxRows":1,"columns":{"connections":{"type":{"key":{"type":"uuid","refTable":"Connection"},"min":0,"max":"unlimited"}}}},"Connection":{"columns":{"target":{"type":"string"}}}}}`)
+		if err := os.WriteFile(schema, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		localDB := filepath.Join(root, "local.db")
+		runOVSDBTool(t, "create", localDB, schema)
+		args = append(args, localDB)
+	}
+	args = append(args, "--remote=db:"+listenerDB+","+listenerTable+",connections")
+	startTestProcess(t, root, exec.Command(ovsdbBinary(t, "ovsdb-server"), args...))
+	transaction := fmt.Sprintf(`[%q,{"op":"insert","table":"Connection","uuid-name":"listener","row":{"target":"ptcp:%d:127.0.0.1"}},{"op":"insert","table":%q,"row":{"connections":["set",[["named-uuid","listener"]]]}}]`, listenerDB, port, listenerTable)
 	waitOVSDB(t, func() error {
 		return exec.CommandContext(t.Context(), ovsdbBinary(t, "ovsdb-client"), "--timeout=5", "transact", "unix:"+socket, transaction).Run()
 	})
