@@ -42,10 +42,16 @@ def eventually(description, predicate, timeout=40):
         time.sleep(0.5)
 
 
+def api_command(*arguments):
+    command = ["kubectl", "--context", CONTEXT]
+    if server := os.environ.get("KUBE_OVN_ACCEPTANCE_API_SERVER"):
+        command.append("--server=" + server)
+    return [*command, *arguments]
+
+
 def kubectl(*arguments, data=None):
     result = subprocess.run(
-        ["kubectl", "--context", CONTEXT, "--namespace", NAMESPACE,
-         "--request-timeout=15s", *arguments],
+        api_command("--namespace", NAMESPACE, "--request-timeout=15s", *arguments),
         input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25,
         check=True,
     )
@@ -322,8 +328,8 @@ def recovery_statuses(request, timeout=240):
                                     "timeoutSeconds": timeout})
     path = f"/apis/operator.kubeovn.io/v1alpha1/namespaces/{NAMESPACE}/kubeovnrecoveryrequests?{query}"
     with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(["kubectl", "--context", CONTEXT, f"--request-timeout={timeout + 5}s",
-                                    "get", "--raw", path], stdout=subprocess.PIPE, stderr=errors)
+        process = subprocess.Popen(api_command(f"--request-timeout={timeout + 5}s",
+                                               "get", "--raw", path), stdout=subprocess.PIPE, stderr=errors)
         try:
             pending = b""
             last_status = {}

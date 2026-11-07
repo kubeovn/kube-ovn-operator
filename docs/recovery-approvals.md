@@ -145,8 +145,10 @@ execution status is fabricated by the test.
 Smoke fixtures wait for their operator process to exit before handing the
 cluster to subsequent Lease/approval checks.
 
-Acceptance primes the CRD watch cache with a cached list before creating a
+Acceptance pins create/list/watch to one existing API server in the HA Kind
+fixture and primes its CRD watch cache with a cached list before creating a
 recovery request, then watches from that create response's resource version.
+The existing kubeconfig still supplies the CA and client authentication.
 A watch error, including expired history, remains a failure; the fixture never
 substitutes a later status for missing durable phase evidence.
 

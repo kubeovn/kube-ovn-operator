@@ -1005,8 +1005,11 @@ echo "automatic lifecycle handoff authorization consumed"
 # ready on their storage nodes.
 kubectl rollout status deployment/"${central_deployment}" -n kube-ovn-operator-system --timeout=120s
 
+# Keep create/list/watch on one API server: the HA load balancer otherwise
+# routes kubectl processes to independent, lazily initialized watch caches.
+# The existing kubeconfig still supplies its CA and client authentication.
 # Exercise the public recovery API while the real controller is still running.
-if ! python3 test/e2e/fence-takeover-restore.py "${fence_dir}" controller-recovery "${backup_dir}"; then
+if ! KUBE_OVN_ACCEPTANCE_API_SERVER="https://${control_plane_ips[0]}:6443" python3 test/e2e/fence-takeover-restore.py "${fence_dir}" controller-recovery "${backup_dir}"; then
   kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
   kubectl get kubeovnrecoveryrequests -n kube-ovn-operator-system -o yaml || true
   kubectl get deployments,statefulsets -n kube-ovn-operator-system -o yaml || true
