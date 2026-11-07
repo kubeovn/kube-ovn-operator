@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Exercise real agents only in the disposable controller-handoff Kind fixture."""
 
+import contextlib
 import datetime
 import http.client
 import json
+import os
 import re
+import select
 import ssl
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -302,6 +307,51 @@ def create_recovery(name, backup_ref):
     return json.loads(kubectl("create", "-f", "-", "-o", "json", data=json.dumps(request).encode()))
 
 
+def recovery_statuses(request, timeout=240):
+    # Start from the create response's resourceVersion: even phases that finish
+    # before this watch connects remain observable from the API event history.
+    query = urllib.parse.urlencode({"watch": "true", "resourceVersion": request["metadata"]["resourceVersion"],
+                                    "fieldSelector": "metadata.name=" + request["metadata"]["name"],
+                                    "timeoutSeconds": timeout})
+    path = f"/apis/operator.kubeovn.io/v1alpha1/namespaces/{NAMESPACE}/kubeovnrecoveryrequests?{query}"
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(["kubectl", "--context", CONTEXT, f"--request-timeout={timeout + 5}s",
+                                    "get", "--raw", path], stdout=subprocess.PIPE, stderr=errors)
+        try:
+            pending = b""
+            last_status = {}
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                check(remaining > 0, f"controller recovery watch timed out: {last_status}")
+                ready, _, _ = select.select([process.stdout], [], [], remaining)
+                check(ready, f"controller recovery watch timed out: {last_status}")
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    errors.seek(0)
+                    raise AssertionError(f"controller recovery watch ended before completion: {errors.read().decode()}")
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    check(event.get("type") != "ERROR", f"recovery watch API error: {event}")
+                    current = event["object"]
+                    check(current["metadata"]["uid"] == request["metadata"]["uid"], "recovery request was replaced")
+                    last_status = current.get("status", {})
+                    yield last_status
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            process.stdout.close()
+
+
 def run_controller_recovery(certificate_dir, backup_dir):
     fixture = Fixture(certificate_dir)
     before = fixture.topology()
@@ -341,40 +391,37 @@ def run_controller_recovery(certificate_dir, backup_dir):
     for database, stem, table in DATABASES:
         fixture.wait_marker(database, stem, table, "controller-changed")
 
-    create_recovery("controller-native-restore", backup["id"])
+    request = create_recovery("controller-native-restore", backup["id"])
     seen = set()
     plan = None
-    deadline = time.monotonic() + 240
-    while True:
-        status = resource("kubeovnrecoveryrequest", "controller-native-restore").get("status", {})
-        check(status.get("phase") not in ("Failed", "Expired"), f"controller recovery failed: {status}")
-        if status.get("plan"):
-            if plan is None:
-                plan = status["plan"]
-                check(plan["installationUID"] == fixture.installation_uid
-                      and plan["installationGeneration"] == installation["metadata"]["generation"]
-                      and plan["backupRef"] == backup["id"]
-                      and plan["databaseRefs"] == backup["databaseRefs"]
-                      and plan["topologyDigest"] == backup["topologyDigest"], "recovery plan lost its admitted bindings")
-            check(status["plan"] == plan, "immutable recovery plan changed during execution")
-        phase = status.get("execution", {}).get("phase")
-        if phase and phase not in seen:
-            seen.add(phase)
-            print(f"Controller recovery phase: {phase}", flush=True)
-        if phase == "Restoring":
-            for item in controllers(fixture):
-                annotations = item["metadata"].get("annotations", {})
-                check(annotations.get("operator.kubeovn.io/rollback-quiesced") == plan["digest"],
-                      "restore began without the operation-bound rollout quiesce marker")
-                check("operator.kubeovn.io/rollback-state" in annotations, "original rollout state was not persisted")
-                if item["kind"] == "Deployment":
-                    check(item["spec"].get("paused"), "restore began before Deployment pause")
-                else:
-                    check(item["spec"]["updateStrategy"]["type"] == "OnDelete", "restore began before StatefulSet freeze")
-        if status.get("phase") == "Succeeded":
-            break
-        check(time.monotonic() < deadline, f"controller recovery timed out: {status}")
-        time.sleep(0.3)
+    with contextlib.closing(recovery_statuses(request)) as statuses:
+        for status in statuses:
+            check(status.get("phase") not in ("Failed", "Expired"), f"controller recovery failed: {status}")
+            if status.get("plan"):
+                if plan is None:
+                    plan = status["plan"]
+                    check(plan["installationUID"] == fixture.installation_uid
+                          and plan["installationGeneration"] == installation["metadata"]["generation"]
+                          and plan["backupRef"] == backup["id"]
+                          and plan["databaseRefs"] == backup["databaseRefs"]
+                          and plan["topologyDigest"] == backup["topologyDigest"], "recovery plan lost its admitted bindings")
+                check(status["plan"] == plan, "immutable recovery plan changed during execution")
+            phase = status.get("execution", {}).get("phase")
+            if phase and phase not in seen:
+                seen.add(phase)
+                print(f"Controller recovery phase: {phase}", flush=True)
+            if phase == "Restoring":
+                for item in controllers(fixture):
+                    annotations = item["metadata"].get("annotations", {})
+                    check(annotations.get("operator.kubeovn.io/rollback-quiesced") == plan["digest"],
+                          "restore began without the operation-bound rollout quiesce marker")
+                    check("operator.kubeovn.io/rollback-state" in annotations, "original rollout state was not persisted")
+                    if item["kind"] == "Deployment":
+                        check(item["spec"].get("paused"), "restore began before Deployment pause")
+                    else:
+                        check(item["spec"]["updateStrategy"]["type"] == "OnDelete", "restore began before StatefulSet freeze")
+            if status.get("phase") == "Succeeded":
+                break
     check({"Restoring", "Workloads", "Verifying", "Succeeded"} <= seen,
           f"recovery skipped durable execution phases: {seen}")
     check(status.get("completedAt") and status["execution"].get("startedAt")
