@@ -516,26 +516,42 @@ if [[ "${automatic_candidate_count}" -lt 2 ]]; then
   exit 1
 fi
 
-# Stop the local operator while the ReplicaSet is reduced. The first seeded
-# control-plane node owns the initial RAFT leader. Keep that Pod as the
-# survivor: a permanently lost follower can be kicked through the leader's
-# fence-agent after its own Pod has disappeared.
+# Stop the local operator while the ReplicaSet is reduced. The explicit
+# replacement above may already have retired the initially seeded leader, so
+# inspect the live Deployment Pods and choose a follower in both databases.
+# The remaining central workload (Deployment or StatefulSet) keeps a leader
+# available for the approved kick after the follower disappears.
 kill -STOP "${operator_pid}"
 automatic_replicaset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["replicaset"])' "${automatic_candidates_file}")
-automatic_leader_node=${control_plane_nodes[0]}
-automatic_target_pod=$(LEADER_NODE="${automatic_leader_node}" CANDIDATES_FILE="${automatic_candidates_file}" python3 - <<'PYTHON'
-import json
-import os
-
-for item in json.load(open(os.environ["CANDIDATES_FILE"])):
-    if item["node"] != os.environ["LEADER_NODE"]:
-        print(item["name"])
+automatic_roles_file="${test_dir}/automatic-roles.tsv"
+automatic_target_pod=""
+for _ in $(seq 1 30); do
+  : >"${automatic_roles_file}"
+  while read -r candidate; do
+    role_nb=$(kubectl exec -n kube-ovn-operator-system "${candidate}" -c ovn-central -- \
+      ovs-appctl -t /var/run/ovn/ovnnb_db.ctl cluster/status OVN_Northbound 2>/dev/null |
+      awk '$1 == "Role:" {print $2}' || true)
+    role_sb=$(kubectl exec -n kube-ovn-operator-system "${candidate}" -c ovn-central -- \
+      ovs-appctl -t /var/run/ovn/ovnsb_db.ctl cluster/status OVN_Southbound 2>/dev/null |
+      awk '$1 == "Role:" {print $2}' || true)
+    printf '%s\t%s\t%s\n' "${candidate}" "${role_nb}" "${role_sb}" >>"${automatic_roles_file}"
+  done < <(python3 -c 'import json,sys; print("\\n".join(item["name"] for item in json.load(open(sys.argv[1]))))' "${automatic_candidates_file}")
+  automatic_target_pod=$(python3 -c 'import sys
+for line in open(sys.argv[1]):
+    name, nb, sb = line.rstrip("\\n").split("\\t")
+    if nb == "follower" and sb == "follower":
+        print(name)
         break
-PYTHON
-)
+' "${automatic_roles_file}")
+  if [[ -n "${automatic_target_pod}" ]]; then
+    break
+  fi
+  sleep 1
+done
 if [[ -z "${automatic_target_pod}" ]]; then
   kill -CONT "${operator_pid}"
-  echo "could not identify a non-leader Deployment Pod on ${automatic_leader_node}" >&2
+  echo 'could not identify a Deployment follower in both NB and SB databases' >&2
+  cat "${automatic_roles_file}" >&2
   exit 1
 fi
 automatic_target_node=$(CANDIDATES_FILE="${automatic_candidates_file}" TARGET_POD="${automatic_target_pod}" python3 - <<'PYTHON'
@@ -548,19 +564,19 @@ for item in json.load(open(os.environ["CANDIDATES_FILE"])):
         break
 PYTHON
 )
-automatic_survivor_pod=$(LEADER_NODE="${automatic_leader_node}" CANDIDATES_FILE="${automatic_candidates_file}" TARGET_POD="${automatic_target_pod}" python3 - <<'PYTHON'
+automatic_survivor_pod=$(CANDIDATES_FILE="${automatic_candidates_file}" TARGET_POD="${automatic_target_pod}" python3 - <<'PYTHON'
 import json
 import os
 
 for item in json.load(open(os.environ["CANDIDATES_FILE"])):
-    if item["node"] == os.environ["LEADER_NODE"] and item["name"] != os.environ["TARGET_POD"]:
+    if item["name"] != os.environ["TARGET_POD"]:
         print(item["name"])
         break
 PYTHON
 )
 if [[ -z "${automatic_survivor_pod}" ]]; then
   kill -CONT "${operator_pid}"
-  echo "could not identify the seeded leader Deployment survivor on ${automatic_leader_node}" >&2
+  echo 'could not identify the retained Deployment survivor Pod' >&2
   exit 1
 fi
 kubectl annotate pod "${automatic_survivor_pod}" -n kube-ovn-operator-system \
