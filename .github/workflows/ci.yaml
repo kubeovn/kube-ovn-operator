@@ -20,6 +20,8 @@ jobs:
       - name: Verify generated and formatted files
         run: |
           test -z "$(gofmt -l .)"
+          python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("test/e2e/fence-takeover-restore.py").read_text())'
+          bash -n test/e2e/controller-handoff-smoke.sh
           make manifests
           make chart-lint
           helm template kube-ovn-operator charts/kube-ovn-operator --include-crds \

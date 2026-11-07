@@ -311,8 +311,10 @@ both databases converge. The lifecycle selector reuses the approval decision's
 replacement request without predicting a second random UUID. The Helm renderer
 and Chart can inject the
 digest-pinned mTLS `fence-agent` sidecar and the operator can use its remote
-fence client. Production deployment, credential provisioning and a multi-node
-takeover/restore acceptance are still required. The standard Kubernetes
+fence client. The disposable three-node Kind handoff test also verifies Lease
+takeover/expiry and native NB/SB restore replication through these agents; see
+[transport fencing](docs/transport-fencing.md). Production deployment, credential
+provisioning and complete lost-quorum recovery acceptance are still required. The standard Kubernetes
 `pods/exec` adapter deliberately does not claim this capability because
 cancelling an already accepted exec request cannot revoke the process command.
 For a same-size request with a UID-bound removal approval, the selector may

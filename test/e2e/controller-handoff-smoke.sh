@@ -964,3 +964,8 @@ curl --fail --silent --show-error --connect-timeout 5 --max-time 10 \
 echo "automatic replacement fence-agent mTLS endpoint verified"
 
 echo "automatic lifecycle handoff authorization consumed"
+
+# Isolate the agent acceptance from reconciliation and Lease renewal. This
+# process is resumed and terminated by cleanup, including on test failure.
+kill -STOP "${operator_pid}"
+python3 test/e2e/fence-takeover-restore.py "${fence_dir}"
