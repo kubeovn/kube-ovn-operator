@@ -966,7 +966,12 @@ echo "automatic replacement fence-agent mTLS endpoint verified"
 echo "automatic lifecycle handoff authorization consumed"
 
 # Exercise the public recovery API while the real controller is still running.
-python3 test/e2e/fence-takeover-restore.py "${fence_dir}" controller-recovery
+if ! python3 test/e2e/fence-takeover-restore.py "${fence_dir}" controller-recovery "${backup_dir}"; then
+  kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
+  kubectl get kubeovnrecoveryrequests -n kube-ovn-operator-system -o yaml || true
+  cat "${test_dir}/operator.log"
+  exit 1
+fi
 
 # Isolate the agent acceptance from reconciliation and Lease renewal. This
 # process is resumed and terminated by cleanup, including on test failure.

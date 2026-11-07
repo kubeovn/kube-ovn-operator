@@ -302,7 +302,7 @@ def create_recovery(name, backup_ref):
     return json.loads(kubectl("create", "-f", "-", "-o", "json", data=json.dumps(request).encode()))
 
 
-def run_controller_recovery(certificate_dir):
+def run_controller_recovery(certificate_dir, backup_dir):
     fixture = Fixture(certificate_dir)
     before = fixture.topology()
     original_state = controller_state(controllers(fixture))
@@ -310,7 +310,7 @@ def run_controller_recovery(certificate_dir):
         leader = next(p for p in fixture.endpoints if fixture.status(p, database, stem)[0]["Role"] == "leader")
         fixture.write_marker(leader, database, stem, table, "controller-snapshot")
     previous = resource("koi", INSTALLATION).get("status", {}).get("lastBackup", {}).get("id")
-    patch_installation({"upgrade": {"backup": {"schedule": "1m"}}})
+    patch_installation({"upgrade": {"backup": {"required": True, "destination": backup_dir.resolve().as_uri(), "schedule": "1m"}}})
 
     def captured():
         backup = resource("koi", INSTALLATION).get("status", {}).get("lastBackup", {})
@@ -390,9 +390,9 @@ def run_controller_recovery(certificate_dir):
 
 
 if __name__ == "__main__":
-    check(len(sys.argv) in (2, 3), "usage: fence-takeover-restore.py CERTIFICATE_DIRECTORY [controller-recovery]")
-    if len(sys.argv) == 3:
+    check(len(sys.argv) in (2, 4), "usage: fence-takeover-restore.py CERTIFICATE_DIRECTORY [controller-recovery BACKUP_DIRECTORY]")
+    if len(sys.argv) == 4:
         check(sys.argv[2] == "controller-recovery", "unknown acceptance mode")
-        run_controller_recovery(Path(sys.argv[1]))
+        run_controller_recovery(Path(sys.argv[1]), Path(sys.argv[3]))
     else:
         run(Path(sys.argv[1]))
