@@ -28,7 +28,7 @@ func (r *membershipRunner) clientAddress(ctx context.Context, pod string, index 
 	for remote := range strings.FieldsSeq(string(data)) {
 		if strings.HasPrefix(remote, "db:") {
 			if remote != "db:"+database+","+global+",connections" {
-				return "", errors.New("unsupported database-backed client remote")
+				return "", fmt.Errorf("unsupported database-backed client remote %q, expected %q", remote, "db:"+database+","+global+",connections")
 			}
 			command := []string{"ovsdb-client", "--timeout=5", "query", strings.Replace(topologySocket(index), ".ctl", ".sock", 1), fmt.Sprintf(`[%q,{"op":"select","table":%q,"where":[],"columns":["connections"]},{"op":"select","table":"Connection","where":[],"columns":["_uuid","target"]}]`, database, global)}
 			command[3] = "unix:" + command[3]
