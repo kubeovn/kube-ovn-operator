@@ -175,6 +175,12 @@ func (e *KubernetesRollbackExecutor) Step(ctx context.Context, plan RollbackPlan
 		}
 		return operatorv1alpha1.RollbackPhaseRestoring, nil
 	case operatorv1alpha1.RollbackPhaseRestoring:
+		// Quiescing and restoring run in separate reconciles and may straddle
+		// a restart. Admission evidence must still be valid before restoring
+		// the pair, even when the previous phase reserved an approval.
+		if err := e.admitRestore(ctx, installation, plan); err != nil {
+			return phase, err
+		}
 		if err := e.Lifecycle.RestoreBackupPair(ctx, installation, retained, binding, backup); err != nil {
 			return phase, fmt.Errorf("restore rollback database pair: %w", err)
 		}
