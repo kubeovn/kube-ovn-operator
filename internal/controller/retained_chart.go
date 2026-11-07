@@ -12,6 +12,7 @@ import (
 
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // retainChartConnections replaces bootstrap-only NODE_IPS with the admitted
@@ -78,28 +79,19 @@ func retainChartConnections(object *unstructured.Unstructured, retained health.C
 	if len(nodes) == 0 {
 		return errors.New("retained central Chart nodes are missing")
 	}
-	values := make([]any, len(nodes))
-	for i, node := range nodes {
-		values[i] = node
-	}
 	path := []string{"spec", "template", "spec", "affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms"}
 	terms, found, err := unstructured.NestedSlice(object.Object, path...)
 	if err != nil {
 		return err
 	}
 	if !found {
-		terms = []any{map[string]any{}}
+		for _, node := range nodes {
+			terms = append(terms, map[string]any{"matchFields": []any{map[string]any{"key": "metadata.name", "operator": "In", "values": []any{node}}}})
+		}
 	}
-	for _, value := range terms {
-		term, ok := value.(map[string]any)
-		if !ok {
-			return errors.New("central node affinity term is invalid")
-		}
-		fields, _ := term["matchFields"].([]any)
-		constraint := map[string]any{"key": "metadata.name", "operator": "In", "values": values}
-		if !slices.ContainsFunc(fields, func(field any) bool { return reflect.DeepEqual(field, constraint) }) {
-			term["matchFields"] = append(fields, constraint)
-		}
+	terms, err = retainedChartNodeTerms(terms, nodes)
+	if err != nil {
+		return err
 	}
 	if err := unstructured.SetNestedSlice(object.Object, terms, path...); err != nil {
 		return err
@@ -139,4 +131,62 @@ func retainedChartAddresses(retained health.CentralTopology) ([]string, error) {
 		return nil, errors.New("chart central peers require distinct retained node addresses")
 	}
 	return addresses, nil
+}
+
+// Field selectors support only one value. Preserve each original AND term,
+// intersect its field restrictions with the retained nodes, and emit one OR
+// term for each remaining node. Reapplying the transformation is idempotent.
+func retainedChartNodeTerms(terms []any, nodes []string) ([]any, error) {
+	var result []any
+	for _, value := range terms {
+		term, ok := value.(map[string]any)
+		if !ok {
+			return nil, errors.New("central node affinity term is invalid")
+		}
+		expressions, _ := term["matchExpressions"].([]any)
+		originalFields, _ := term["matchFields"].([]any)
+		if len(expressions) == 0 && len(originalFields) == 0 {
+			continue
+		}
+		for _, node := range nodes {
+			copy := runtime.DeepCopyJSON(term)
+			fields, _ := copy["matchFields"].([]any)
+			matches := true
+			for _, value := range fields {
+				field, ok := value.(map[string]any)
+				if !ok {
+					return nil, errors.New("central node field selector is invalid")
+				}
+				if field["key"] != "metadata.name" {
+					continue
+				}
+				values, ok := field["values"].([]any)
+				if !ok || len(values) != 1 {
+					return nil, errors.New("central node field selector requires exactly one value")
+				}
+				switch field["operator"] {
+				case "In":
+					matches = matches && values[0] == node
+				case "NotIn":
+					matches = matches && values[0] != node
+				default:
+					return nil, errors.New("central node field selector requires In or NotIn")
+				}
+			}
+			if !matches {
+				continue
+			}
+			constraint := map[string]any{"key": "metadata.name", "operator": "In", "values": []any{node}}
+			if !slices.ContainsFunc(fields, func(field any) bool { return reflect.DeepEqual(field, constraint) }) {
+				copy["matchFields"] = append(fields, constraint)
+			}
+			if !slices.ContainsFunc(result, func(term any) bool { return reflect.DeepEqual(term, copy) }) {
+				result = append(result, copy)
+			}
+		}
+	}
+	if len(result) == 0 {
+		return nil, errors.New("retained central storage nodes conflict with existing node affinity")
+	}
+	return result, nil
 }
