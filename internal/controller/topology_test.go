@@ -3,6 +3,10 @@ package controller
 import (
 	"context"
 	"errors"
+	"net"
+	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,5 +174,56 @@ func TestReconcileCordonedCentralNodeFailsClosedBeforeWorkloadApply(t *testing.T
 	}
 	if got.Status.Phase != api.PhaseDegraded || meta.IsStatusConditionTrue(got.Status.Conditions, "Ready") {
 		t.Fatalf("cordoned node was reported ready: %+v", got.Status)
+	}
+}
+
+func TestRetainedChartUsesCurrentPeersAndStorageNodes(t *testing.T) {
+	for _, hosts := range [][]string{{"192.0.2.1", "192.0.2.4", "192.0.2.5"}, {"2001:db8::1", "2001:db8::4", "2001:db8::5"}} {
+		t.Run(hosts[0], func(t *testing.T) {
+			retained := additionTopologyFixture()
+			for i := range retained.Members {
+				retained.Members[i].Workload.Name = "ovn-central"
+				if i > 0 {
+					retained.Members[i].Workload.Kind = "StatefulSet"
+				}
+				for j := range retained.Members[i].Databases {
+					retained.Members[i].Databases[j].ClientAddress = "tcp:" + net.JoinHostPort(hosts[i], strconv.Itoa(6641+j))
+				}
+			}
+			deployment := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "ovn-central"},
+				"spec": map[string]any{"replicas": int64(3), "template": map[string]any{"spec": map[string]any{
+					"containers": []any{map[string]any{"name": "ovn-central", "env": []any{map[string]any{"name": "NODE_IPS", "value": "retired-bootstrap-peers"}}}},
+					"affinity": map[string]any{"nodeAffinity": map[string]any{"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{
+						"nodeSelectorTerms": []any{map[string]any{"matchExpressions": []any{map[string]any{"key": "zone", "operator": "In", "values": []any{"original-zone"}}}}},
+					}}},
+				}}},
+			}}
+			if err := applyRetainedChartDeploymentReplicas([]*unstructured.Unstructured{deployment}, retained); err != nil {
+				t.Fatal(err)
+			}
+			containers, _, _ := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "containers")
+			env := containers[0].(map[string]any)["env"].([]any)[0].(map[string]any)
+			if env["value"] != strings.Join(hosts, ",") {
+				t.Fatalf("northd retained bootstrap peers: %v", env)
+			}
+			terms, _, _ := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms")
+			term := terms[0].(map[string]any)
+			fields, ok := term["matchFields"].([]any)
+			if !ok || len(fields) != 1 || fields[0].(map[string]any)["values"].([]any)[0] != "node-0" || len(term["matchExpressions"].([]any)) != 1 {
+				t.Fatalf("retained storage placement or existing affinity lost: %v", term)
+			}
+			stable := deployment.DeepCopy()
+			if err := applyRetainedChartDeploymentReplicas([]*unstructured.Unstructured{deployment}, retained); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(stable.Object, deployment.Object) {
+				t.Fatal("retained Chart transformation is not idempotent")
+			}
+			strategy, _, _ := unstructured.NestedMap(deployment.Object, "spec", "strategy")
+			if strategy["type"] != "RollingUpdate" || strategy["rollingUpdate"].(map[string]any)["maxSurge"] != int64(0) || strategy["rollingUpdate"].(map[string]any)["maxUnavailable"] != int64(1) {
+				t.Fatalf("central rollout is not serial: %v", strategy)
+			}
+		})
 	}
 }

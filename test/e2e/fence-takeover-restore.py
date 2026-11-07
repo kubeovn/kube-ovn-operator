@@ -352,9 +352,15 @@ def recovery_statuses(request, timeout=240):
             process.stdout.close()
 
 
+def native_membership(topology):
+    # Rollout may replace a Pod while the native database, Node, workload and
+    # storage identities remain pinned by the controller's topology verifier.
+    return {(database, value[1]): value for (_, database), value in topology.items()}
+
+
 def run_controller_recovery(certificate_dir, backup_dir):
     fixture = Fixture(certificate_dir)
-    before = fixture.topology()
+    before = native_membership(fixture.topology())
     original_state = controller_state(controllers(fixture))
     for database, stem, table in DATABASES:
         leader = next(p for p in fixture.endpoints if fixture.status(p, database, stem)[0]["Role"] == "leader")
@@ -391,49 +397,56 @@ def run_controller_recovery(certificate_dir, backup_dir):
     for database, stem, table in DATABASES:
         fixture.wait_marker(database, stem, table, "controller-changed")
 
-    request = create_recovery("controller-native-restore", backup["id"])
-    seen = set()
-    plan = None
-    with contextlib.closing(recovery_statuses(request)) as statuses:
-        for status in statuses:
-            check(status.get("phase") not in ("Failed", "Expired"), f"controller recovery failed: {status}")
-            if status.get("plan"):
-                if plan is None:
-                    plan = status["plan"]
-                    check(plan["installationUID"] == fixture.installation_uid
-                          and plan["installationGeneration"] == installation["metadata"]["generation"]
-                          and plan["backupRef"] == backup["id"]
-                          and plan["databaseRefs"] == backup["databaseRefs"]
-                          and plan["topologyDigest"] == backup["topologyDigest"], "recovery plan lost its admitted bindings")
-                check(status["plan"] == plan, "immutable recovery plan changed during execution")
-            phase = status.get("execution", {}).get("phase")
-            if phase and phase not in seen:
-                seen.add(phase)
-                print(f"Controller recovery phase: {phase}", flush=True)
-            if phase == "Restoring":
-                for item in controllers(fixture):
-                    annotations = item["metadata"].get("annotations", {})
-                    check(annotations.get("operator.kubeovn.io/rollback-quiesced") == plan["digest"],
-                          "restore began without the operation-bound rollout quiesce marker")
-                    check("operator.kubeovn.io/rollback-state" in annotations, "original rollout state was not persisted")
-                    if item["kind"] == "Deployment":
-                        check(item["spec"].get("paused"), "restore began before Deployment pause")
-                    else:
-                        check(item["spec"]["updateStrategy"]["type"] == "OnDelete", "restore began before StatefulSet freeze")
-            if status.get("phase") == "Succeeded":
-                break
-    check({"Restoring", "Workloads", "Verifying", "Succeeded"} <= seen,
-          f"recovery skipped durable execution phases: {seen}")
-    check(status.get("completedAt") and status["execution"].get("startedAt")
-          and status["execution"].get("completedAt"), "recovery completion lacks audit timestamps")
-    check(controller_state(controllers(fixture)) == original_state, "recovery did not restore original rollout state")
-    for item in controllers(fixture):
-        check(not any(key.startswith("operator.kubeovn.io/rollback-") for key in item["metadata"].get("annotations", {})),
-              "completed recovery left durable quiesce markers")
-    for database, stem, table in DATABASES:
-        fixture.wait_marker(database, stem, table, "controller-snapshot")
-    check(fixture.topology() == before, "controller recovery changed native cluster/server identities")
-    print("Controller RecoveryRequest succeeded: rejected foreign backup; restored NB/SB snapshot on all three nodes; rollout state and membership preserved", flush=True)
+    for attempt in range(2):
+        if attempt:
+            for database, stem, table in DATABASES:
+                leader = next(p for p in fixture.endpoints if fixture.status(p, database, stem)[0]["Role"] == "leader")
+                fixture.write_marker(leader, database, stem, table, "controller-changed")
+        name = "controller-native-restore" + ("-repeat" if attempt else "")
+        request = create_recovery(name, backup["id"])
+        seen = set()
+        plan = None
+        with contextlib.closing(recovery_statuses(request)) as statuses:
+            for status in statuses:
+                check(status.get("phase") not in ("Failed", "Expired"), f"controller recovery failed: {status}")
+                if status.get("plan"):
+                    if plan is None:
+                        plan = status["plan"]
+                        check(plan["installationUID"] == fixture.installation_uid
+                              and plan["installationGeneration"] == installation["metadata"]["generation"]
+                              and plan["backupRef"] == backup["id"]
+                              and plan["databaseRefs"] == backup["databaseRefs"]
+                              and plan["topologyDigest"] == backup["topologyDigest"], "recovery plan lost its admitted bindings")
+                    check(status["plan"] == plan, "immutable recovery plan changed during execution")
+                phase = status.get("execution", {}).get("phase")
+                if phase and phase not in seen:
+                    seen.add(phase)
+                    print(f"Controller recovery phase: {phase}", flush=True)
+                if phase == "Restoring":
+                    for item in controllers(fixture):
+                        annotations = item["metadata"].get("annotations", {})
+                        check(annotations.get("operator.kubeovn.io/rollback-quiesced") == plan["digest"],
+                              "restore began without the operation-bound rollout quiesce marker")
+                        check("operator.kubeovn.io/rollback-state" in annotations, "original rollout state was not persisted")
+                        if item["kind"] == "Deployment":
+                            check(item["spec"].get("paused"), "restore began before Deployment pause")
+                        else:
+                            check(item["spec"]["updateStrategy"]["type"] == "OnDelete", "restore began before StatefulSet freeze")
+                if status.get("phase") == "Succeeded":
+                    break
+        check({"Restoring", "Workloads", "Verifying", "Succeeded"} <= seen,
+              f"recovery skipped durable execution phases: {seen}")
+        check(status.get("completedAt") and status["execution"].get("startedAt")
+              and status["execution"].get("completedAt"), "recovery completion lacks audit timestamps")
+        fixture = Fixture(certificate_dir)
+        check(controller_state(controllers(fixture)) == original_state, "recovery did not restore original rollout state")
+        for item in controllers(fixture):
+            check(not any(key.startswith("operator.kubeovn.io/rollback-") for key in item["metadata"].get("annotations", {})),
+                  "completed recovery left durable quiesce markers")
+        for database, stem, table in DATABASES:
+            fixture.wait_marker(database, stem, table, "controller-snapshot")
+        check(native_membership(fixture.topology()) == before, "controller recovery changed native cluster/server identities")
+        print("Controller RecoveryRequest succeeded: rejected foreign backup; restored NB/SB snapshot on all three nodes; rollout state and membership preserved", flush=True)
 
 
 if __name__ == "__main__":

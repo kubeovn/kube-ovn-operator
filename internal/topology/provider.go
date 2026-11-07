@@ -363,3 +363,39 @@ func readRecord(object *corev1.ConfigMap, installation *api.KubeOVNInstallation)
 func labels(installation *api.KubeOVNInstallation) map[string]string {
 	return map[string]string{apply.ManagedByLabel: apply.ManagedByValue, apply.InstallationLabel: installation.Name, apply.InstallationNamespaceLabel: installation.Namespace, apply.InstallationUIDLabel: string(installation.UID)}
 }
+
+// Current rebinds process endpoints to a fresh complete observation of the
+// retained native, node, workload and storage identities. The immutable
+// baseline and its digest remain unchanged, preserving admitted backup plans.
+func (p *Kubernetes) Current(ctx context.Context, installation *api.KubeOVNInstallation) (health.CentralTopology, error) {
+	retained, err := p.Retained(ctx, installation)
+	if err != nil {
+		return health.CentralTopology{}, err
+	}
+	if p.Runner == nil {
+		return health.CentralTopology{}, errors.New("current topology requires a native observer")
+	}
+	current, err := health.DiscoverCentralTopologyWithExpectedReplicas(ctx, p.Client, p.Runner, installation, len(retained.Members))
+	if err != nil {
+		return health.CentralTopology{}, err
+	}
+	if !retained.SameIdentity(current) {
+		return health.CentralTopology{}, errors.New("current topology changed a retained native, node, workload or storage identity")
+	}
+	if _, err := p.Retained(ctx, installation); err != nil {
+		return health.CentralTopology{}, err
+	}
+	return current, nil
+}
+
+// CurrentInventory uses live process rebinding when the provider supports it.
+// Retained-only adapters remain available for lifecycle tests and callers that
+// do not expose a native observation capability.
+func CurrentInventory(ctx context.Context, provider InventoryProvider, installation *api.KubeOVNInstallation) (health.CentralTopology, error) {
+	if current, ok := provider.(interface {
+		Current(context.Context, *api.KubeOVNInstallation) (health.CentralTopology, error)
+	}); ok {
+		return current.Current(ctx, installation)
+	}
+	return provider.Retained(ctx, installation)
+}

@@ -98,11 +98,18 @@ var topologyDatabases = [2]string{"OVN_Northbound", "OVN_Southbound"}
 // and container restarts require fresh discovery of the same native identities,
 // node, workload and storage; they do not establish a new topology baseline.
 func (t CentralTopology) SameIdentity(other CentralTopology) bool {
-	return slices.EqualFunc(t.Members, other.Members, func(a, b CentralIdentity) bool {
-		a.Pod, b.Pod = ObjectIdentity{}, ObjectIdentity{}
-		a.ContainerID, b.ContainerID = "", ""
-		return reflect.DeepEqual(a, b)
-	})
+	stable := func(members []CentralIdentity) []CentralIdentity {
+		result := slices.Clone(members)
+		for i := range result {
+			result[i].Pod = ObjectIdentity{}
+			result[i].ContainerID = ""
+		}
+		slices.SortFunc(result, func(a, b CentralIdentity) int {
+			return cmp.Or(cmp.Compare(a.Workload.UID, b.Workload.UID), cmp.Compare(a.Node.UID, b.Node.UID), cmp.Compare(a.Databases[0].ServerID, b.Databases[0].ServerID))
+		})
+		return result
+	}
+	return reflect.DeepEqual(stable(t.Members), stable(other.Members))
 }
 
 // SameIdentityExceptEndpoints verifies that one exact retained member keeps

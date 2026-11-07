@@ -1563,6 +1563,9 @@ func applyRetainedChartDeploymentReplicas(objects []*unstructured.Unstructured, 
 		if err := unstructured.SetNestedField(object.Object, replicas, "spec", "replicas"); err != nil {
 			return fmt.Errorf("set retained Chart Deployment %q replicas: %w", object.GetName(), err)
 		}
+		if err := retainChartConnections(object, retained); err != nil {
+			return fmt.Errorf("retain Chart central connections: %w", err)
+		}
 		matched[object.GetName()] = struct{}{}
 	}
 	if len(matched) != len(deploymentReplicas) {
@@ -1758,7 +1761,7 @@ func (r *KubeOVNInstallationReconciler) ensureScheduledBackup(ctx context.Contex
 	var captured *operatorv1alpha1.BackupStatus
 	err = r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
-			retained, err := provider.Retained(centralCtx, installation)
+			retained, err := topology.CurrentInventory(centralCtx, provider, installation)
 			if err != nil {
 				return fmt.Errorf("read retained topology for scheduled backup: %w", err)
 			}
@@ -1818,7 +1821,7 @@ func (r *KubeOVNInstallationReconciler) ensureUpgradeBackup(ctx context.Context,
 	ready := false
 	err := r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
-			retained, err := provider.Retained(centralCtx, installation)
+			retained, err := topology.CurrentInventory(centralCtx, provider, installation)
 			if err != nil {
 				return fmt.Errorf("verify retained topology before upgrade backup: %w", err)
 			}

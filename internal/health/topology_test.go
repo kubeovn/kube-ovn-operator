@@ -212,3 +212,22 @@ func TestClientConnectionsIgnoreUnreferencedRowsAndRejectMissingReferences(t *te
 		t.Fatal("missing connection target accepted")
 	}
 }
+
+func TestSameTopologyIdentitySurvivesPodRenameOrdering(t *testing.T) {
+	first := CentralIdentity{Node: ObjectIdentity{Name: "node-a", UID: "node-a"}, Workload: WorkloadIdentity{ObjectIdentity: ObjectIdentity{Name: "central", UID: "deployment"}, Kind: "Deployment"}, Pod: ObjectIdentity{Name: "central-old-a", UID: "old-a"}, ContainerID: "old-a"}
+	second := first
+	second.Node = ObjectIdentity{Name: "node-b", UID: "node-b"}
+	second.Pod = ObjectIdentity{Name: "central-old-b", UID: "old-b"}
+	second.ContainerID = "old-b"
+	before := CentralTopology{Members: []CentralIdentity{first, second}}
+	first.Pod = ObjectIdentity{Name: "central-new-z", UID: "new-a"}
+	first.ContainerID = "new-a"
+	after := CentralTopology{Members: []CentralIdentity{second, first}}
+	if !before.SameIdentity(after) {
+		t.Fatal("Pod rename/order changed retained native identities")
+	}
+	after.Members[1].Node.UID = "replacement-node"
+	if before.SameIdentity(after) {
+		t.Fatal("node replacement was accepted as a process restart")
+	}
+}

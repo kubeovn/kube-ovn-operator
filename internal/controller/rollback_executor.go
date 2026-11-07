@@ -120,7 +120,13 @@ func (e *KubernetesRollbackExecutor) Step(ctx context.Context, plan RollbackPlan
 		return phase, errors.New("rollback target Chart digest changed")
 	}
 	retained, err := e.Topology.Retained(ctx, installation)
+	if err == nil && (phase == operatorv1alpha1.RollbackPhaseQuiescing || phase == operatorv1alpha1.RollbackPhaseRestoring || phase == operatorv1alpha1.RollbackPhaseWorkloads) {
+		retained, err = topology.CurrentInventory(ctx, e.Topology, installation)
+	}
 	if err != nil {
+		if phase == operatorv1alpha1.RollbackPhaseWorkloads {
+			return phase, fmt.Errorf("%w: verify retained identities before workload rollout: %v", ErrRollbackInProgress, err)
+		}
 		return phase, fmt.Errorf("read retained topology before rollback: %w", err)
 	}
 	if err := retained.Validate(); err != nil {
@@ -214,6 +220,9 @@ func (e *KubernetesRollbackExecutor) Step(ctx context.Context, plan RollbackPlan
 			if runtimeReport.DataPlane.Status != metav1.ConditionTrue {
 				return phase, fmt.Errorf("%w: data plane %s: %s", ErrRollbackInProgress, runtimeReport.DataPlane.Reason, runtimeReport.DataPlane.Message)
 			}
+		}
+		if _, err := topology.CurrentInventory(ctx, e.Topology, installation); err != nil {
+			return phase, fmt.Errorf("verify retained identities after rollback rollout: %w", err)
 		}
 		if plan.ApprovalRef != nil {
 			approver, err := e.approval(installation)
