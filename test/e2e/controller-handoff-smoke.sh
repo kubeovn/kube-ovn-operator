@@ -652,6 +652,9 @@ for database_socket in ovnnb_db ovnsb_db; do
     ovs-appctl -t "/var/run/ovn/${database_socket}.ctl" cluster/status "${database_name}" \
     >"${test_dir}/automatic-target-${database_name}.txt"
 done
+# Prevent the ReplicaSet from reopening this same hostPath between deletion
+# and approval creation. The healthy retained survivor remains available.
+kubectl cordon "${automatic_target_node}" >/dev/null
 kubectl annotate pod "${automatic_survivor_pod}" -n kube-ovn-operator-system \
   controller.kubernetes.io/pod-deletion-cost=2147483647 --overwrite >/dev/null
 kubectl annotate pod "${automatic_target_pod}" -n kube-ovn-operator-system \
@@ -795,7 +798,6 @@ cat >"${test_dir}/automatic-replacement.json" <<JSON
 {"spec":{"central":{"memberRequests":[{"name":"automatic-replacement","nodeName":"${automatic_worker}","claimName":"${automatic_claim_name}","volumeName":"${automatic_volume_name}","image":"${member_image}","northboundAddress":"tcp:${automatic_worker_ip}:6643","southboundAddress":"tcp:${automatic_worker_ip}:6644","northboundClientAddress":"tcp:${automatic_worker_ip}:6641","southboundClientAddress":"tcp:${automatic_worker_ip}:6642","removalApprovalRef":{"name":"${automatic_approval_name}","uid":"${automatic_approval_uid}"}}]}}}
 JSON
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/automatic-replacement.json" >/dev/null
-kubectl cordon "${automatic_target_node}" >/dev/null
 
 # The retained storage-node constraint leaves the ReplicaSet substitute
 # unscheduled after the target node is cordoned. Wait for that exact unstarted
