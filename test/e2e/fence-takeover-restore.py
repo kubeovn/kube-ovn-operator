@@ -42,10 +42,16 @@ def eventually(description, predicate, timeout=40):
         time.sleep(0.5)
 
 
+def api_command(*arguments):
+    command = ["kubectl", "--context", CONTEXT]
+    if server := os.environ.get("KUBE_OVN_ACCEPTANCE_API_SERVER"):
+        command.append("--server=" + server)
+    return [*command, *arguments]
+
+
 def kubectl(*arguments, data=None):
     result = subprocess.run(
-        ["kubectl", "--context", CONTEXT, "--namespace", NAMESPACE,
-         "--request-timeout=15s", *arguments],
+        api_command("--namespace", NAMESPACE, "--request-timeout=15s", *arguments),
         input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25,
         check=True,
     )
@@ -298,6 +304,13 @@ def controller_state(objects):
 
 
 def create_recovery(name, backup_ref):
+    # Wait for the CRD watch cache before creating a request. A create can
+    # precede lazy cache initialization, making its resourceVersion too old
+    # for a subsequent watch even when only a few seconds have elapsed.
+    path = f"/apis/operator.kubeovn.io/v1alpha1/namespaces/{NAMESPACE}/kubeovnrecoveryrequests"
+    cached = json.loads(kubectl("get", "--raw", path + "?resourceVersion=0"))
+    check(cached.get("metadata", {}).get("resourceVersion"), "recovery cache list lacks a resourceVersion")
+    print(f"Recovery watch cache ready at {cached['metadata']['resourceVersion']} before creating {name}", flush=True)
     request = {"apiVersion": "operator.kubeovn.io/v1alpha1", "kind": "KubeOVNRecoveryRequest",
                "metadata": {"name": name, "namespace": NAMESPACE},
                "spec": {"installationRef": INSTALLATION, "reason": "Disposable Kind native restore acceptance",
@@ -315,8 +328,8 @@ def recovery_statuses(request, timeout=240):
                                     "timeoutSeconds": timeout})
     path = f"/apis/operator.kubeovn.io/v1alpha1/namespaces/{NAMESPACE}/kubeovnrecoveryrequests?{query}"
     with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(["kubectl", "--context", CONTEXT, f"--request-timeout={timeout + 5}s",
-                                    "get", "--raw", path], stdout=subprocess.PIPE, stderr=errors)
+        process = subprocess.Popen(api_command(f"--request-timeout={timeout + 5}s",
+                                               "get", "--raw", path), stdout=subprocess.PIPE, stderr=errors)
         try:
             pending = b""
             last_status = {}

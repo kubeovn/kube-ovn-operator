@@ -8,7 +8,8 @@ OVN quorum evidence is unavailable.
 
 ## What an approval binds
 
-The `spec` is immutable after creation. It must bind all of the following to the
+The decision fields in `spec` are immutable after creation; only `revoked` can
+change. The decision must bind all of the following to the
 installation that will be changed:
 
 - `installationRef.name` and `installationRef.uid`;
@@ -48,10 +49,22 @@ recovery plan. Before any database write, the operator:
 4. writes `status.phase=Completed` only after both databases and the target
    workloads converge.
 
+The API enforces separate reservation and completion writes: completion cannot
+skip reservation, and an existing reservation cannot be cleared. Its decision
+digest and reservation timestamp are immutable. Only `Completed` may carry a
+completion timestamp, which cannot precede reservation; the reservation must
+precede expiry. Completed audit evidence cannot be rewritten or reset.
+
 The reservation is retryable for the same immutable decision. A completed
 approval is one-time use and cannot authorize another operation. A lost Lease,
 changed identity, changed topology, changed backup or changed Chart digest
 stops the operation and leaves the approval unusable for that different target.
+
+Revocation leaves the reserved decision digest unchanged. It prevents further
+admission, including after a restart, but permits recording completion after
+an already admitted operation has converged. Completion validates the full
+reservation identity and timestamp even when retried after restart or expiry.
+It never grants permission to perform another database write.
 
 `rejoin` does not accept a destructive recovery approval. `reconvert`,
 `freshBootstrap`, and version rollback may use one when quorum cannot be
@@ -95,7 +108,12 @@ and acceptance in the target failure environment are still required. Until a liv
 fence endpoint passes readiness, the operator remains fail-closed even when an
 approval exists.
 
-The provider and binding rules are covered by unit tests. A real lost-quorum
+The provider and binding rules are covered by unit tests. Disposable Kind API
+acceptance covers immutable decisions, one-way revocation, reservation and
+completion audit, provider restart, stale resource-version conflicts, and
+one-time consumption in `rollback`, `reconvert`, and `freshBootstrap` modes.
+That API/provider fixture uses synthetic backup/topology digests and real
+request UIDs; it does not restore databases. A real lost-quorum
 restore still requires the configured fenced executor and a multi-node
 acceptance test of the complete controller recovery/approval workflow; the
 healthy-quorum agent transport test does not establish that capability.
@@ -123,6 +141,16 @@ verified spec, manifest and version become the recovery apply checkpoint;
 unrelated later inputs still require their own lifecycle authorization. The
 API request and controller status are used directly; no backup, plan or
 execution status is fabricated by the test.
+
+Smoke fixtures wait for their operator process to exit before handing the
+cluster to subsequent Lease/approval checks.
+
+Acceptance pins create/list/watch to one existing API server in the HA Kind
+fixture and primes its CRD watch cache with a cached list before creating a
+recovery request, then watches from that create response's resource version.
+The existing kubeconfig still supplies the CA and client authentication.
+A watch error, including expired history, remains a failure; the fixture never
+substitutes a later status for missing durable phase evidence.
 
 The request includes a fractional-second expiration. The persisted plan's
 timestamp uses the API status field's second precision, while its immutable

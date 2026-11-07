@@ -48,7 +48,7 @@ jobs:
         run: go test ./internal/workload -run TestLiveFencedMemberAdmission -count=1 -v
       - name: Verify live operation Lease coordination
         run: go run ./test/e2e/lease-smoke
-      - name: Verify member removal approval admission and audit
+      - name: Verify member and recovery approval API audit
         run: go run ./test/e2e/approval-smoke
       - name: Verify pod-network probe traffic and backend identity
         run: |
@@ -63,6 +63,9 @@ jobs:
           kubectl get events -n kube-ovn-operator-system --sort-by=.metadata.creationTimestamp
           kubectl logs -n kube-ovn-operator-system member-seed-0 --all-containers --tail=100 || true
           kubectl logs -n kube-ovn-operator-system -l app=ovn-central --all-containers --tail=100 || true
+      - name: Recycle disposable smoke Kind cluster
+        if: always()
+        run: kind delete cluster --name kube-ovn-operator-e2e
 
   controller-deployment-handoff:
     runs-on: ubuntu-24.04
