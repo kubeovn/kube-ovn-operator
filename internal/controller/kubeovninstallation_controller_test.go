@@ -1465,6 +1465,44 @@ func TestBeginAutomaticLifecycleDoesNotRepeatConsumedSpec(t *testing.T) {
 	}
 }
 
+func TestBeginAutomaticLifecycleSelectsNextMemberAfterConsumedHandoff(t *testing.T) {
+	image := "example/central@sha256:" + strings.Repeat("a", 64)
+	installation := &operatorv1alpha1.KubeOVNInstallation{
+		ObjectMeta: metav1.ObjectMeta{Name: "sequential", Namespace: "default", UID: types.UID("sequential-uid"), Generation: 2},
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{
+				{Name: "first", NodeName: "node-first", ClaimName: "claim-first", VolumeName: "volume-first", Image: image, NorthboundAddress: "tcp:192.0.2.10:6643", SouthboundAddress: "tcp:192.0.2.10:6644", NorthboundClientAddress: "tcp:192.0.2.10:6641", SouthboundClientAddress: "tcp:192.0.2.10:6642"},
+				{Name: "second", NodeName: "node-second", ClaimName: "claim-second", VolumeName: "volume-second", Image: image, NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644", NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642"},
+			}},
+		},
+		Status: operatorv1alpha1.KubeOVNInstallationStatus{Topology: operatorv1alpha1.TopologyStatus{Operation: &operatorv1alpha1.CentralOperationReference{HandoffApplied: true}}},
+	}
+	fullHash, _, err := installationSpecHashes(installation.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fullHash}
+	ref := &operatorv1alpha1.CentralTopologyReference{Name: "inventory", UID: types.UID("inventory-uid"), Digest: "sha256:" + strings.Repeat("b", 64)}
+	installation.Status.Topology.Inventory = ref
+	retained := additionTopologyFixture()
+	retained.Members[0].Workload.Name = workload.RecordName(string(installation.UID), "first")
+	objects := []client.Object{
+		installation,
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-second", UID: types.UID("node-second-uid")}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}, Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "192.0.2.99"}}}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim-second", Namespace: "default", UID: types.UID("claim-second-uid")}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "volume-second"}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
+		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "volume-second", UID: types.UID("volume-second-uid")}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Name: "claim-second", Namespace: "default", UID: types.UID("claim-second-uid")}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}},
+	}
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation).WithObjects(objects...).Build()
+	lifecycleFake := &lifecycleCoordinatorFake{reader: kube, reference: lifecycle.Reference{Journal: workload.Reference{Name: "journal", UID: types.UID("journal-uid")}, Request: workload.Reference{Name: "request", UID: types.UID("request-uid")}}}
+	topologyFake := &lifecycleTopologyFake{ref: ref, retained: retained}
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: controllerScheme(t), Leases: lease.New(kube), Topology: topologyFake, Lifecycle: lifecycleFake}
+	started, err := reconciler.beginAutomaticLifecycle(t.Context(), installation, planner.Plan{}, time.Now)
+	if err != nil || !started || lifecycleFake.begin != 1 || lifecycleFake.request.Add == nil || lifecycleFake.request.Add.Workload.Preparation.MemberName != "second" {
+		t.Fatalf("next explicit member was not selected after the first handoff: started=%v begin=%d request=%+v err=%v", started, lifecycleFake.begin, lifecycleFake.request, err)
+	}
+}
+
 func TestReplicaOnlySpecChangeAllowsASecondTransitionAfterTheFirstHandoff(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}}
 	data, err := stdjson.Marshal(installation.Spec, stdjson.Deterministic(true))

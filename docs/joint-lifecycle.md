@@ -115,7 +115,10 @@ topology; the initial Chart install must establish that baseline first. The
 provisioner creates the native preparation result during the durable `Preparing` phase; callers do not inject generated server IDs.
 Runtime image publication/selection, automatic storage and node placement/changes,
 broader automatic Chart workload migration and post-transition network checks
-remain part of controller integration. The selected one-step reduction path
+remain part of controller integration. Multiple explicit addition slots are
+admitted sequentially; the next slot is considered only after the previous
+operation's completion receipt, successor topology and apply handoff are
+observed. The selected one-step reduction path
 authorizes and records its next apply checkpoint after the immutable completion
 receipt and successor topology are pinned.
 

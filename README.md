@@ -422,9 +422,11 @@ target Pod to disappear and retains storage.
 
 Reconstructed executors recover partial NB/SB transitions, lost responses and
 the original completion receipt. A changed identity, missing retained member,
-lost quorum or stale backup blocks progress. Automatic node selection and
-generation transitions, production fencing deployment and broader Deployment
-migration remain open. See [joint lifecycle contract](docs/joint-lifecycle.md).
+lost quorum or stale backup blocks progress. Multiple explicit member additions
+are converged as sequential one-member transitions, with each completion and
+apply handoff observed before the next slot is admitted. Automatic node
+selection, production fencing deployment and broader Deployment migration
+remain open. See [joint lifecycle contract](docs/joint-lifecycle.md).
 
 ## Permanent-loss approvals
 
