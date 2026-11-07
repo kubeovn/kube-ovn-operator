@@ -528,6 +528,7 @@ echo "default controller completed native Deployment replacement: $target_pod ->
 # approval is created before the endpoint is lost, and the replacement request
 # deliberately omits replaceEndpoint. Cordon plus Pod deletion makes the old
 # endpoint uniquely lost while preserving the healthy Deployment survivor.
+kubectl rollout status deployment/"${central_deployment}" -n kube-ovn-operator-system --timeout=120s
 automatic_candidates_file="${test_dir}/automatic-candidates.json"
 kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json | python3 -c '
 import json
@@ -641,6 +642,16 @@ if [[ -z "${automatic_survivor_pod}" ]]; then
   echo 'could not identify the retained Deployment survivor Pod' >&2
   exit 1
 fi
+# Pin the actual restarted target to the immutable native identities before
+# deleting it. A Pod name is only a process reference, never loss authority.
+automatic_target_node_uid=$(kubectl get node "${automatic_target_node}" -o jsonpath='{.metadata.uid}')
+for database_socket in ovnnb_db ovnsb_db; do
+  database_name=OVN_Northbound
+  if [[ "${database_socket}" == ovnsb_db ]]; then database_name=OVN_Southbound; fi
+  kubectl exec -n kube-ovn-operator-system "${automatic_target_pod}" -c ovn-central -- \
+    ovs-appctl -t "/var/run/ovn/${database_socket}.ctl" cluster/status "${database_name}" \
+    >"${test_dir}/automatic-target-${database_name}.txt"
+done
 kubectl annotate pod "${automatic_survivor_pod}" -n kube-ovn-operator-system \
   controller.kubernetes.io/pod-deletion-cost=2147483647 --overwrite >/dev/null
 kubectl annotate pod "${automatic_target_pod}" -n kube-ovn-operator-system \
@@ -724,15 +735,27 @@ automatic_topology=$(kubectl get configmap "${automatic_inventory}" -n kube-ovn-
 installation_uid=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.metadata.uid}')
 automatic_approval_name=automatic-lost-approval
 automatic_approval_operation_id=eeee0000-1111-2222-3333-444444444444
-TOPOLOGY_JSON="${automatic_topology}" TARGET_POD="${automatic_target_pod}" INSTALLATION_UID="${installation_uid}" APPROVAL_NAME="${automatic_approval_name}" OPERATION_ID="${automatic_approval_operation_id}" python3 - <<'PYTHON' >"${test_dir}/automatic-approval.json"
+TOPOLOGY_JSON="${automatic_topology}" TARGET_NODE="${automatic_target_node}" TARGET_NODE_UID="${automatic_target_node_uid}" TARGET_STATUS_DIR="${test_dir}" INSTALLATION_UID="${installation_uid}" APPROVAL_NAME="${automatic_approval_name}" OPERATION_ID="${automatic_approval_operation_id}" python3 - <<'PYTHON' >"${test_dir}/automatic-approval.json"
 import datetime
 import json
 import os
+import pathlib
+import re
 
 topology = json.loads(os.environ["TOPOLOGY_JSON"])["topology"]["members"]
-target = next((member for member in topology if member["pod"]["name"] == os.environ["TARGET_POD"]), None)
-if target is None:
-    raise SystemExit(f"target Pod {os.environ['TARGET_POD']} is absent from retained topology")
+candidates = [member for member in topology if member["node"] == {"name": os.environ["TARGET_NODE"], "uid": os.environ["TARGET_NODE_UID"]}]
+if len(candidates) != 1:
+    raise SystemExit("automatic loss target must match exactly one retained Node identity")
+target = candidates[0]
+for database in target["databases"]:
+    status = (pathlib.Path(os.environ["TARGET_STATUS_DIR"]) / f"automatic-target-{database['database']}.txt").read_text()
+    for label, key in (("Cluster ID", "clusterID"), ("Server ID", "serverID")):
+        match = re.search(rf"^{label}:.*\(([^)]+)\)", status, re.MULTILINE)
+        if match is None or match.group(1) != database[key]:
+            raise SystemExit(f"automatic target changed native {key}")
+    match = re.search(r"^Address:\s*(\S+)", status, re.MULTILINE)
+    if match is None or match.group(1) != database["address"]:
+        raise SystemExit("automatic target changed its retained RAFT address")
 targets = [
     {
         "database": database["database"],
@@ -774,11 +797,10 @@ JSON
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/automatic-replacement.json" >/dev/null
 kubectl cordon "${automatic_target_node}" >/dev/null
 
-# Unpausing the Deployment intentionally creates one healthy ReplicaSet
-# replacement. PinDeploymentRetirementAfterLoss requires that replacement to
-# be Running and Ready before automatic admission, so let the Kubernetes
-# controller converge before resuming the operator. The survivor receives the
-# highest deletion cost so the later lifecycle scale-down retains it.
+# The retained storage-node constraint leaves the ReplicaSet substitute
+# unscheduled after the target node is cordoned. Wait for that exact unstarted
+# Pod before admission; it must not reopen data on a retired node. The healthy
+# survivor receives the highest deletion cost for the final scale-down.
 kubectl annotate pod "${automatic_survivor_pod}" -n kube-ovn-operator-system \
   controller.kubernetes.io/pod-deletion-cost=2147483647 --overwrite >/dev/null
 kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":false}}' >/dev/null
@@ -796,11 +818,9 @@ for item in json.load(sys.stdin).get("items", []):
     owners = item.get("metadata", {}).get("ownerReferences", [])
     if not any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in owners):
         continue
-    ready = item.get("status", {}).get("phase") == "Running" and any(
-        condition.get("type") == "Ready" and condition.get("status") == "True"
-        for condition in item.get("status", {}).get("conditions", [])
-    )
-    if ready:
+    status = item.get("status", {})
+    unstarted = status.get("phase") == "Pending" and not item.get("spec", {}).get("nodeName") and not status.get("containerStatuses") and not status.get("initContainerStatuses")
+    if unstarted:
         print(item["metadata"]["name"])
         break
 ')
@@ -810,7 +830,7 @@ for item in json.load(sys.stdin).get("items", []):
   sleep 1
 done
 if [[ -z "${automatic_replacement_pod}" ]]; then
-  echo 'Deployment replacement Pod did not become healthy before automatic admission' >&2
+  echo 'Deployment replacement Pod did not remain unstarted before automatic admission' >&2
   kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o wide || true
   exit 1
 fi
@@ -834,7 +854,20 @@ fi
 # original desired replica count until the durable operation has removed the
 # old database member; the lifecycle executor rejects an early scale-down.
 automatic_request_json=$(kubectl get configmap "${automatic_request_name}" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
-printf '%s\n' "${automatic_request_json}" | grep -Fq "${automatic_target_pod}"
+REQUEST_JSON="${automatic_request_json}" APPROVAL_FILE="${test_dir}/automatic-approval.json" python3 - <<'PYTHON'
+import json
+import os
+
+request = json.loads(os.environ["REQUEST_JSON"])
+approval = json.load(open(os.environ["APPROVAL_FILE"]))["spec"]["decision"]
+for target in approval["targets"]:
+    inventory = next(db for db in request["databases"] if db["database"] == target["database"])
+    peer = next(peer for peer in inventory["peers"] if peer["name"] == request["removeEndpoint"])
+    if inventory["clusterID"] != target["clusterID"] or any(peer[key] != target[key] for key in ("serverID", "address")):
+        raise SystemExit("automatic request does not remove the exact approved native member")
+if request["retirement"]["endpoint"]["name"] != request["removeEndpoint"]:
+    raise SystemExit("automatic request does not pin the lost process reference")
+PYTHON
 printf '%s\n' "${automatic_request_json}" | grep -Fq '"automaticReplacement":true'
 printf '%s\n' "${automatic_request_json}" | grep -Fq '"endpointMissing":true'
 printf '%s\n' "${automatic_request_json}" | grep -Fq "${automatic_approval_name}"

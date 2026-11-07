@@ -50,6 +50,12 @@ func retainChartConnections(object *unstructured.Unstructured, retained health.C
 			if err != nil {
 				return err
 			}
+			independent := slices.ContainsFunc(retained.Members, func(member health.CentralIdentity) bool {
+				return member.Workload.Kind != "Deployment" || member.Workload.Name != object.GetName()
+			})
+			if !independent && entry["value"] == strings.Join(addresses, ",") {
+				continue
+			}
 			delete(entry, "valueFrom")
 			entry["value"] = strings.Join(addresses, ",")
 			changed = true
@@ -121,7 +127,7 @@ func retainedChartAddresses(retained health.CentralTopology) ([]string, error) {
 			}
 			protocol = transport
 			if address != "" && address != ip.String() {
-				return nil, errors.New("Chart NODE_IPS requires NB/SB listeners on the same node address")
+				return nil, errors.New("chart NODE_IPS requires NB/SB listeners on the same node address")
 			}
 			address = ip.String()
 		}
@@ -130,7 +136,7 @@ func retainedChartAddresses(retained health.CentralTopology) ([]string, error) {
 	slices.Sort(addresses)
 	addresses = slices.Compact(addresses)
 	if len(addresses) != len(retained.Members) {
-		return nil, errors.New("Chart central peers require distinct retained node addresses")
+		return nil, errors.New("chart central peers require distinct retained node addresses")
 	}
 	return addresses, nil
 }

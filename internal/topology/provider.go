@@ -399,3 +399,29 @@ func CurrentInventory(ctx context.Context, provider InventoryProvider, installat
 	}
 	return provider.Retained(ctx, installation)
 }
+
+// Selectable refreshes verified surviving processes while retaining missing
+// member identities for the independently approved lifecycle loss selector.
+func (p *Kubernetes) Selectable(ctx context.Context, installation *api.KubeOVNInstallation) (health.CentralTopology, error) {
+	retained, err := p.Retained(ctx, installation)
+	if err != nil {
+		return health.CentralTopology{}, err
+	}
+	current, err := health.RebindRetainedProcesses(ctx, p.Client, p.Runner, installation, retained)
+	if err != nil {
+		return health.CentralTopology{}, err
+	}
+	if _, err := p.Retained(ctx, installation); err != nil {
+		return health.CentralTopology{}, err
+	}
+	return current, nil
+}
+
+func SelectableInventory(ctx context.Context, provider InventoryProvider, installation *api.KubeOVNInstallation) (health.CentralTopology, error) {
+	if selection, ok := provider.(interface {
+		Selectable(context.Context, *api.KubeOVNInstallation) (health.CentralTopology, error)
+	}); ok {
+		return selection.Selectable(ctx, installation)
+	}
+	return provider.Retained(ctx, installation)
+}

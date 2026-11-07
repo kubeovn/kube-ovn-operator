@@ -94,7 +94,7 @@ func (e *LifecycleRecoveryExecutor) Execute(ctx context.Context, plan RecoveryPl
 				recovery, err = e.Lifecycle.Resume(centralCtx, installation, pinned)
 				return err
 			}
-			retained, err := topology.CurrentInventory(centralCtx, e.Topology, installation)
+			retained, err := topology.SelectableInventory(centralCtx, e.Topology, installation)
 			if err != nil {
 				return fmt.Errorf("read retained topology for rejoin: %w", err)
 			}

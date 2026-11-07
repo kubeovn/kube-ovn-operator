@@ -199,8 +199,12 @@ func PinDeploymentRetirementAfterLoss(ctx context.Context, kube client.Reader, i
 		if replacement.Name != "" {
 			return Retirement{}, errors.New("lost deployment retirement found more than one unpinned replacement Pod")
 		}
-		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || !podReady(pod) {
-			return Retirement{}, errors.New("lost deployment retirement replacement Pod is not healthy")
+		// Storage-node affinity can leave the ReplicaSet's substitute Pending
+		// after a retained node is lost. An unscheduled Pod with no process
+		// cannot become a database peer; pin its UID for the final scale-down.
+		unstarted := pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == "" && len(pod.Status.ContainerStatuses) == 0 && len(pod.Status.InitContainerStatuses) == 0
+		if pod.DeletionTimestamp != nil || !unstarted && (pod.Status.Phase != corev1.PodRunning || !podReady(pod)) {
+			return Retirement{}, errors.New("lost deployment retirement replacement Pod is neither healthy nor unstarted")
 		}
 		replacement = workload.Reference{Name: pod.Name, UID: pod.UID}
 	}

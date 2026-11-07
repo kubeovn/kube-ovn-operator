@@ -930,7 +930,7 @@ func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Cont
 	var request *lifecycle.Request
 	err := r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
-			retained, err := provider.Retained(centralCtx, installation)
+			retained, err := topology.SelectableInventory(centralCtx, provider, installation)
 			if err != nil {
 				return err
 			}

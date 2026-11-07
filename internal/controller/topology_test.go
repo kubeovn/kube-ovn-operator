@@ -227,3 +227,18 @@ func TestRetainedChartUsesCurrentPeersAndStorageNodes(t *testing.T) {
 		})
 	}
 }
+
+func TestRetainedChartLeavesUnchangedBootstrapTemplate(t *testing.T) {
+	retained := additionTopologyFixture()
+	for i := range retained.Members {
+		retained.Members[i].Workload.Name = "ovn-central"
+	}
+	deployment := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "ovn-central"}, "spec": map[string]any{"replicas": int64(3), "template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "ovn-central", "env": []any{map[string]any{"name": "NODE_IPS", "value": "192.0.2.1,192.0.2.2,192.0.2.3"}}}}}}}}}
+	original := deployment.DeepCopy()
+	if err := applyRetainedChartDeploymentReplicas([]*unstructured.Unstructured{deployment}, retained); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(deployment.Object, original.Object) {
+		t.Fatal("retaining an unchanged bootstrap topology introduced an unauthorized manifest change")
+	}
+}
