@@ -84,6 +84,10 @@ func Inject(object *unstructured.Unstructured, config Config, installation, name
 		}
 	}
 	port := int64(config.Port)
+	hostPort := int64(0)
+	if hostNetwork, _, _ := unstructured.NestedBool(templateSpec, "hostNetwork"); hostNetwork {
+		hostPort = port
+	}
 	leaseName := lease.Name(lease.Central, installation)
 	sidecar := map[string]any{
 		"name":    "kube-ovn-fence-agent",
@@ -97,7 +101,7 @@ func Inject(object *unstructured.Unstructured, config Config, installation, name
 			"--tls-key-file=/var/run/fence/server/tls.key",
 			"--tls-client-ca-file=/var/run/fence/client-ca/ca.crt",
 		},
-		"ports": []any{map[string]any{"name": "fence", "containerPort": port, "protocol": "TCP"}},
+		"ports": []any{map[string]any{"name": "fence", "containerPort": port, "hostPort": hostPort, "protocol": "TCP"}},
 		"securityContext": map[string]any{
 			"allowPrivilegeEscalation": false,
 			"capabilities":             map[string]any{"drop": []any{"ALL"}},
@@ -115,8 +119,8 @@ func Inject(object *unstructured.Unstructured, config Config, installation, name
 		// The fence endpoint requires a client certificate for every TLS
 		// handshake. Kubernetes HTTP probes cannot present one, so use a TCP
 		// probe to check that the mTLS listener is accepting connections.
-		"readinessProbe": map[string]any{"tcpSocket": map[string]any{"port": port}, "periodSeconds": int64(5), "timeoutSeconds": int64(3)},
-		"livenessProbe":  map[string]any{"tcpSocket": map[string]any{"port": port}, "periodSeconds": int64(10), "timeoutSeconds": int64(3)},
+		"readinessProbe": map[string]any{"tcpSocket": map[string]any{"port": port}, "periodSeconds": int64(5), "timeoutSeconds": int64(3), "successThreshold": int64(1), "failureThreshold": int64(3)},
+		"livenessProbe":  map[string]any{"tcpSocket": map[string]any{"port": port}, "periodSeconds": int64(10), "timeoutSeconds": int64(3), "successThreshold": int64(1), "failureThreshold": int64(3)},
 	}
 	templateSpec["containers"] = append(containers, sidecar)
 	volumes, _, err := unstructured.NestedSlice(templateSpec, "volumes")

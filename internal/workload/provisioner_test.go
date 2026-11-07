@@ -596,3 +596,23 @@ func TestReplacementMemberRetainsFenceAgentAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFencedMemberAcceptsAPIServerDefaults(t *testing.T) {
+	f := setup(t, nil)
+	f.p.fenceAgent = &fenceagent.Config{Image: "registry.example/fence-agent@sha256:" + strings.Repeat("b", 64), ServerTLSSecret: "server-tls", ClientCASecret: "client-ca", Port: 8443}
+	set := f.p.statefulSet(f.request, Reference{Name: "member", UID: "record"}, &corev1.ConfigMap{Name: "launch"})
+	if err := f.p.injectMemberFenceAgent(set); err != nil {
+		t.Fatal(err)
+	}
+	// Kubernetes defaults host-network container ports and non-pointer probe
+	// thresholds. DeepDerivative compares these numeric zero values exactly.
+	admitted := set.Spec.Template.Spec.DeepCopy()
+	agent := &admitted.Containers[1]
+	agent.Ports[0].HostPort = agent.Ports[0].ContainerPort
+	for _, probe := range []*corev1.Probe{agent.ReadinessProbe, agent.LivenessProbe} {
+		probe.SuccessThreshold, probe.FailureThreshold = 1, 3
+	}
+	if !matchesPod(set.Spec.Template.Spec, *admitted) {
+		t.Fatal("built-in port/probe defaults rejected the fenced member")
+	}
+}
