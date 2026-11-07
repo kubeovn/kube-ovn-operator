@@ -13,6 +13,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -239,7 +240,9 @@ func TestRollbackVerificationReportsPendingGate(t *testing.T) {
 			for i := range retained.Members {
 				retained.Members[i].Workload.Name = "ovn-central"
 			}
-			kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithObjects(installation).Build()
+			installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: "previous-spec", ManifestHash: "previous-manifest", Version: installation.Spec.Version}
+			previous := *installation.Status.ApplyCheckpoint
+			kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation).WithObjects(installation).Build()
 			lifecycleFake := &lifecycleCoordinatorFake{reader: kube, restoreErr: errors.New("restore rejected by database fence")}
 			workload := new(rollbackWorkloadFake)
 			executor := &KubernetesRollbackExecutor{
@@ -263,7 +266,7 @@ func TestRollbackVerificationReportsPendingGate(t *testing.T) {
 				InstallationNamespace: installation.Namespace, InstallationName: installation.Name, InstallationUID: installation.UID, InstallationGeneration: installation.Generation,
 				SourceVersion: installation.Status.ObservedVersion, TargetVersion: installation.Spec.Version, BackupID: installation.Status.LastBackup.ID,
 				DatabaseRefs: testBackupPairRefs(), Destination: installation.Status.LastBackup.Destination, TopologyDigest: installation.Status.Topology.Inventory.Digest,
-				ChartDigest: chartDigest, Mode: "reconvert",
+				ChartDigest: chartDigest, Mode: "reconvert", RequestUID: "recovery-request",
 			}
 
 			workload.observation = &apply.Observation{Ready: gate != "workloads", Message: "Deployment still rolling out"}
@@ -285,7 +288,30 @@ func TestRollbackVerificationReportsPendingGate(t *testing.T) {
 				if err != nil || next != operatorv1alpha1.RollbackPhaseSucceeded {
 					t.Fatalf("healthy verification did not complete: phase=%s err=%v", next, err)
 				}
+				current := new(operatorv1alpha1.KubeOVNInstallation)
+				if err := kube.Get(t.Context(), client.ObjectKeyFromObject(installation), current); err != nil {
+					t.Fatal(err)
+				}
+				rendered, err := executor.renderRollbackTarget(t.Context(), current, retained, chartDigest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reconciler := &KubeOVNInstallationReconciler{Client: kube}
+				if err := reconciler.ensureApplyCheckpoint(t.Context(), current, rendered); err != nil {
+					t.Fatalf("verified recovery still blocks routine reconciliation: %v", err)
+				}
+				current.Spec.NetworkStack = "dual_stack"
+				if err := reconciler.ensureApplyCheckpoint(t.Context(), current, rendered); err == nil {
+					t.Fatal("recovery checkpoint authorized a later spec change")
+				}
 				return
+			}
+			current := new(operatorv1alpha1.KubeOVNInstallation)
+			if err := kube.Get(t.Context(), client.ObjectKeyFromObject(installation), current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.ApplyCheckpoint == nil || *current.Status.ApplyCheckpoint != previous {
+				t.Fatal("pending verification changed the apply checkpoint")
 			}
 			if next != operatorv1alpha1.RollbackPhaseVerifying || !errors.Is(err, ErrRollbackInProgress) || !strings.Contains(err.Error(), gate) {
 				t.Fatalf("pending %s gate lost its retryable diagnostic: phase=%s err=%v", gate, next, err)

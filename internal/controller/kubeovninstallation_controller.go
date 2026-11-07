@@ -2268,20 +2268,27 @@ func rollbackBlockedStatus(installation *operatorv1alpha1.KubeOVNInstallation, n
 	return status
 }
 
-func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, rendered chart.Rendered) error {
+func renderedApplyCheckpoint(installation *operatorv1alpha1.KubeOVNInstallation, rendered chart.Rendered) (operatorv1alpha1.ApplyCheckpointStatus, error) {
 	specHash, baseSpecHash, err := installationSpecHashes(installation.Spec)
 	if err != nil {
-		return err
+		return operatorv1alpha1.ApplyCheckpointStatus{}, err
 	}
 	manifestJSON, err := stdjson.Marshal(rendered.Objects, stdjson.Deterministic(true))
 	if err != nil {
-		return err
+		return operatorv1alpha1.ApplyCheckpointStatus{}, err
 	}
-	checkpoint := operatorv1alpha1.ApplyCheckpointStatus{
+	return operatorv1alpha1.ApplyCheckpointStatus{
 		SpecHash:     specHash,
 		BaseSpecHash: baseSpecHash,
 		ManifestHash: fmt.Sprintf("%x", sha256.Sum256(manifestJSON)),
 		Version:      installation.Spec.Version,
+	}, nil
+}
+
+func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, rendered chart.Rendered) error {
+	checkpoint, err := renderedApplyCheckpoint(installation, rendered)
+	if err != nil {
+		return err
 	}
 	if existing := installation.Status.ApplyCheckpoint; existing != nil {
 		if *existing != checkpoint {

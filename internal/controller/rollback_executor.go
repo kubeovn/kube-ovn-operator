@@ -65,7 +65,7 @@ type rollbackCapabilities interface {
 // OVSDB adapters and applies the exact digest-pinned target Chart through the
 // normal ownership-checked workload client.
 type KubernetesRollbackExecutor struct {
-	Client          client.Reader
+	Client          client.Client
 	Lifecycle       lifecycleCoordinator
 	Topology        topology.InventoryProvider
 	RendererFactory func(*operatorv1alpha1.KubeOVNInstallation) chart.Renderer
@@ -231,6 +231,23 @@ func (e *KubernetesRollbackExecutor) Step(ctx context.Context, plan RollbackPlan
 			}
 			if err := approver.Complete(ctx, *plan.ApprovalRef, approvalBinding(plan)); err != nil {
 				return phase, fmt.Errorf("complete lost-quorum recovery approval: %w", err)
+			}
+		}
+		if plan.RequestUID != "" {
+			// A public recovery already applied this exact admitted generation.
+			// Record its verified render so ordinary reconciliation can resume
+			// without granting authority to different future inputs. Version
+			// rollback maintains its own checkpoint in the installation driver.
+			checkpoint, err := renderedApplyCheckpoint(installation, rendered)
+			if err != nil {
+				return phase, err
+			}
+			if installation.Status.ApplyCheckpoint == nil || *installation.Status.ApplyCheckpoint != checkpoint {
+				updated := installation.DeepCopy()
+				updated.Status.ApplyCheckpoint = &checkpoint
+				if err := e.Client.Status().Update(ctx, updated); err != nil {
+					return phase, fmt.Errorf("%w: persist verified recovery apply checkpoint: %v", ErrRollbackInProgress, err)
+				}
 			}
 		}
 		return operatorv1alpha1.RollbackPhaseSucceeded, nil

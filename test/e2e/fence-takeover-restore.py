@@ -446,7 +446,15 @@ def run_controller_recovery(certificate_dir, backup_dir):
         for database, stem, table in DATABASES:
             fixture.wait_marker(database, stem, table, "controller-snapshot")
         check(native_membership(fixture.topology()) == before, "controller recovery changed native cluster/server identities")
-        print("Controller RecoveryRequest succeeded: rejected foreign backup; restored NB/SB snapshot on all three nodes; rollout state and membership preserved", flush=True)
+        def installation_ready():
+            current = resource("koi", INSTALLATION)
+            conditions = {condition["type"]: condition for condition in current.get("status", {}).get("conditions", [])}
+            return all(conditions.get(kind, {}).get("status") == expected
+                       and conditions[kind].get("observedGeneration") == current["metadata"]["generation"]
+                       for kind, expected in (("Ready", "True"), ("Degraded", "False")))
+
+        eventually("routine installation reconciliation returns to Ready after recovery", installation_ready)
+        print("Controller RecoveryRequest succeeded: rejected foreign backup; restored NB/SB snapshot on all three nodes; rollout state and membership preserved; installation Ready", flush=True)
 
 
 if __name__ == "__main__":
