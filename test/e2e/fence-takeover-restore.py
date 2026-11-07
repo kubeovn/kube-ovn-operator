@@ -345,7 +345,10 @@ def approved_recovery(name, backup, installation, fixture, original_state):
                          "topologyDigest": backup["topologyDigest"], "chartDigest": installation["spec"]["chart"]["digest"],
                          "reason": "Disposable Kind public approval consumption with healthy quorum",
                          "expiresAt": request["spec"]["expiresAt"]}}
-    approval = json.loads(kubectl("create", "-f", "-", "-o", "json", data=json.dumps(decision).encode()))
+    try:
+        approval = json.loads(kubectl("create", "-f", "-", "-o", "json", data=json.dumps(decision).encode()))
+    except subprocess.CalledProcessError as error:
+        raise AssertionError("RecoveryApproval creation failed: " + error.stderr.decode(errors="replace")) from error
     check(not approval.get("status"), "new approval already has audit state")
     # Approval creation alone must not admit a request that has not been resumed.
     time.sleep(3)
