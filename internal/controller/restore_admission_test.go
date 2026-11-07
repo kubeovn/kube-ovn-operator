@@ -108,7 +108,7 @@ func TestRestoreRechecksAdmissionAfterQuiesce(t *testing.T) {
 						t.Fatal(err)
 					}
 				case "expired":
-					time.Sleep(time.Until(record.Spec.ExpiresAt.Time.Add(time.Millisecond)))
+					time.Sleep(time.Until(record.Spec.ExpiresAt.Add(time.Millisecond)))
 				case "replaced":
 					if err := kube.Delete(t.Context(), record); err != nil {
 						t.Fatal(err)
