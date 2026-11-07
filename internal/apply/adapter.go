@@ -132,12 +132,9 @@ func (c *Client) persist(ctx context.Context, item *preparedObject) error {
 			if attempt >= 2 || !isResourceVersionConflict(err) {
 				return err
 			}
-			latest, getErr := item.resource.Get(ctx, item.object.GetName(), metav1.GetOptions{})
-			if getErr != nil {
-				return fmt.Errorf("refresh %s after resource version conflict: %w", objectKey(item.object), getErr)
+			if refreshErr := refreshPreparedObject(ctx, item); refreshErr != nil {
+				return fmt.Errorf("refresh %s after resource version conflict: %w", objectKey(item.object), refreshErr)
 			}
-			item.live = latest.DeepCopy()
-			item.expectedResourceVersion = latest.GetResourceVersion()
 			if c.BeforeWrite != nil {
 				if guardErr := c.BeforeWrite(ctx); guardErr != nil {
 					return fmt.Errorf("guard workload retry: %w", guardErr)
@@ -147,6 +144,16 @@ func (c *Client) persist(ctx context.Context, item *preparedObject) error {
 		}
 		return nil
 	}
+}
+
+func refreshPreparedObject(ctx context.Context, item *preparedObject) error {
+	live, err := item.resource.Get(ctx, item.object.GetName(), metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	item.live = live.DeepCopy()
+	item.expectedResourceVersion = live.GetResourceVersion()
+	return nil
 }
 
 // Adopt validates the complete target set before writing any ownership
@@ -179,14 +186,34 @@ func (c *Client) Adopt(ctx context.Context, objects []*unstructured.Unstructured
 func dryRunAll(ctx context.Context, objects []preparedObject) error {
 	for index := range objects {
 		item := &objects[index]
-		if _, err := patch(ctx, *item, true); err != nil {
-			if !canForceSelfOwnedConflict(err, item.live) {
-				return fmt.Errorf("server-side dry-run %s: %w", objectKey(item.object), err)
+		var lastErr error
+		forced := false
+		for attempt := 0; attempt < 3; attempt++ {
+			if _, err := patch(ctx, *item, true); err == nil {
+				lastErr = nil
+				break
+			} else {
+				lastErr = err
+				if isResourceVersionConflict(err) && item.exists && attempt < 2 {
+					if refreshErr := refreshPreparedObject(ctx, item); refreshErr != nil {
+						return fmt.Errorf("server-side dry-run %s: %w", objectKey(item.object), refreshErr)
+					}
+					continue
+				}
+				if !item.force && canForceSelfOwnedConflict(err, item.live) {
+					item.force = true
+					forced = true
+					continue
+				}
+				break
 			}
-			item.force = true
-			if _, forceErr := patch(ctx, *item, true); forceErr != nil {
-				return fmt.Errorf("server-side forced dry-run %s: %w", objectKey(item.object), forceErr)
+		}
+		if lastErr != nil {
+			prefix := "server-side dry-run"
+			if forced {
+				prefix = "server-side forced dry-run"
 			}
+			return fmt.Errorf("%s %s: %w", prefix, objectKey(item.object), lastErr)
 		}
 		// Admission can distinguish CREATE from PATCH. Validate the exact
 		// persistence operation as well when the object does not exist yet.

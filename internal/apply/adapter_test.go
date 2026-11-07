@@ -204,6 +204,25 @@ func TestPersistRefreshesResourceVersionConflict(t *testing.T) {
 	}
 }
 
+func TestDryRunRefreshesResourceVersionConflict(t *testing.T) {
+	resource := &versionConflictResource{}
+	objects := []preparedObject{{
+		object:                  configMap("workload", nil),
+		resource:                resource,
+		exists:                  true,
+		expectedResourceVersion: "1",
+	}}
+	if err := dryRunAll(t.Context(), objects); err != nil {
+		t.Fatal(err)
+	}
+	if resource.patchCalls != 2 || resource.getCalls != 1 {
+		t.Fatalf("expected one refresh and two dry-run attempts, got %d gets and %d patches", resource.getCalls, resource.patchCalls)
+	}
+	if objects[0].expectedResourceVersion != "2" {
+		t.Fatalf("resourceVersion = %q, want refreshed version 2", objects[0].expectedResourceVersion)
+	}
+}
+
 func testMapper() meta.RESTMapper {
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
 	mapper.Add(corev1.SchemeGroupVersion.WithKind("ConfigMap"), meta.RESTScopeNamespace)
