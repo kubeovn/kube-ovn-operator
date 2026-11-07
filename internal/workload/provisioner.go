@@ -520,7 +520,11 @@ func (p *Provisioner) available(ctx context.Context, request Request, ref Refere
 		if owner != nil && owner.APIVersion == "batch/v1" && owner.Kind == "Job" {
 			expected = p.job(request, ref)
 		} else if owner != nil && owner.APIVersion == "apps/v1" && owner.Kind == "StatefulSet" {
-			expected = p.statefulSet(request, ref, &corev1.ConfigMap{Name: ref.Name + "-launch"})
+			set := p.statefulSet(request, ref, &corev1.ConfigMap{Name: ref.Name + "-launch"})
+			if err := p.injectMemberFenceAgent(set); err != nil {
+				return err
+			}
+			expected = set
 			bindingName = ref.Name + "-workload"
 		}
 		if expected == nil || owner.Name != expected.GetName() {

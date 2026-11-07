@@ -589,18 +589,39 @@ func TestReplacementMemberRetainsFenceAgentAcrossRestart(t *testing.T) {
 			t.Fatalf("accepted workload mutation: %s", mutation)
 		}
 	}
+	// Reconciliation resumes after the StatefulSet controller has created its
+	// live PVC consumer, not just after the StatefulSet object is persisted.
+	pod := &corev1.Pod{Name: set.Name + "-0", Namespace: set.Namespace, Spec: *spec.DeepCopy(),
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "StatefulSet", Name: set.Name, UID: set.UID, Controller: new(true)}},
+		Status:          corev1.PodStatus{Phase: corev1.PodRunning}}
+	if err := f.kube.Create(t.Context(), pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.p.available(t.Context(), f.request, prepared.Record); err != nil {
+		t.Fatalf("live fenced PVC consumer rejected: %v", err)
+	}
 	f.p, err = New(f.kube, f.installation, config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := f.guarded(t, func(ctx context.Context) error {
 		again, err := f.p.Start(ctx, prepared.Record, f.launch(result))
+		if err != nil {
+			return err
+		}
 		if again != started {
 			t.Fatal("restart replaced fenced member")
 		}
 		return err
 	}); err != nil {
 		t.Fatal(err)
+	}
+	set.Spec.Template.Spec.Containers[1].Args = append(set.Spec.Template.Spec.Containers[1].Args, "--unexpected")
+	if err := f.kube.Update(t.Context(), set); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.p.available(t.Context(), f.request, prepared.Record); err == nil {
+		t.Fatal("modified fenced PVC consumer accepted")
 	}
 }
 
