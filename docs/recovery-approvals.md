@@ -120,6 +120,11 @@ at its durable phase and retries admission. It does not invoke a restore step
 while another holder owns the Lease. Lease loss and restore failures remain
 terminal failures.
 
+An executing request whose plan pins the current installation UID owns its
+durable recovery phases. Normal installation reconciliation yields to it and
+rechecks that ownership under the installation Lease before mutations, so
+routine Lease events cannot starve recovery or undo rollout quiescence.
+
 This uses the healthy quorum path and needs no destructive recovery approval.
 It does not establish lost-quorum reconstruction, approval consumption during
 that failure, a version-changing rollback, or an application write barrier

@@ -305,6 +305,20 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 		now = r.Clock
 	}
 	plan := planner.Build(installation.Spec, installation.Status.ObservedVersion)
+	if err := r.checkExecutingRecovery(ctx, installation); err != nil {
+		if !errors.Is(err, errRecoveryExecuting) {
+			return reconcile.Result{}, err
+		}
+		previous := installation.Status.DeepCopy()
+		installation.Status.Phase = operatorv1alpha1.PhaseRecovering
+		setCondition(&installation.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "RecoveryExecuting", Message: err.Error(), ObservedGeneration: installation.Generation, LastTransitionTime: metav1.NewTime(now())})
+		if !reflect.DeepEqual(*previous, installation.Status) {
+			if updateErr := r.Status().Update(ctx, installation); updateErr != nil {
+				return reconcile.Result{}, updateErr
+			}
+		}
+		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 	if plan.Blocking != "" {
 		if err := r.updateStatus(ctx, installation, plan, now(), nil, nil, nil, nil, nil); err != nil {
 			return reconcile.Result{}, err
@@ -361,7 +375,7 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 			return reconcile.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 		var recovery *lifecycle.Recovery
-		recoveryErr := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+		recoveryErr := r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 			return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
 				var err error
 				recovery, err = r.Lifecycle.Resume(centralCtx, installation, installation.Status.Topology.Operation)
@@ -420,7 +434,7 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 					return reconcile.Result{}, errors.New("completed lifecycle cannot hand off without the retained topology provider")
 				}
 				var next *operatorv1alpha1.CentralTopologyReference
-				handoffErr := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+				handoffErr := r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 					return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
 						var err error
 						next, err = handoff.Handoff(centralCtx, installation, installation.Status.Topology.Inventory)
@@ -743,7 +757,7 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 		if r.Leases == nil {
 			err = fmt.Errorf("workload management requires an operation lease manager")
 		} else {
-			err = r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+			err = r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 				if installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly {
 					return r.Leases.With(operationCtx, installation, lease.Central, operation)
 				}
@@ -812,6 +826,43 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 	return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
+var errRecoveryExecuting = errors.New("an identity-bound recovery request is executing")
+
+// checkExecutingRecovery lets an admitted recovery own the installation across
+// its durable phases. Reacquiring short-lived Leases in the normal reconciler
+// would otherwise starve recovery and could undo its workload quiesce state.
+func (r *KubeOVNInstallationReconciler) checkExecutingRecovery(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if reader == nil {
+		// Capability-only callers have no Kubernetes mutations to interleave.
+		return nil
+	}
+	requests := new(operatorv1alpha1.KubeOVNRecoveryRequestList)
+	if err := reader.List(ctx, requests, client.InNamespace(installation.Namespace)); err != nil {
+		return fmt.Errorf("inspect executing recovery requests: %w", err)
+	}
+	for _, request := range requests.Items {
+		if request.Spec.InstallationRef == installation.Name && request.Status.Phase == operatorv1alpha1.RecoveryPhaseExecuting && request.Status.Plan != nil && request.Status.Plan.InstallationUID == installation.UID {
+			return fmt.Errorf("%w: %s", errRecoveryExecuting, request.Name)
+		}
+	}
+	return nil
+}
+
+func (r *KubeOVNInstallationReconciler) withInstallationLease(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, fn func(context.Context) error) error {
+	return r.Leases.With(ctx, installation, lease.Installation, func(ctx context.Context) error {
+		// Recheck under the Lease to close the gap between the initial read and
+		// acquisition while another controller admits a recovery request.
+		if err := r.checkExecutingRecovery(ctx, installation); err != nil {
+			return err
+		}
+		return fn(ctx)
+	})
+}
+
 // hcpPeerRequest binds provider observation to the current Secret object
 // identity. The provider may read the Secret through its own client, but the
 // controller passes only metadata so credentials cannot enter status, plans or
@@ -877,7 +928,7 @@ func (r *KubeOVNInstallationReconciler) beginAutomaticLifecycle(ctx context.Cont
 	}
 	var reference lifecycle.Reference
 	var request *lifecycle.Request
-	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+	err := r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
 			retained, err := provider.Retained(centralCtx, installation)
 			if err != nil {
@@ -1464,7 +1515,7 @@ func (r *KubeOVNInstallationReconciler) lifecycleRenderSpec(ctx context.Context,
 		return spec, nil, errors.New("dynamic membership rendering requires a retained topology provider and operation leases")
 	}
 	retained := new(health.CentralTopology)
-	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+	err := r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
 			var err error
 			*retained, err = provider.Retained(centralCtx, installation)
@@ -1592,7 +1643,7 @@ func (r *KubeOVNInstallationReconciler) ensureBackupRetention(ctx context.Contex
 	protected = append(protected, recoveryRefs...)
 	var active []string
 	var cleanup backup.RetentionResult
-	err = r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+	err = r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
 			if installation.Status.Topology.Operation != nil {
 				active, err = r.Lifecycle.ProtectedBackupRefs(centralCtx, installation, installation.Status.Topology.Operation)
@@ -1705,7 +1756,7 @@ func (r *KubeOVNInstallationReconciler) ensureScheduledBackup(ctx context.Contex
 		capture = r.Lifecycle.CaptureBackupPair
 	}
 	var captured *operatorv1alpha1.BackupStatus
-	err = r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+	err = r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
 			retained, err := provider.Retained(centralCtx, installation)
 			if err != nil {
@@ -1765,7 +1816,7 @@ func (r *KubeOVNInstallationReconciler) ensureUpgradeBackup(ctx context.Context,
 	binding := lifecycle.BackupBinding{Destination: backupDestination(installation), Version: installation.Status.ObservedVersion, TopologyDigest: ref.Digest}
 	targetVersion := installation.Spec.Version
 	ready := false
-	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+	err := r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
 			retained, err := provider.Retained(centralCtx, installation)
 			if err != nil {
@@ -2146,7 +2197,7 @@ func (r *KubeOVNInstallationReconciler) runRollbackStep(ctx context.Context, ins
 		return phase, errors.New("rollback requires installation and central operation leases")
 	}
 	var next operatorv1alpha1.RollbackPhase
-	err := r.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
+	err := r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
 		return r.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
 			var err error
 			next, err = r.Rollback.Step(centralCtx, plan, phase)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	stdjson "encoding/json/v2"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -593,6 +594,65 @@ func TestDestructiveRecoveryRetriesLeaseContention(t *testing.T) {
 				t.Fatalf("recovery did not resume its pinned phase after Lease release: status=%+v steps=%v", stored.Status, steps.phases)
 			}
 		})
+	}
+}
+
+func TestInstallationYieldsToExecutingRecovery(t *testing.T) {
+	now := time.Unix(10000, 0).UTC()
+	installation := scheduledBackupInstallation(now)
+	installation.Spec.Upgrade.Backup.Schedule = ""
+	request := recoveryRequest(now)
+	request.Namespace = installation.Namespace
+	request.Spec.InstallationRef = installation.Name
+	request.Status = operatorv1alpha1.KubeOVNRecoveryRequestStatus{
+		Phase: operatorv1alpha1.RecoveryPhaseExecuting,
+		Plan:  &operatorv1alpha1.RecoveryPlanStatus{InstallationUID: installation.UID},
+	}
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
+	lifecycleFake := &lifecycleCoordinatorFake{reader: kube}
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: controllerScheme(t), Clock: func() time.Time { return now }, Leases: lease.New(kube), Lifecycle: lifecycleFake, Renderer: objectRenderer{}}
+	key := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(installation)}
+	result, err := reconciler.Reconcile(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleFake.resume != 0 || result.RequeueAfter <= 0 {
+		t.Fatalf("installation competed with active recovery: resumes=%d result=%+v", lifecycleFake.resume, result)
+	}
+	stored := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), key.NamespacedName, stored); err != nil {
+		t.Fatal(err)
+	}
+	version := stored.ResourceVersion
+	if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+		t.Fatal(err)
+	}
+	if err := kube.Get(t.Context(), key.NamespacedName, stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.ResourceVersion != version {
+		t.Fatal("unchanged recovery wait rewrote installation status and generated another event")
+	}
+	called := false
+	err = reconciler.withInstallationLease(t.Context(), installation, func(context.Context) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, errRecoveryExecuting) || called {
+		t.Fatalf("Lease admission did not recheck active recovery: err=%v called=%t", err, called)
+	}
+	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(request), request); err != nil {
+		t.Fatal(err)
+	}
+	request.Status.Phase = operatorv1alpha1.RecoveryPhaseSucceeded
+	if err := kube.Status().Update(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleFake.resume != 1 {
+		t.Fatal("terminal recovery did not release normal installation reconciliation")
 	}
 }
 
