@@ -535,10 +535,10 @@ for _ in $(seq 1 30); do
       ovs-appctl -t /var/run/ovn/ovnsb_db.ctl cluster/status OVN_Southbound 2>/dev/null |
       awk '$1 == "Role:" {print $2}' || true)
     printf '%s\t%s\t%s\n' "${candidate}" "${role_nb}" "${role_sb}" >>"${automatic_roles_file}"
-  done < <(python3 -c 'import json,sys; print("\\n".join(item["name"] for item in json.load(open(sys.argv[1]))))' "${automatic_candidates_file}")
+  done < <(python3 -c 'import json,sys; print("\n".join(item["name"] for item in json.load(open(sys.argv[1]))))' "${automatic_candidates_file}")
   automatic_target_pod=$(python3 -c 'import sys
 for line in open(sys.argv[1]):
-    name, nb, sb = line.rstrip("\\n").split("\\t")
+    name, nb, sb = line.rstrip("\n").split("\t")
     if nb == "follower" and sb == "follower":
         print(name)
         break
