@@ -22,13 +22,22 @@ spec:
         openAPIV3Schema:
           type: object
           required: [spec]
+          x-kubernetes-validations:
+            - rule: "!has(self.status) || self.status.phase != 'Completed' || (has(oldSelf.status) && oldSelf.status.phase in ['Reserved', 'Completed'])"
+              message: Completion requires a previously recorded reservation.
+            - rule: '!has(oldSelf.status) || !has(oldSelf.status.phase) || has(self.status)'
+              message: A recorded reservation cannot be cleared.
+            - rule: '!has(self.status) || self.status.reservedAt < self.spec.expiresAt'
+              message: Reservation must precede approval expiry.
           properties:
             spec:
               type: object
               required: [installationRef, installationGeneration, mode, sourceVersion, targetVersion, backupRef, topologyDigest, chartDigest, reason, expiresAt]
               x-kubernetes-validations:
-                - rule: self == oldSelf
+                - rule: self.installationRef == oldSelf.installationRef && self.installationGeneration == oldSelf.installationGeneration && self.mode == oldSelf.mode && self.sourceVersion == oldSelf.sourceVersion && self.targetVersion == oldSelf.targetVersion && self.backupRef == oldSelf.backupRef && self.topologyDigest == oldSelf.topologyDigest && self.chartDigest == oldSelf.chartDigest && self.reason == oldSelf.reason && self.expiresAt == oldSelf.expiresAt
                   message: The recovery approval decision is immutable.
+                - rule: has(self.requestRef) == has(oldSelf.requestRef) && (!has(self.requestRef) || self.requestRef == oldSelf.requestRef)
+                  message: The optional request binding is immutable.
                 - rule: '!has(self.requestRef) || (self.requestRef.name != "" && self.requestRef.uid != "" && self.requestRef.generation > 0)'
                   message: requestRef must contain a name, UID and positive generation.
                 - rule: '!oldSelf.revoked || self.revoked'
@@ -51,16 +60,28 @@ spec:
                 mode: {type: string, enum: [rollback, reconvert, freshBootstrap]}
                 sourceVersion: {type: string, minLength: 1, maxLength: 128}
                 targetVersion: {type: string, minLength: 1, maxLength: 128}
-                backupRef: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
-                topologyDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
-                chartDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                backupRef: {type: string, maxLength: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+                topologyDigest: {type: string, maxLength: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+                chartDigest: {type: string, maxLength: 71, pattern: '^sha256:[0-9a-f]{64}$'}
                 reason: {type: string, minLength: 1, maxLength: 2048, pattern: '\S'}
                 expiresAt: {type: string, format: date-time}
                 revoked: {type: boolean, default: false}
             status:
               type: object
+              required: [phase, decisionDigest, reservedAt]
+              x-kubernetes-validations:
+                - rule: "oldSelf.phase != 'Completed' || self == oldSelf"
+                  message: Completed audit evidence is immutable.
+                - rule: "self.phase == oldSelf.phase || (oldSelf.phase == 'Reserved' && self.phase == 'Completed')"
+                  message: An approval can only progress from Reserved to Completed.
+                - rule: self.decisionDigest == oldSelf.decisionDigest && self.reservedAt == oldSelf.reservedAt
+                  message: The reservation identity and timestamp are immutable.
+                - rule: "self.phase == 'Completed' ? has(self.completedAt) : !has(self.completedAt)"
+                  message: Only completed approvals may have completion evidence.
+                - rule: '!has(self.completedAt) || self.completedAt >= self.reservedAt'
+                  message: Completion must follow reservation.
               properties:
-                phase: {type: string, enum: [Reserved, Completed]}
-                decisionDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                phase: {type: string, maxLength: 9, enum: [Reserved, Completed]}
+                decisionDigest: {type: string, maxLength: 71, pattern: '^sha256:[0-9a-f]{64}$'}
                 reservedAt: {type: string, format: date-time}
                 completedAt: {type: string, format: date-time}

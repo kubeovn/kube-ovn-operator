@@ -181,6 +181,9 @@ func validRecoveryApprovalMode(mode string) bool {
 }
 
 func recoveryDecisionDigest(decision operatorv1alpha1.RecoveryApprovalSpec) (string, error) {
+	// Revocation closes admission without changing the reserved decision identity.
+	// Normalizing false also preserves digests recorded before revocation.
+	decision.Revoked = false
 	data, err := json.Marshal(decision, json.Deterministic(true))
 	if err != nil {
 		return "", err
@@ -190,14 +193,22 @@ func recoveryDecisionDigest(decision operatorv1alpha1.RecoveryApprovalSpec) (str
 
 func reservedRecovery(record *operatorv1alpha1.KubeOVNRecoveryApproval, digest string) error {
 	status := record.Status
-	if status.Phase != operatorv1alpha1.RecoveryApprovalReserved || status.DecisionDigest != digest || status.ReservedAt == nil || status.ReservedAt.IsZero() || status.ReservedAt.Before(&record.CreationTimestamp) || status.CompletedAt != nil {
+	if status.Phase != operatorv1alpha1.RecoveryApprovalReserved || status.CompletedAt != nil {
 		return errors.New("recovery approval is not reserved for this immutable operation")
+	}
+	return recoveryReservation(record, digest)
+}
+
+func recoveryReservation(record *operatorv1alpha1.KubeOVNRecoveryApproval, digest string) error {
+	status := record.Status
+	if status.DecisionDigest != digest || status.ReservedAt == nil || status.ReservedAt.IsZero() || status.ReservedAt.Before(&record.CreationTimestamp) || !status.ReservedAt.Before(&record.Spec.ExpiresAt) {
+		return errors.New("recovery approval reservation audit does not bind this immutable operation")
 	}
 	return nil
 }
 
 func completedRecovery(record *operatorv1alpha1.KubeOVNRecoveryApproval, digest string) error {
-	if err := reservedRecovery(record, digest); err != nil && record.Status.Phase != operatorv1alpha1.RecoveryApprovalCompleted {
+	if err := recoveryReservation(record, digest); err != nil {
 		return err
 	}
 	if record.Status.Phase != operatorv1alpha1.RecoveryApprovalCompleted || record.Status.CompletedAt == nil || record.Status.CompletedAt.IsZero() || record.Status.CompletedAt.Before(record.Status.ReservedAt) {

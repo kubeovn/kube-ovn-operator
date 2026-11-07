@@ -108,11 +108,43 @@ func recoveryApprovalMode(ctx context.Context, kube client.Client, installation 
 				s.RequestRef.UID = "other-request"
 			}
 		},
+		"request name": func(s *api.RecoveryApprovalSpec) {
+			if s.RequestRef == nil {
+				s.RequestRef = &api.RecoveryRequestReference{Name: "unexpected", UID: "unexpected", Generation: 1}
+			} else {
+				s.RequestRef.Name += "-changed"
+			}
+		},
+		"request generation": func(s *api.RecoveryApprovalSpec) {
+			if s.RequestRef == nil {
+				s.RequestRef = &api.RecoveryRequestReference{Name: "unexpected", UID: "unexpected", Generation: 1}
+			} else {
+				s.RequestRef.Generation++
+			}
+		},
 	} {
 		attempt := record.DeepCopy()
 		mutate(&attempt.Spec)
 		if err := kube.Update(ctx, attempt); !apierrors.IsInvalid(err) {
 			return fmt.Errorf("decision %s was not immutable: %v", name, err)
+		}
+	}
+	if record.Spec.RequestRef != nil {
+		attempt := record.DeepCopy()
+		attempt.Spec.RequestRef = nil
+		if err := kube.Update(ctx, attempt); !apierrors.IsInvalid(err) {
+			return fmt.Errorf("request binding was removed: %v", err)
+		}
+	}
+	for name, status := range map[string]api.RecoveryApprovalStatus{
+		"missing digest": {Phase: api.RecoveryApprovalReserved, ReservedAt: new(metav1.Now())},
+		"missing time":   {Phase: api.RecoveryApprovalReserved, DecisionDigest: "sha256:" + strings.Repeat("a", 64)},
+		"at expiry":      {Phase: api.RecoveryApprovalReserved, DecisionDigest: "sha256:" + strings.Repeat("a", 64), ReservedAt: new(record.Spec.ExpiresAt)},
+	} {
+		attempt := record.DeepCopy()
+		attempt.Status = status
+		if err := kube.Status().Update(ctx, attempt); !apierrors.IsInvalid(err) {
+			return fmt.Errorf("malformed reservation %s was accepted: %v", name, err)
 		}
 	}
 	// A well-shaped completion must not skip its separate reservation write.
@@ -165,6 +197,11 @@ func recoveryApprovalMode(ctx context.Context, kube client.Client, installation 
 				"digest":                    func(s *api.RecoveryApprovalStatus) { s.DecisionDigest = "sha256:" + strings.Repeat("d", 64) },
 				"reserved time":             func(s *api.RecoveryApprovalStatus) { s.ReservedAt = new(metav1.NewTime(s.ReservedAt.Add(time.Second))) },
 				"early completion evidence": func(s *api.RecoveryApprovalStatus) { s.CompletedAt = new(metav1.Now()) },
+				"missing completion time":   func(s *api.RecoveryApprovalStatus) { s.Phase = api.RecoveryApprovalCompleted },
+				"completion before reservation": func(s *api.RecoveryApprovalStatus) {
+					s.Phase = api.RecoveryApprovalCompleted
+					s.CompletedAt = new(metav1.NewTime(s.ReservedAt.Add(-time.Second)))
+				},
 			} {
 				attempt := current.DeepCopy()
 				mutate(&attempt.Status)

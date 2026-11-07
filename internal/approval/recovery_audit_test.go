@@ -42,12 +42,21 @@ func withRecoveryAuditProvider(t *testing.T, record *api.KubeOVNRecoveryApproval
 }
 
 func TestRecoveryCompletionRejectsMalformedAudit(t *testing.T) {
-	for name, mutate := range map[string]func(*api.RecoveryApprovalStatus){
-		"missing digest":       func(s *api.RecoveryApprovalStatus) { s.DecisionDigest = "" },
-		"wrong digest":         func(s *api.RecoveryApprovalStatus) { s.DecisionDigest = "sha256:" + strings.Repeat("f", 64) },
-		"missing reservation":  func(s *api.RecoveryApprovalStatus) { s.ReservedAt = nil },
-		"zero reservation":     func(s *api.RecoveryApprovalStatus) { s.ReservedAt = new(metav1.Time) },
-		"reservation predates": func(s *api.RecoveryApprovalStatus) { s.ReservedAt = new(metav1.NewTime(time.Unix(1, 0))) },
+	for name, mutate := range map[string]func(*api.KubeOVNRecoveryApproval){
+		"missing digest":        func(r *api.KubeOVNRecoveryApproval) { r.Status.DecisionDigest = "" },
+		"wrong digest":          func(r *api.KubeOVNRecoveryApproval) { r.Status.DecisionDigest = "sha256:" + strings.Repeat("f", 64) },
+		"missing reservation":   func(r *api.KubeOVNRecoveryApproval) { r.Status.ReservedAt = nil },
+		"zero reservation":      func(r *api.KubeOVNRecoveryApproval) { r.Status.ReservedAt = new(metav1.Time) },
+		"reservation predates":  func(r *api.KubeOVNRecoveryApproval) { r.Status.ReservedAt = new(metav1.NewTime(time.Unix(1, 0))) },
+		"reservation at expiry": func(r *api.KubeOVNRecoveryApproval) { r.Status.ReservedAt = new(r.Spec.ExpiresAt) },
+		"reservation after expiry": func(r *api.KubeOVNRecoveryApproval) {
+			r.Status.ReservedAt = new(metav1.NewTime(r.Spec.ExpiresAt.Add(time.Second)))
+		},
+		"missing completion": func(r *api.KubeOVNRecoveryApproval) { r.Status.CompletedAt = nil },
+		"zero completion":    func(r *api.KubeOVNRecoveryApproval) { r.Status.CompletedAt = new(metav1.Time) },
+		"completion predates reservation": func(r *api.KubeOVNRecoveryApproval) {
+			r.Status.CompletedAt = new(metav1.NewTime(r.Status.ReservedAt.Add(-time.Second)))
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			record, binding, ref := recoveryApprovalRecord()
@@ -57,7 +66,7 @@ func TestRecoveryCompletionRejectsMalformedAudit(t *testing.T) {
 			}
 			now := metav1.Now()
 			record.Status = api.RecoveryApprovalStatus{Phase: api.RecoveryApprovalCompleted, DecisionDigest: digest, ReservedAt: &now, CompletedAt: &now}
-			mutate(&record.Status)
+			mutate(record)
 			withRecoveryAuditProvider(t, record, func(ctx context.Context, _ client.Client, provider *RecoveryProvider) {
 				if err := provider.Complete(ctx, ref, binding); err == nil {
 					t.Fatal("malformed completion audit was accepted")
@@ -93,6 +102,32 @@ func TestRecoveryCompletionRecordsConvergenceAfterRevocation(t *testing.T) {
 		}
 		if current.Status.Phase != api.RecoveryApprovalCompleted || current.Status.DecisionDigest != digest {
 			t.Fatalf("completion changed the reserved decision: %+v", current.Status)
+		}
+	})
+}
+
+func TestRecoveryCompletionRecordsConvergenceAfterExpiry(t *testing.T) {
+	record, binding, ref := recoveryApprovalRecord()
+	now := time.Now()
+	record.CreationTimestamp = metav1.NewTime(now.Add(-3 * time.Hour))
+	record.Spec.ExpiresAt = metav1.NewTime(now.Add(-time.Hour))
+	digest, err := recoveryDecisionDigest(record.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Status = api.RecoveryApprovalStatus{
+		Phase: api.RecoveryApprovalReserved, DecisionDigest: digest,
+		ReservedAt: new(metav1.NewTime(now.Add(-2 * time.Hour))),
+	}
+	withRecoveryAuditProvider(t, record, func(ctx context.Context, _ client.Client, provider *RecoveryProvider) {
+		if err := provider.Reserve(ctx, ref, binding); err == nil {
+			t.Fatal("expired approval admitted more writes")
+		}
+		if err := provider.Complete(ctx, ref, binding); err != nil {
+			t.Fatalf("expiry prevented recording an already converged restore: %v", err)
+		}
+		if err := provider.Complete(ctx, ref, binding); err != nil {
+			t.Fatalf("completed audit could not be retried after expiry: %v", err)
 		}
 	})
 }
