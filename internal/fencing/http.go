@@ -71,13 +71,33 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if request.Method == http.MethodGet && request.URL.Path == ReadyPath {
+		var expected *lease.FenceToken
+		for _, header := range []string{"X-Kube-OVN-Installation-UID", "X-Kube-OVN-Lease-UID", "X-Kube-OVN-Fence-Scope", "X-Kube-OVN-Fence-Holder", "X-Kube-OVN-Fence-Epoch"} {
+			if request.Header.Get(header) != "" {
+				token, err := tokenFromHeaders(request)
+				if err != nil {
+					writeResponse(writer, http.StatusBadRequest, Response{Code: "invalid_fence", Message: err.Error()})
+					return
+				}
+				expected = &token
+				break
+			}
+		}
 		if h == nil || h.Gate == nil {
 			writeHealthResponse(writer, http.StatusServiceUnavailable)
 			return
 		}
-		_, armed := h.Gate.Current()
+		current, armed := h.Gate.Current()
 		if !armed {
-			writeHealthResponse(writer, http.StatusServiceUnavailable)
+			if expected != nil {
+				writeResponse(writer, http.StatusServiceUnavailable, Response{Code: "fence_not_armed", Message: ErrNotArmed.Error()})
+			} else {
+				writeHealthResponse(writer, http.StatusServiceUnavailable)
+			}
+			return
+		}
+		if expected != nil && current != *expected {
+			writeResponse(writer, http.StatusConflict, Response{Code: "stale_fence", Message: ErrStale.Error()})
 			return
 		}
 		writeHealthResponse(writer, http.StatusOK)

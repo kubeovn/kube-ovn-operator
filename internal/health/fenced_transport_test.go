@@ -2,19 +2,91 @@ package health
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"encoding/json/v2"
 	"github.com/kubeovn/kube-ovn-operator/internal/fencing"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
 )
+
+func TestFenceHTTPClientLeavesRestoreInputUntouchedWhenReadinessTimesOut(t *testing.T) {
+	var restores atomic.Int32
+	handler := &fencing.Handler{Gate: new(fencing.Gate), Restore: func(context.Context, string, io.Reader) error {
+		restores.Add(1)
+		return nil
+	}}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	remote, err := NewFenceHTTPClient(server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	source := bytes.NewBufferString("verified-native-backup")
+	token := lease.FenceToken{InstallationUID: "installation", LeaseUID: "lease", Scope: lease.Central, Holder: "holder", Epoch: 4}
+	err = remote.RestoreFenced(ctx, "default", "central-0", "ovn-central", "OVN_Northbound", source, token)
+	if !errors.Is(err, context.DeadlineExceeded) || restores.Load() != 0 || source.String() != "verified-native-backup" {
+		t.Fatalf("readiness timeout sent restore input: err=%v calls=%d remaining=%q", err, restores.Load(), source.String())
+	}
+}
+
+func TestFenceHTTPClientWaitsForCurrentLeaseBeforeRestore(t *testing.T) {
+	for _, armed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("previously-armed=%t", armed), func(t *testing.T) {
+			token := lease.FenceToken{InstallationUID: "installation", LeaseUID: "lease", Scope: lease.Central, Holder: "new-holder", Epoch: 4}
+			gate := new(fencing.Gate)
+			if armed {
+				previous := token
+				previous.Holder = "previous-holder"
+				previous.Epoch--
+				if err := gate.Arm(previous); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var probes, restores atomic.Int32
+			handler := &fencing.Handler{Gate: gate, Restore: func(_ context.Context, _ string, source io.Reader) error {
+				restores.Add(1)
+				data, err := io.ReadAll(source)
+				if string(data) != "verified-native-backup" {
+					return fmt.Errorf("restore source consumed before readiness: %q", data)
+				}
+				return err
+			}}
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				handler.ServeHTTP(writer, request)
+				if request.URL.Path == fencing.ReadyPath && probes.Add(1) == 1 {
+					// Model the watcher observing the new holder after the first
+					// readiness observation, without admitting a database write.
+					if err := gate.Arm(token); err != nil {
+						t.Error(err)
+					}
+				}
+			}))
+			defer server.Close()
+			remote, err := NewFenceHTTPClient(server.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := remote.RestoreFenced(t.Context(), "default", "central-0", "ovn-central", "OVN_Northbound", bytes.NewBufferString("verified-native-backup"), token); err != nil {
+				t.Fatal(err)
+			}
+			if probes.Load() < 2 || restores.Load() != 1 {
+				t.Fatalf("restore did not wait for the current holder: probes=%d restores=%d", probes.Load(), restores.Load())
+			}
+		})
+	}
+}
 
 func TestFenceHTTPClientSendsExactTokenAndCommand(t *testing.T) {
 	token := lease.FenceToken{InstallationUID: "installation", LeaseUID: "lease", Scope: lease.Central, Holder: "holder", Epoch: 4}
@@ -150,6 +222,10 @@ func TestFenceHTTPClientRejectsUnarmedReadiness(t *testing.T) {
 func TestFenceHTTPClientStreamsRestoreWithToken(t *testing.T) {
 	token := lease.FenceToken{InstallationUID: "installation", LeaseUID: "lease", Scope: lease.Central, Holder: "holder", Epoch: 4}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && request.URL.Path == "/fence/central-0"+fencing.ReadyPath {
+			_, _ = writer.Write([]byte("ok\n"))
+			return
+		}
 		if request.URL.Path != "/fence/central-0"+fencing.RestorePath || request.Header.Get("X-Kube-OVN-Database") != "OVN_Southbound" {
 			t.Fatalf("unexpected restore request: %s %s", request.Method, request.URL.Path)
 		}
