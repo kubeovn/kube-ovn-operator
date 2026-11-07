@@ -28,6 +28,14 @@ authority.
 The `revoked` field can be changed from `false` to `true` once. Revocation
 cannot be reversed. An expired or revoked approval cannot start a new operation.
 
+The executor revalidates admission when entering `Restoring`, after the durable
+`Quiescing` phase. A reservation does not bypass expiry, revocation, approval
+UID or binding checks after a controller restart. Without an approval, live
+quorum must still be healthy at this boundary. Failed revalidation invokes no
+database restore and leaves the workloads quiesced for explicit intervention.
+This boundary does not cancel an already submitted restore or provide atomic
+revocation across the sequential NB/SB writes.
+
 ## Lifecycle
 
 The caller must store the approval name and UID in the admitted rollback or
