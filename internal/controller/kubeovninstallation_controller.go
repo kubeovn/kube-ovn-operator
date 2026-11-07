@@ -2141,7 +2141,7 @@ func (r *KubeOVNInstallationReconciler) reconcileRollback(ctx context.Context, i
 	next, stepErr := r.runRollbackStep(ctx, installation, rollbackPlan, rollback.Phase)
 	if stepErr != nil {
 		if errors.Is(stepErr, ErrRollbackInProgress) {
-			rollback.Reason = "rollback operation accepted; waiting for workload and OVN verification"
+			rollback.Reason = stepErr.Error()
 			if err := r.persistRollbackStatus(ctx, installation, planner.Plan{Phase: operatorv1alpha1.PhaseUpgrading, Step: "Rollback"}, current); err != nil {
 				return reconcile.Result{}, err
 			}

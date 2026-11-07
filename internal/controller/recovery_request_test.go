@@ -533,6 +533,38 @@ func TestDestructiveRecoveryPersistsRestoreFailureAndStopsRetrying(t *testing.T)
 	}
 }
 
+func TestDestructiveRecoveryPersistsPendingVerificationReason(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	scheme := controllerScheme(t)
+	installation := recoveryInstallation()
+	installation.Status.ObservedVersion = installation.Spec.Version
+	installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{
+		ID: testBackupPairID(), Version: installation.Status.ObservedVersion, TopologyDigest: installation.Status.Topology.Inventory.Digest,
+		DatabaseRefs: testBackupPairRefs(), CompletedAt: metav1.NewTime(now),
+	}
+	request := recoveryRequest(now)
+	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
+	request.Spec.TargetMemberRef = ""
+	request.Spec.BackupRef = installation.Status.LastBackup.ID
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
+	executor := &rollbackExecutorFake{failPhase: operatorv1alpha1.RollbackPhaseVerifying, failErr: fmt.Errorf("%w: northd NorthdUnhealthy: northd disconnected", ErrRollbackInProgress)}
+	lifecycleExecutor := &LifecycleRecoveryExecutor{Client: kube, Leases: lease.New(kube), Topology: &lifecycleTopologyFake{retained: additionTopologyFixture()}, Lifecycle: &lifecycleCoordinatorFake{reader: kube}, Rollback: executor}
+	reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }, Executor: lifecycleExecutor}
+	key := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)}
+	for range 6 {
+		if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := new(operatorv1alpha1.KubeOVNRecoveryRequest)
+	if err := kube.Get(t.Context(), key.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != operatorv1alpha1.RecoveryPhaseExecuting || got.Status.Execution.Phase != operatorv1alpha1.RollbackPhaseVerifying || !strings.Contains(got.Status.Execution.Reason, "northd disconnected") {
+		t.Fatalf("pending verification lost its durable retryable reason: %+v", got.Status)
+	}
+}
+
 func TestDestructiveRecoveryRetriesLeaseContention(t *testing.T) {
 	for _, phase := range []operatorv1alpha1.RollbackPhase{operatorv1alpha1.RollbackPhaseQuiescing, operatorv1alpha1.RollbackPhaseRestoring, operatorv1alpha1.RollbackPhaseWorkloads, operatorv1alpha1.RollbackPhaseVerifying} {
 		t.Run(string(phase), func(t *testing.T) {

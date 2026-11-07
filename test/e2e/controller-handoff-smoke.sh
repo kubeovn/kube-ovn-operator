@@ -969,6 +969,12 @@ echo "automatic lifecycle handoff authorization consumed"
 if ! python3 test/e2e/fence-takeover-restore.py "${fence_dir}" controller-recovery "${backup_dir}"; then
   kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
   kubectl get kubeovnrecoveryrequests -n kube-ovn-operator-system -o yaml || true
+  kubectl get deployments,statefulsets -n kube-ovn-operator-system -o yaml || true
+  while IFS= read -r pod; do
+    for operation in status nb-connection-status sb-connection-status; do
+      kubectl exec -n kube-ovn-operator-system "${pod}" -c ovn-central -- ovn-appctl --timeout=5 -t ovn-northd "${operation}" || true
+    done
+  done < <(kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
   cat "${test_dir}/operator.log"
   exit 1
 fi

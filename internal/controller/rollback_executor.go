@@ -195,7 +195,7 @@ func (e *KubernetesRollbackExecutor) Step(ctx context.Context, plan RollbackPlan
 			return phase, fmt.Errorf("observe rollback workloads: %w", err)
 		}
 		if !report.Ready {
-			return phase, ErrRollbackInProgress
+			return phase, fmt.Errorf("%w: workloads: %s", ErrRollbackInProgress, report.Message)
 		}
 		if e.OVN != nil {
 			ovnReport, err := e.OVN.Observe(ctx, installation)
@@ -203,13 +203,16 @@ func (e *KubernetesRollbackExecutor) Step(ctx context.Context, plan RollbackPlan
 				return phase, fmt.Errorf("observe OVN after rollback: %w", err)
 			}
 			if !ovnReport.Ready {
-				return phase, ErrRollbackInProgress
+				return phase, fmt.Errorf("%w: OVN %s: %s", ErrRollbackInProgress, ovnReport.Reason, ovnReport.Message)
 			}
 		}
 		if e.Runtime != nil {
 			runtimeReport := e.Runtime.Observe(ctx, installation)
-			if runtimeReport.Northd.Status != metav1.ConditionTrue || runtimeReport.DataPlane.Status != metav1.ConditionTrue {
-				return phase, ErrRollbackInProgress
+			if runtimeReport.Northd.Status != metav1.ConditionTrue {
+				return phase, fmt.Errorf("%w: northd %s: %s", ErrRollbackInProgress, runtimeReport.Northd.Reason, runtimeReport.Northd.Message)
+			}
+			if runtimeReport.DataPlane.Status != metav1.ConditionTrue {
+				return phase, fmt.Errorf("%w: data plane %s: %s", ErrRollbackInProgress, runtimeReport.DataPlane.Reason, runtimeReport.DataPlane.Message)
 			}
 		}
 		if plan.ApprovalRef != nil {

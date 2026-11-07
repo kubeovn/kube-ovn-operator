@@ -214,7 +214,7 @@ func (e *LifecycleRecoveryExecutor) executeDestructive(ctx context.Context, plan
 			return err
 		}
 		if errors.Is(err, ErrRollbackInProgress) {
-			execution.Reason = "destructive recovery phase accepted; waiting for convergence"
+			execution.Reason = err.Error()
 			if updateErr := e.Client.Status().Update(ctx, request); updateErr != nil {
 				return errors.Join(err, updateErr)
 			}
