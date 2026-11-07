@@ -37,6 +37,33 @@ database restore and leaves the workloads quiesced for explicit intervention.
 This boundary does not cancel an already submitted restore or provide atomic
 revocation across the sequential NB/SB writes.
 
+## Create a request-bound approval while the controller is running
+
+A destructive request can be prepared with `spec.suspend: true`. It remains
+`Pending` with `Accepted=False`, reason `Suspended`, and has no admitted plan or
+execution. It still expires. The normal installation reconciler continues to
+run, and the request cannot acquire recovery authority while suspended.
+
+1. Create the suspended request and read its API-assigned UID and generation
+   `N`, the installation generation, and the verified backup/topology/Chart
+   digests.
+2. Create a `KubeOVNRecoveryApproval` binding that request UID and generation
+   `N+1`. This is the generation of the single spec update that will both attach
+   the approval and resume the request. Pin all other decision fields normally,
+   then read the approval's API-assigned UID.
+3. In one request update, set `approvalRef` to that exact approval name/UID and
+   set `suspend: false`. Include the current request `metadata.resourceVersion`
+   as a precondition. Status-only conflicts can be retried after rereading;
+   a changed request UID or spec generation requires a new approval decision.
+4. Confirm that the resulting API generation matches the approval binding.
+   The controller now records the immutable plan and reserves the approval
+   before restoring.
+
+Suspension cannot be changed after a plan or execution has been recorded. It
+is a preparation gate; cancellation of an admitted operation still follows the
+existing fail-closed recovery contract. Requests that omit `suspend` keep their
+existing immediate admission behavior. `approvedBy` remains audit input only.
+
 ## Lifecycle
 
 The caller must store the approval name and UID in the admitted rollback or
@@ -166,8 +193,16 @@ durable recovery phases. Normal installation reconciliation yields to it and
 rechecks that ownership under the installation Lease before mutations, so
 routine Lease events cannot starve recovery or undo rollout quiescence.
 
-This uses the healthy quorum path and needs no destructive recovery approval.
-It does not establish lost-quorum reconstruction, approval consumption during
+The first restore uses healthy quorum admission. The second creates a suspended
+public request, creates a separate approval bound to its real UID and final
+API generation, and atomically resumes it with the approval's real UID. While
+suspended, it must leave data and rollout state unchanged. The real controller
+must record `Reserved` before restore, reject a late suspension change through
+API validation, and record immutable `Completed` audit after convergence.
+The fixture never writes request execution or approval status itself.
+
+This uses healthy quorum and verifies the public approval consumption path. It
+does not establish lost-quorum reconstruction or approval consumption during
 that failure, a version-changing rollback, or an application write barrier
 across the sequential NB/SB captures.
 

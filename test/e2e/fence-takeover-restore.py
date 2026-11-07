@@ -303,7 +303,7 @@ def controller_state(objects):
             item["spec"].get("updateStrategy")) for item in objects}
 
 
-def create_recovery(name, backup_ref):
+def create_recovery(name, backup_ref, *, suspend=False):
     # Wait for the CRD watch cache before creating a request. A create can
     # precede lazy cache initialization, making its resourceVersion too old
     # for a subsequent watch even when only a few seconds have elapsed.
@@ -313,15 +313,82 @@ def create_recovery(name, backup_ref):
     print(f"Recovery watch cache ready at {cached['metadata']['resourceVersion']} before creating {name}", flush=True)
     request = {"apiVersion": "operator.kubeovn.io/v1alpha1", "kind": "KubeOVNRecoveryRequest",
                "metadata": {"name": name, "namespace": NAMESPACE},
-               "spec": {"installationRef": INSTALLATION, "reason": "Disposable Kind native restore acceptance",
+               "spec": {"suspend": suspend, "installationRef": INSTALLATION, "reason": "Disposable Kind native restore acceptance",
                         "mode": "reconvert", "backupRef": backup_ref, "approvedBy": "kind-e2e-audit",
                         "expiresAt": (datetime.datetime.now(datetime.timezone.utc)
                                       + datetime.timedelta(minutes=15)).isoformat().replace("+00:00", "Z")}}
     return json.loads(kubectl("create", "-f", "-", "-o", "json", data=json.dumps(request).encode()))
 
 
+def approved_recovery(name, backup, installation, fixture, original_state):
+    request = create_recovery(name, backup["id"], suspend=True)
+    uid, generation = request["metadata"]["uid"], request["metadata"]["generation"]
+
+    def suspended():
+        current = resource("kubeovnrecoveryrequest", name)
+        status = current.get("status", {})
+        check(current["metadata"]["uid"] == uid and current["metadata"]["generation"] == generation,
+              "suspended request identity changed")
+        check(not status.get("plan") and not status.get("execution"), "suspended request reached admission")
+        return status.get("phase") == "Pending" and any(
+            c["type"] == "Accepted" and c["status"] == "False" and c["reason"] == "Suspended"
+            for c in status.get("conditions", []))
+
+    eventually("controller holds the new request before plan admission", suspended)
+    decision = {"apiVersion": "operator.kubeovn.io/v1alpha1", "kind": "KubeOVNRecoveryApproval",
+                "metadata": {"name": name + "-approval", "namespace": NAMESPACE},
+                "spec": {"installationRef": {"name": INSTALLATION, "uid": fixture.installation_uid},
+                         "installationGeneration": installation["metadata"]["generation"],
+                         "requestRef": {"name": name, "uid": uid, "generation": generation + 1},
+                         "mode": request["spec"]["mode"], "sourceVersion": installation["status"]["observedVersion"],
+                         "targetVersion": installation["spec"]["version"], "backupRef": backup["id"],
+                         "topologyDigest": backup["topologyDigest"], "chartDigest": installation["spec"]["chart"]["digest"],
+                         "reason": "Disposable Kind public approval consumption with healthy quorum",
+                         "expiresAt": request["spec"]["expiresAt"]}}
+    try:
+        approval = json.loads(kubectl("create", "-f", "-", "-o", "json", data=json.dumps(decision).encode()))
+    except subprocess.CalledProcessError as error:
+        raise AssertionError("RecoveryApproval creation failed: " + error.stderr.decode(errors="replace")) from error
+    check(not approval.get("status"), "new approval already has audit state")
+    # Approval creation alone must not admit a request that has not been resumed.
+    time.sleep(3)
+    check(suspended(), "request did not remain suspended while approval was created")
+    check(controller_state(controllers(fixture)) == original_state, "suspended request changed rollout state")
+    for database, stem, table in DATABASES:
+        fixture.wait_marker(database, stem, table, "controller-changed")
+    reference = {"name": approval["metadata"]["name"], "uid": approval["metadata"]["uid"]}
+    for attempt in range(5):
+        current = resource("kubeovnrecoveryrequest", name)
+        check(current["metadata"]["uid"] == uid and current["metadata"]["generation"] == generation
+              and current["spec"]["suspend"], "request changed before approval handoff")
+        patch = {"metadata": {"resourceVersion": current["metadata"]["resourceVersion"]},
+                 "spec": {"suspend": False, "approvalRef": reference}}
+        try:
+            resumed = json.loads(kubectl("patch", "kubeovnrecoveryrequest", name, "--type=merge",
+                                        "-p", json.dumps(patch), "-o", "json"))
+            break
+        except subprocess.CalledProcessError as error:
+            if b"Conflict" not in error.stderr or attempt == 4:
+                raise
+    check(resumed["metadata"]["uid"] == uid
+          and resumed["metadata"]["generation"] == approval["spec"]["requestRef"]["generation"]
+          and resumed["spec"]["approvalRef"] == reference, "atomic resume did not match the approved generation")
+    print("Controller approval handoff: real request UID and final API generation bound before admission", flush=True)
+    return resumed, approval
+
+
+def assert_suspension_locked(request):
+    try:
+        kubectl("patch", "kubeovnrecoveryrequest", request["metadata"]["name"], "--type=merge",
+                "-p", json.dumps({"spec": {"suspend": True}}))
+    except subprocess.CalledProcessError as error:
+        check(b"Suspension cannot change" in error.stderr, "suspension change failed for an unrelated reason")
+    else:
+        raise AssertionError("admitted request allowed suspension to change")
+
+
 def recovery_statuses(request, timeout=240):
-    # Start from the create response's resourceVersion: even phases that finish
+    # Start from the create/resume response resourceVersion: even phases that finish
     # before this watch connects remain observable from the API event history.
     query = urllib.parse.urlencode({"watch": "true", "resourceVersion": request["metadata"]["resourceVersion"],
                                     "fieldSelector": "metadata.name=" + request["metadata"]["name"],
@@ -416,7 +483,12 @@ def run_controller_recovery(certificate_dir, backup_dir):
                 leader = next(p for p in fixture.endpoints if fixture.status(p, database, stem)[0]["Role"] == "leader")
                 fixture.write_marker(leader, database, stem, table, "controller-changed")
         name = "controller-native-restore" + ("-repeat" if attempt else "")
-        request = create_recovery(name, backup["id"])
+        approval = None
+        if attempt:
+            request, approval = approved_recovery(name, backup, installation, fixture, original_state)
+        else:
+            request = create_recovery(name, backup["id"])
+        reserved_audit = None
         seen = set()
         plan = None
         with contextlib.closing(recovery_statuses(request)) as statuses:
@@ -431,11 +503,24 @@ def run_controller_recovery(certificate_dir, backup_dir):
                               and plan["databaseRefs"] == backup["databaseRefs"]
                               and plan["topologyDigest"] == backup["topologyDigest"], "recovery plan lost its admitted bindings")
                     check(status["plan"] == plan, "immutable recovery plan changed during execution")
+                    if approval:
+                        check(plan.get("approvalRef") == request["spec"]["approvalRef"]
+                              and plan["requestGeneration"] == request["metadata"]["generation"],
+                              "controller plan lost its independent approval binding")
                 phase = status.get("execution", {}).get("phase")
                 if phase and phase not in seen:
                     seen.add(phase)
                     print(f"Controller recovery phase: {phase}", flush=True)
                 if phase == "Restoring":
+                    if approval and reserved_audit is None:
+                        reserved = resource("kubeovnrecoveryapproval", approval["metadata"]["name"])
+                        reserved_audit = reserved.get("status", {})
+                        check(reserved["metadata"]["uid"] == approval["metadata"]["uid"]
+                              and reserved_audit.get("phase") == "Reserved"
+                              and re.fullmatch(r"sha256:[0-9a-f]{64}", reserved_audit.get("decisionDigest", ""))
+                              and reserved_audit.get("reservedAt") and not reserved_audit.get("completedAt"),
+                              "controller restored without a pinned approval reservation")
+                        assert_suspension_locked(request)
                     for item in controllers(fixture):
                         annotations = item["metadata"].get("annotations", {})
                         check(annotations.get("operator.kubeovn.io/rollback-quiesced") == plan["digest"],
@@ -467,6 +552,17 @@ def run_controller_recovery(certificate_dir, backup_dir):
                        for kind, expected in (("Ready", "True"), ("Degraded", "False")))
 
         eventually("routine installation reconciliation returns to Ready after recovery", installation_ready)
+        if approval:
+            completed = resource("kubeovnrecoveryapproval", approval["metadata"]["name"])
+            audit = completed.get("status", {})
+            check(reserved_audit and completed["metadata"]["uid"] == approval["metadata"]["uid"]
+                  and audit.get("phase") == "Completed" and audit.get("completedAt")
+                  and audit["decisionDigest"] == reserved_audit["decisionDigest"]
+                  and audit["reservedAt"] == reserved_audit["reservedAt"], "controller did not consume its reserved approval")
+            time.sleep(3)
+            check(resource("kubeovnrecoveryapproval", approval["metadata"]["name"])["metadata"]["resourceVersion"]
+                  == completed["metadata"]["resourceVersion"], "terminal recovery rewrote approval audit")
+            print("Controller approval-backed recovery succeeded: suspended request bound to real UID/generation; controller recorded Reserved -> Completed; healthy quorum", flush=True)
         print("Controller RecoveryRequest succeeded: rejected foreign backup; restored NB/SB snapshot on all three nodes; rollout state and membership preserved; installation Ready", flush=True)
 
 

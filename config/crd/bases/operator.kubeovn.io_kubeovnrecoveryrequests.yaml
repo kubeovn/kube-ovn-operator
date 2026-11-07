@@ -18,11 +18,15 @@ spec:
         openAPIV3Schema:
           type: object
           required: [spec]
+          x-kubernetes-validations:
+            - rule: '!has(oldSelf.status) || (!has(oldSelf.status.plan) && !has(oldSelf.status.execution)) || self.spec.suspend == oldSelf.spec.suspend'
+              message: Suspension cannot change after a recovery plan is recorded.
           properties:
             spec:
               type: object
               required: [installationRef, reason, mode, approvedBy, expiresAt]
               properties:
+                suspend: {type: boolean, default: false}
                 installationRef: {type: string}
                 reason: {type: string}
                 mode: {type: string, enum: [rejoin, reconvert, freshBootstrap]}

@@ -432,6 +432,9 @@ const (
 )
 
 type KubeOVNRecoveryRequestSpec struct {
+	// Suspend holds a new request before plan admission so its API identity can
+	// be bound to an independent approval. It cannot change after admission.
+	Suspend         bool         `json:"suspend,omitzero"`
 	InstallationRef string       `json:"installationRef"`
 	Reason          string       `json:"reason"`
 	Mode            RecoveryMode `json:"mode"`
@@ -440,9 +443,8 @@ type KubeOVNRecoveryRequestSpec struct {
 	// target from replica count or whichever Pod happens to be available.
 	TargetMemberRef string `json:"targetMemberRef,omitempty"`
 	BackupRef       string `json:"backupRef,omitempty"`
-	// ApprovalRef may authorize destructive recovery only after the executor
-	// proves that live quorum is unavailable. It is never inferred from
-	// approvedBy.
+	// ApprovalRef supplies independent destructive recovery admission when
+	// quorum cannot be established. It is never inferred from approvedBy.
 	ApprovalRef *RecoveryApprovalReference `json:"approvalRef,omitempty"`
 	ApprovedBy  string                     `json:"approvedBy"`
 	ExpiresAt   metav1.Time                `json:"expiresAt"`

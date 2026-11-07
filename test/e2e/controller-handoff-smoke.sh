@@ -44,6 +44,7 @@ kubectl apply \
   -f config/namespace.yaml \
   -f config/crd/bases/operator.kubeovn.io_kubeovninstallations.yaml \
   -f config/crd/bases/operator.kubeovn.io_kubeovnrecoveryrequests.yaml \
+  -f config/crd/bases/operator.kubeovn.io_kubeovnrecoveryapprovals.yaml \
   -f config/crd/bases/operator.kubeovn.io_kubeovnmemberremovalapprovals.yaml \
   -f config/rbac/role.yaml \
   -f config/rbac/service_account.yaml >/dev/null
