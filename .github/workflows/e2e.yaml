@@ -42,6 +42,10 @@ jobs:
         run: make e2e
       - name: Run render, apply and observe integration
         run: bash test/e2e/runtime-smoke.sh
+      - name: Verify replacement fence-agent admission defaults
+        env:
+          WORKLOAD_TEST_NAMESPACE: kube-ovn-operator-system
+        run: go test ./internal/workload -run TestLiveFencedMemberAdmission -count=1 -v
       - name: Verify live operation Lease coordination
         run: go run ./test/e2e/lease-smoke
       - name: Verify member removal approval admission and audit

@@ -228,19 +228,34 @@ func (p *Provisioner) matches(expected, actual client.Object, ref Reference) boo
 // a template or the completed native result producer.
 func matchesPod(expected, actual corev1.PodSpec) bool {
 	if !apiequality.Semantic.DeepDerivative(expected, actual) || actual.HostPID || actual.HostIPC ||
-		len(actual.Containers) != 1 || len(actual.InitContainers) != 0 || len(actual.EphemeralContainers) != 0 || len(actual.Volumes) != len(expected.Volumes) ||
-		actual.ShareProcessNamespace != nil && *actual.ShareProcessNamespace {
+		len(actual.Containers) != len(expected.Containers) || len(actual.InitContainers) != len(expected.InitContainers) || len(actual.EphemeralContainers) != 0 || len(actual.Volumes) != len(expected.Volumes) ||
+		actual.ShareProcessNamespace != nil && *actual.ShareProcessNamespace || actual.SecurityContext == nil || actual.SecurityContext.FSGroup != nil ||
+		len(actual.SecurityContext.SupplementalGroups) != 0 || len(actual.SecurityContext.Sysctls) != 0 {
 		return false
 	}
-	a, e := actual.Containers[0], expected.Containers[0]
-	return len(a.Env) == 0 && len(a.EnvFrom) == 0 && len(a.VolumeDevices) == 0 && len(a.VolumeMounts) == len(e.VolumeMounts) &&
-		reflect.DeepEqual(a.Command, e.Command) && len(a.Args) == 0 && a.WorkingDir == "" && a.Lifecycle == nil &&
-		a.StartupProbe == nil && a.LivenessProbe == nil && a.ReadinessProbe == nil && a.SecurityContext != nil &&
-		(a.SecurityContext.Privileged == nil || !*a.SecurityContext.Privileged) &&
-		(a.SecurityContext.RunAsUser == nil || *a.SecurityContext.RunAsUser == 65532) &&
-		(a.SecurityContext.RunAsGroup == nil || *a.SecurityContext.RunAsGroup == 65532) &&
-		(a.SecurityContext.RunAsNonRoot == nil || *a.SecurityContext.RunAsNonRoot) &&
-		a.SecurityContext.SeccompProfile == nil && a.SecurityContext.ProcMount == nil &&
-		len(a.SecurityContext.Capabilities.Add) == 0 && actual.SecurityContext != nil && actual.SecurityContext.FSGroup == nil &&
-		len(actual.SecurityContext.SupplementalGroups) == 0 && len(actual.SecurityContext.Sysctls) == 0
+	for index, container := range expected.Containers {
+		if !matchesContainer(container, actual.Containers[index]) {
+			return false
+		}
+	}
+	for index, container := range expected.InitContainers {
+		if !matchesContainer(container, actual.InitContainers[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesContainer(e, a corev1.Container) bool {
+	if len(a.Env) != 0 || len(a.EnvFrom) != 0 || len(a.VolumeDevices) != 0 || len(a.VolumeMounts) != len(e.VolumeMounts) ||
+		!reflect.DeepEqual(a.Command, e.Command) || !reflect.DeepEqual(a.Args, e.Args) || a.WorkingDir != "" || a.Lifecycle != nil ||
+		e.StartupProbe == nil && a.StartupProbe != nil || e.LivenessProbe == nil && a.LivenessProbe != nil || e.ReadinessProbe == nil && a.ReadinessProbe != nil ||
+		a.SecurityContext == nil || (a.SecurityContext.Privileged != nil && *a.SecurityContext.Privileged) ||
+		(a.SecurityContext.RunAsUser != nil && *a.SecurityContext.RunAsUser != 65532) ||
+		(a.SecurityContext.RunAsGroup != nil && *a.SecurityContext.RunAsGroup != 65532) ||
+		(a.SecurityContext.RunAsNonRoot != nil && !*a.SecurityContext.RunAsNonRoot) ||
+		a.SecurityContext.SeccompProfile != nil || a.SecurityContext.ProcMount != nil || a.SecurityContext.Capabilities == nil || len(a.SecurityContext.Capabilities.Add) != 0 {
+		return false
+	}
+	return true
 }

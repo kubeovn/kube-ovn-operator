@@ -156,6 +156,7 @@ func main() {
 		if strings.TrimSpace(fenceAgentImage) != "" {
 			fenceAgent = &chart.FenceAgentConfig{Image: fenceAgentImage, ServerTLSSecret: fenceAgentServerTLSSecret, ClientCASecret: fenceAgentClientCASecret, Port: int32(fenceAgentPort)}
 		}
+		lifecycleManager.FenceAgent = fenceAgent
 		reconciler.RendererFactory = func(installation *operatorv1alpha1.KubeOVNInstallation) chart.Renderer {
 			return &chart.HelmRenderer{Name: installation.Name, Namespace: installation.Namespace, Reader: mgr.GetAPIReader(), Mapper: mgr.GetRESTMapper(), Capabilities: caps, FenceAgent: fenceAgent}
 		}

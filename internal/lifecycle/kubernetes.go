@@ -9,6 +9,7 @@ import (
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/approval"
 	"github.com/kubeovn/kube-ovn-operator/internal/backup"
+	"github.com/kubeovn/kube-ovn-operator/internal/fenceagent"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
@@ -21,11 +22,11 @@ import (
 // native backup store, approval provider and preparation/runtime workloads.
 // The store must already be provisioned; this function creates no credentials,
 // storage, permissions or installations. The caller owns its lifetime.
-func NewKubernetes(kube client.Client, installation *api.KubeOVNInstallation, runner health.BackupRunner, store backup.Store, maxAge time.Duration, maxBytes int64) (*Executor, error) {
+func NewKubernetes(kube client.Client, installation *api.KubeOVNInstallation, runner health.BackupRunner, store backup.Store, maxAge time.Duration, maxBytes int64, configs ...*fenceagent.Config) (*Executor, error) {
 	if runner == nil || store == nil || maxAge <= 0 || maxBytes < 1 || maxBytes > 1<<30 {
 		return nil, errors.New("joint lifecycle requires a pod runner and explicit backup store policy")
 	}
-	members, err := workload.New(kube, installation)
+	members, err := workload.New(kube, installation, configs...)
 	if err != nil {
 		return nil, err
 	}

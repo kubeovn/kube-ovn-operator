@@ -17,8 +17,8 @@ import (
 	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/fenceagent"
 	"github.com/kubeovn/kube-ovn-operator/internal/hcp"
-	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
@@ -27,7 +27,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -49,39 +48,8 @@ type HelmRenderer struct {
 	FenceAgent   *FenceAgentConfig
 }
 
-// FenceAgentConfig describes the optional sidecar injected into every
-// rendered ovn-central workload. The sidecar shares the central Pod's OVN
-// socket volume and observes the installation's central operation Lease.
-// Certificate Secrets are referenced by name; their data never enters the
-// rendered values or plan ConfigMap.
-type FenceAgentConfig struct {
-	Image           string
-	ServerTLSSecret string
-	ClientCASecret  string
-	Port            int32
-}
-
-func (c *FenceAgentConfig) validate() error {
-	if c == nil {
-		return nil
-	}
-	_, digest, hasDigest := strings.Cut(strings.TrimSpace(c.Image), "@sha256:")
-	if !hasDigest || digest == "" || len(digest) != 64 {
-		return errors.New("fence-agent image must be digest-pinned")
-	}
-	if _, err := hex.DecodeString(digest); err != nil {
-		return errors.New("fence-agent image must use a hexadecimal sha256 digest")
-	}
-	for name, value := range map[string]string{"server TLS Secret": c.ServerTLSSecret, "client CA Secret": c.ClientCASecret} {
-		if errs := kvalidation.IsDNS1123Subdomain(value); len(errs) != 0 {
-			return fmt.Errorf("fence-agent %s is invalid: %s", name, strings.Join(errs, "; "))
-		}
-	}
-	if c.Port < 1 || c.Port > 65535 {
-		return errors.New("fence-agent port must be between 1 and 65535")
-	}
-	return nil
-}
+// FenceAgentConfig configures the shared central membership fence sidecar.
+type FenceAgentConfig = fenceagent.Config
 
 func (r *HelmRenderer) Render(ctx context.Context, spec operatorv1alpha1.KubeOVNInstallationSpec) (Rendered, error) {
 	values, err := installationValues(spec)
@@ -344,147 +312,28 @@ func (r *HelmRenderer) injectFenceAgent(objects *[]*unstructured.Unstructured) e
 	if r.FenceAgent == nil {
 		return nil
 	}
-	if err := r.FenceAgent.validate(); err != nil {
+	if err := r.FenceAgent.Validate(); err != nil {
 		return err
 	}
 	for _, object := range *objects {
 		if object.GetName() != "ovn-central" || object.GetKind() != "Deployment" && object.GetKind() != "StatefulSet" {
 			continue
 		}
-		if err := injectFenceAgentIntoWorkload(object, *r.FenceAgent, r.Name, r.Namespace); err != nil {
+		if err := fenceagent.Inject(object, *r.FenceAgent, r.Name, r.Namespace); err != nil {
 			return err
 		}
-		serviceAccount := fenceAgentServiceAccount(object)
+		serviceAccount := fenceagent.ServiceAccount(object)
 		if serviceAccount == "" {
 			return errors.New("ovn-central Pod template has no service account for fence-agent Lease access")
 		}
 		*objects = append(*objects,
-			fenceAgentRole(r.Name, r.Namespace),
-			fenceAgentRoleBinding(r.Name, r.Namespace, serviceAccount),
+			fenceagent.Role(r.Name, r.Namespace),
+			fenceagent.RoleBinding(r.Name, r.Namespace, serviceAccount),
+			fenceagent.Account(r.Name, r.Namespace),
 		)
 		return nil
 	}
 	return errors.New("fence-agent sidecar requires an ovn-central Deployment or StatefulSet")
-}
-
-func injectFenceAgentIntoWorkload(object *unstructured.Unstructured, config FenceAgentConfig, installation, namespace string) error {
-	templateSpec, found, err := unstructured.NestedMap(object.Object, "spec", "template", "spec")
-	if err != nil || !found {
-		return errors.New("ovn-central workload has no Pod template")
-	}
-	containers, found, err := unstructured.NestedSlice(templateSpec, "containers")
-	if err != nil || !found || len(containers) == 0 {
-		return errors.New("ovn-central workload has no containers")
-	}
-	var socketVolume string
-	for _, raw := range containers {
-		container, ok := raw.(map[string]any)
-		if !ok || container["name"] != "ovn-central" {
-			continue
-		}
-		mounts, _, _ := unstructured.NestedSlice(container, "volumeMounts")
-		for _, rawMount := range mounts {
-			mount, ok := rawMount.(map[string]any)
-			if ok && mount["mountPath"] == "/var/run/ovn" {
-				socketVolume, _ = mount["name"].(string)
-				break
-			}
-		}
-	}
-	if socketVolume == "" {
-		return errors.New("ovn-central container does not expose /var/run/ovn")
-	}
-	for _, raw := range containers {
-		container, ok := raw.(map[string]any)
-		if ok && container["name"] == "kube-ovn-fence-agent" {
-			return errors.New("ovn-central workload already contains kube-ovn-fence-agent")
-		}
-	}
-	port := int64(config.Port)
-	leaseName := lease.Name(lease.Central, installation)
-	sidecar := map[string]any{
-		"name":    "kube-ovn-fence-agent",
-		"image":   config.Image,
-		"command": []any{"/fence-agent"},
-		"args": []any{
-			"--listen-address=:" + fmt.Sprint(config.Port),
-			"--lease-namespace=" + namespace,
-			"--lease-name=" + leaseName,
-			"--tls-cert-file=/var/run/fence/server/tls.crt",
-			"--tls-key-file=/var/run/fence/server/tls.key",
-			"--tls-client-ca-file=/var/run/fence/client-ca/ca.crt",
-		},
-		"ports": []any{map[string]any{"name": "fence", "containerPort": port, "protocol": "TCP"}},
-		"securityContext": map[string]any{
-			"allowPrivilegeEscalation": false,
-			"capabilities":             map[string]any{"drop": []any{"ALL"}},
-			"readOnlyRootFilesystem":   true,
-			"runAsNonRoot":             true,
-			"runAsUser":                int64(65532),
-			"runAsGroup":               int64(65532),
-		},
-		"volumeMounts": []any{
-			map[string]any{"name": socketVolume, "mountPath": "/var/run/ovn", "readOnly": true},
-			map[string]any{"name": "kube-ovn-fence-server-tls", "mountPath": "/var/run/fence/server", "readOnly": true},
-			map[string]any{"name": "kube-ovn-fence-client-ca", "mountPath": "/var/run/fence/client-ca", "readOnly": true},
-			map[string]any{"name": "kube-ovn-fence-tmp", "mountPath": "/tmp"},
-		},
-		// The fence endpoint requires a client certificate for every TLS
-		// handshake. Kubernetes HTTP probes cannot present one, so use a TCP
-		// probe to check that the mTLS listener is accepting connections.
-		"readinessProbe": map[string]any{"tcpSocket": map[string]any{"port": port}, "periodSeconds": int64(5), "timeoutSeconds": int64(3)},
-		"livenessProbe":  map[string]any{"tcpSocket": map[string]any{"port": port}, "periodSeconds": int64(10), "timeoutSeconds": int64(3)},
-	}
-	templateSpec["containers"] = append(containers, sidecar)
-	volumes, _, err := unstructured.NestedSlice(templateSpec, "volumes")
-	if err != nil {
-		return fmt.Errorf("read ovn-central volumes: %w", err)
-	}
-	volumes = append(volumes,
-		map[string]any{"name": "kube-ovn-fence-server-tls", "secret": map[string]any{"secretName": config.ServerTLSSecret}},
-		map[string]any{"name": "kube-ovn-fence-client-ca", "secret": map[string]any{"secretName": config.ClientCASecret}},
-		map[string]any{"name": "kube-ovn-fence-tmp", "emptyDir": map[string]any{}},
-	)
-	templateSpec["volumes"] = volumes
-	if err := unstructured.SetNestedMap(object.Object, templateSpec, "spec", "template", "spec"); err != nil {
-		return fmt.Errorf("write ovn-central Pod template: %w", err)
-	}
-	return nil
-}
-
-func fenceAgentServiceAccount(object *unstructured.Unstructured) string {
-	templateSpec, _, _ := unstructured.NestedMap(object.Object, "spec", "template", "spec")
-	name, _, _ := unstructured.NestedString(templateSpec, "serviceAccountName")
-	return name
-}
-
-func fenceAgentResourceName(installation string) string {
-	name := "kube-ovn-fence-agent-" + installation
-	if len(name) > 63 {
-		digest := sha256.Sum256([]byte(installation))
-		suffix := "-" + hex.EncodeToString(digest[:])[:8]
-		name = strings.TrimSuffix(name[:63-len(suffix)], "-") + suffix
-	}
-	return name
-}
-
-func fenceAgentRole(installation, namespace string) *unstructured.Unstructured {
-	role := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
-		"metadata": map[string]any{"name": fenceAgentResourceName(installation), "namespace": namespace},
-		"rules":    []any{map[string]any{"apiGroups": []any{"coordination.k8s.io"}, "resources": []any{"leases"}, "verbs": []any{"get", "list", "watch"}}},
-	}}
-	return role
-}
-
-func fenceAgentRoleBinding(installation, namespace, serviceAccount string) *unstructured.Unstructured {
-	binding := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
-		"metadata": map[string]any{"name": fenceAgentResourceName(installation), "namespace": namespace},
-		"roleRef":  map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": fenceAgentResourceName(installation)},
-		"subjects": []any{map[string]any{"kind": "ServiceAccount", "name": serviceAccount, "namespace": namespace}},
-	}}
-	return binding
 }
 
 func (r *HelmRenderer) fetch(ctx context.Context, spec operatorv1alpha1.ChartSpec) ([]byte, error) {

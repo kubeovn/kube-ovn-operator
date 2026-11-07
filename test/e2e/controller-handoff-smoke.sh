@@ -116,7 +116,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
 serial_file="${fence_dir}/ca.srl"
 printf '01\n' >"${serial_file}"
 san_list=""
-for ip in "${control_plane_ips[@]}"; do
+# Replacement members run on workers too, so every disposable node address
+# must be covered by the test server certificate.
+for ip in $(kubectl get nodes -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}'); do
   if [[ -n "${san_list}" ]]; then san_list+=,; fi
   san_list+="IP:${ip}"
 done
@@ -369,9 +371,33 @@ journal_phase() {
     python3 -c 'import json,sys; print(json.load(sys.stdin)["state"]["phase"])'
 }
 
+# Surface permanent container startup failures before waiting for the full
+# membership timeout. Diagnostics contain runtime errors, never Secret data.
+check_member_startup() {
+  if ! kubectl get pods -n kube-ovn-operator-system -l 'operator.kubeovn.io/member-record,app=ovn-central' -o json | python3 -c '
+import json
+import sys
+
+failed = False
+reasons = {"CreateContainerError", "CreateContainerConfigError", "RunContainerError", "CrashLoopBackOff", "ErrImagePull", "ImagePullBackOff"}
+for pod in json.load(sys.stdin).get("items", []):
+    for container in pod.get("status", {}).get("initContainerStatuses", []) + pod.get("status", {}).get("containerStatuses", []):
+        waiting = container.get("state", {}).get("waiting", {})
+        if waiting.get("reason") in reasons:
+            print(f"{pod["metadata"]["name"]}/{container["name"]}: {waiting.get("reason")}: {waiting.get("message", "")}", file=sys.stderr)
+            failed = True
+sys.exit(1 if failed else 0)
+'; then
+    kubectl get events -n kube-ovn-operator-system --sort-by=.metadata.creationTimestamp >&2 || true
+    tail -n 80 "${test_dir}/operator.log" >&2 || true
+    return 1
+  fi
+}
+
 final_phase=""
 for _ in $(seq 1 240); do
   final_phase=$(journal_phase "$journal_name" 2>/dev/null || true)
+  if [[ "${final_phase}" == Starting ]]; then check_member_startup; fi
   if [[ "$final_phase" == Complete ]]; then
     break
   fi
@@ -428,6 +454,11 @@ if [[ -z "$replacement_set" || -z "$replacement_pod" || -z "$replacement_uid" ]]
   exit 1
 fi
 echo "replacement StatefulSet ready: ${replacement_set}/${replacement_pod}"
+# Catch a missing replacement sidecar even when this member is a follower.
+curl --fail --silent --show-error --connect-timeout 5 --max-time 10 \
+  --cacert "${fence_dir}/ca.crt" --cert "${fence_dir}/client.crt" --key "${fence_dir}/client.key" \
+  "https://${worker_ip}:8443/healthz" >/dev/null
+echo "replacement fence-agent mTLS endpoint verified"
 sleep 5
 if [[ "$(kubectl get pod "$replacement_pod" -n kube-ovn-operator-system -o jsonpath='{.metadata.uid}')" != "$replacement_uid" ]]; then
   echo 'replacement Pod identity changed after lifecycle completion' >&2
@@ -525,6 +556,37 @@ kill -STOP "${operator_pid}"
 automatic_replicaset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["replicaset"])' "${automatic_candidates_file}")
 automatic_roles_file="${test_dir}/automatic-roles.tsv"
 automatic_target_pod=""
+# Exercise the replacement's authenticated mutation path, not just its TCP
+# listener. OVS 3.5's one-shot test hook transfers leadership without changing
+# membership and clears itself after one main-loop iteration. Require both
+# databases to elect the replacement before admitting the next operation.
+for database_socket in ovnnb_db ovnsb_db; do
+  database_name=OVN_Northbound
+  if [[ "${database_socket}" == ovnsb_db ]]; then database_name=OVN_Southbound; fi
+  replacement_is_leader=0
+  for _ in $(seq 1 30); do
+    replacement_role=$(kubectl exec -n kube-ovn-operator-system "${replacement_pod}" -c ovn-central -- \
+      ovs-appctl -t "/var/run/ovn/${database_socket}.ctl" cluster/status "${database_name}" | awk '$1 == "Role:" {print $2}')
+    if [[ "${replacement_role}" == leader ]]; then
+      replacement_is_leader=1
+      break
+    fi
+    while read -r candidate; do
+      candidate_role=$(kubectl exec -n kube-ovn-operator-system "${candidate}" -c ovn-central -- \
+        ovs-appctl -t "/var/run/ovn/${database_socket}.ctl" cluster/status "${database_name}" | awk '$1 == "Role:" {print $2}')
+      if [[ "${candidate_role}" == leader ]]; then
+        kubectl exec -n kube-ovn-operator-system "${candidate}" -c ovn-central -- \
+          ovs-appctl -t "/var/run/ovn/${database_socket}.ctl" cluster/failure-test transfer-leadership >/dev/null
+      fi
+    done < <(python3 -c 'import json,sys; print("\n".join(item["name"] for item in json.load(open(sys.argv[1]))))' "${automatic_candidates_file}")
+    sleep 1
+  done
+  if [[ "${replacement_is_leader}" != 1 ]]; then
+    echo "replacement did not become ${database_name} leader before fence-agent acceptance" >&2
+    exit 1
+  fi
+  echo "replacement fence-agent will execute ${database_name} mutations on leader ${replacement_pod}"
+done
 for _ in $(seq 1 30); do
   : >"${automatic_roles_file}"
   while read -r candidate; do
@@ -783,6 +845,7 @@ echo "automatic loss replacement admitted: ${automatic_target_pod} on ${automati
 automatic_phase=""
 for _ in $(seq 1 240); do
   automatic_phase=$(journal_phase "${automatic_journal_name}" 2>/dev/null || true)
+  if [[ "${automatic_phase}" == Starting ]]; then check_member_startup; fi
   if [[ "${automatic_phase}" == Complete ]]; then
     break
   fi
@@ -895,5 +958,9 @@ if sum(member["workload"]["kind"] == "StatefulSet" for member in members) != 2:
 PYTHON
 echo "automatic Deployment replacement completed: ${automatic_target_pod} retired and Chart Deployment scaled to one"
 echo "automatic replacement StatefulSet ready: ${automatic_set}/${automatic_pod}"
+curl --fail --silent --show-error --connect-timeout 5 --max-time 10 \
+  --cacert "${fence_dir}/ca.crt" --cert "${fence_dir}/client.crt" --key "${fence_dir}/client.key" \
+  "https://${automatic_worker_ip}:8443/healthz" >/dev/null
+echo "automatic replacement fence-agent mTLS endpoint verified"
 
 echo "automatic lifecycle handoff authorization consumed"

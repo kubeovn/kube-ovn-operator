@@ -11,6 +11,7 @@ import (
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/central"
+	"github.com/kubeovn/kube-ovn-operator/internal/fenceagent"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/prepare"
 	appsv1 "k8s.io/api/apps/v1"
@@ -514,5 +515,132 @@ func TestInstallationGenerationPinnedAcrossRestart(t *testing.T) {
 	f.p, _ = New(f.kube, current)
 	if err := f.guarded(t, func(ctx context.Context) error { _, err := f.p.Start(ctx, ref, f.launch(result)); return err }); err == nil {
 		t.Fatal("new installation generation reused old launch authorization")
+	}
+}
+
+func TestReplacementMemberRetainsFenceAgentAcrossRestart(t *testing.T) {
+	f := setup(t, nil)
+	config := &fenceagent.Config{Image: "registry.example/fence-agent@sha256:" + strings.Repeat("b", 64), ServerTLSSecret: "server-tls", ClientCASecret: "client-ca", Port: 8443}
+	var err error
+	f.p, err = New(f.kube, f.installation, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := f.prepare(t)
+	job := new(batchv1.Job)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: prepared.Record.Name + "-prepare"}, job); err != nil {
+		t.Fatal(err)
+	}
+	if len(job.Spec.Template.Spec.Containers) != 1 || *job.Spec.Template.Spec.AutomountServiceAccountToken {
+		t.Fatal("preparation received sidecar or API credentials")
+	}
+	result := f.complete(t, prepared.Record)
+	f.prepare(t)
+	var started Reference
+	if err := f.guarded(t, func(ctx context.Context) error {
+		var err error
+		started, err = f.p.Start(ctx, prepared.Record, f.launch(result))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	set := new(appsv1.StatefulSet)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: started.Name}, set); err != nil {
+		t.Fatal(err)
+	}
+	spec := set.Spec.Template.Spec
+	if len(spec.Containers) != 2 || spec.Containers[1].Name != "kube-ovn-fence-agent" || spec.Containers[1].Image != config.Image || spec.ServiceAccountName != fenceagent.ResourceName(f.installation.Name) || *spec.AutomountServiceAccountToken {
+		t.Fatal("replacement member lacks its isolated fence-agent identity")
+	}
+	for _, mount := range spec.Containers[0].VolumeMounts {
+		if mount.Name == "fence-api-access" {
+			t.Fatal("native member received API token")
+		}
+	}
+	foundSocket, foundToken := false, false
+	for _, mount := range spec.Containers[1].VolumeMounts {
+		foundSocket = foundSocket || mount.Name == "runtime" && mount.MountPath == "/var/run/ovn" && mount.SubPath == "ovn" && mount.ReadOnly
+		foundToken = foundToken || mount.Name == "fence-api-access" && mount.ReadOnly
+	}
+	if len(spec.InitContainers) != 1 || len(spec.InitContainers[0].VolumeMounts) != 1 || spec.InitContainers[0].VolumeMounts[0].Name != "runtime" {
+		t.Fatal("runtime socket directory is not initialized independently of persistent storage")
+	}
+	if !foundSocket || !foundToken {
+		t.Fatal("fence sidecar cannot access socket or Lease token")
+	}
+	if !matchesPod(spec, spec) {
+		t.Fatal("valid fenced member rejected")
+	}
+	for _, mutation := range []string{"extra sidecar", "args", "token mount", "extra init", "privileged init"} {
+		changed := spec.DeepCopy()
+		switch mutation {
+		case "extra init":
+			changed.InitContainers = append(changed.InitContainers, corev1.Container{Name: "unexpected"})
+		case "privileged init":
+			changed.InitContainers[0].SecurityContext.Privileged = new(true)
+		case "extra sidecar":
+			changed.Containers = append(changed.Containers, corev1.Container{Name: "unexpected"})
+		case "args":
+			changed.Containers[1].Args = append(changed.Containers[1].Args, "--unknown")
+		case "token mount":
+			changed.Containers[0].VolumeMounts = append(changed.Containers[0].VolumeMounts, changed.Containers[1].VolumeMounts[len(changed.Containers[1].VolumeMounts)-1])
+		}
+		if matchesPod(spec, *changed) {
+			t.Fatalf("accepted workload mutation: %s", mutation)
+		}
+	}
+	// Reconciliation resumes after the StatefulSet controller has created its
+	// live PVC consumer, not just after the StatefulSet object is persisted.
+	pod := &corev1.Pod{Name: set.Name + "-0", Namespace: set.Namespace, Spec: *spec.DeepCopy(),
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "StatefulSet", Name: set.Name, UID: set.UID, Controller: new(true)}},
+		Status:          corev1.PodStatus{Phase: corev1.PodRunning}}
+	if err := f.kube.Create(t.Context(), pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.p.available(t.Context(), f.request, prepared.Record); err != nil {
+		t.Fatalf("live fenced PVC consumer rejected: %v", err)
+	}
+	f.p, err = New(f.kube, f.installation, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.guarded(t, func(ctx context.Context) error {
+		again, err := f.p.Start(ctx, prepared.Record, f.launch(result))
+		if err != nil {
+			return err
+		}
+		if again != started {
+			t.Fatal("restart replaced fenced member")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	set.Spec.Template.Spec.Containers[1].Args = append(set.Spec.Template.Spec.Containers[1].Args, "--unexpected")
+	if err := f.kube.Update(t.Context(), set); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.p.available(t.Context(), f.request, prepared.Record); err == nil {
+		t.Fatal("modified fenced PVC consumer accepted")
+	}
+}
+
+func TestFencedMemberAcceptsAPIServerDefaults(t *testing.T) {
+	f := setup(t, nil)
+	f.p.fenceAgent = &fenceagent.Config{Image: "registry.example/fence-agent@sha256:" + strings.Repeat("b", 64), ServerTLSSecret: "server-tls", ClientCASecret: "client-ca", Port: 8443}
+	set := f.p.statefulSet(f.request, Reference{Name: "member", UID: "record"}, &corev1.ConfigMap{Name: "launch"})
+	if err := f.p.injectMemberFenceAgent(set); err != nil {
+		t.Fatal(err)
+	}
+	// Kubernetes defaults host-network container ports and non-pointer probe
+	// thresholds. DeepDerivative compares these numeric zero values exactly.
+	admitted := set.Spec.Template.Spec.DeepCopy()
+	agent := &admitted.Containers[1]
+	agent.Ports[0].HostPort = agent.Ports[0].ContainerPort
+	for _, probe := range []*corev1.Probe{agent.ReadinessProbe, agent.LivenessProbe} {
+		probe.SuccessThreshold, probe.FailureThreshold = 1, 3
+	}
+	if !matchesPod(set.Spec.Template.Spec, *admitted) {
+		t.Fatal("built-in port/probe defaults rejected the fenced member")
 	}
 }

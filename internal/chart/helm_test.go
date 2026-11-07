@@ -313,6 +313,27 @@ spec:
 	if central == nil || roleBinding == nil {
 		t.Fatalf("fence-agent resources missing: central=%v roleBinding=%v", central != nil, roleBinding != nil)
 	}
+	subjects, _, _ := unstructured.NestedSlice(roleBinding.Object, "subjects")
+	if len(subjects) != 2 {
+		t.Fatalf("replacement member Lease reader missing: %#v", subjects)
+	}
+	foundAccount := false
+	for _, object := range got.Objects {
+		if object.GetKind() == "ServiceAccount" && object.GetName() == "kube-ovn-fence-agent-tenant" {
+			foundAccount = true
+		}
+		if object.GetKind() == "Role" && object.GetName() == "kube-ovn-fence-agent-tenant" {
+			rules, _, _ := unstructured.NestedSlice(object.Object, "rules")
+			resources, _, _ := unstructured.NestedStringSlice(rules[0].(map[string]any), "resourceNames")
+			if !slices.Equal(resources, []string{"kube-ovn-operator-central-tenant"}) {
+				t.Fatalf("Lease access is not scoped: %#v", rules)
+			}
+		}
+	}
+	if !foundAccount {
+		t.Fatal("replacement member ServiceAccount missing")
+	}
+
 	templateSpec, found, err := unstructured.NestedMap(central.Object, "spec", "template", "spec")
 	if err != nil || !found {
 		t.Fatalf("central Pod template missing: %v", err)
