@@ -115,11 +115,11 @@ func (r *membershipRunner) validate(ctx context.Context, endpoint string) error 
 			continue
 		}
 		previous, exists := r.pods[endpoint]
-		if !exists || current.UID == "" || !samePods([]corev1.Pod{previous}, []corev1.Pod{current}) {
+		if !exists || current.UID == "" || !samePodProcesses(previous, current) {
 			return fmt.Errorf("%w: %s", ovnadmin.ErrTargetIdentity, endpoint)
 		}
 		for _, status := range current.Status.ContainerStatuses {
-			if status.Name == "ovn-central" && status.ContainerID != "" && status.Ready && status.State.Running != nil {
+			if status.Name == "ovn-central" && status.ContainerID != "" && status.State.Running != nil {
 				return nil
 			}
 		}

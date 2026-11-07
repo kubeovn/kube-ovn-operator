@@ -190,6 +190,9 @@ func discoverCentralTopology(ctx context.Context, reader client.Reader, runner C
 	leaders := [2]string{}
 	for _, name := range slices.Sorted(maps.Keys(bound.pods)) {
 		pod := bound.pods[name]
+		if !podReady(pod) {
+			return CentralTopology{}, errors.New("complete central topology requires every Pod to be ready")
+		}
 		member, err := centralKubernetesIdentity(ctx, reader, installation, pod)
 		if err != nil {
 			return CentralTopology{}, err
@@ -246,6 +249,9 @@ func discoverCentralTopology(ctx context.Context, reader client.Reader, runner C
 		index := slices.IndexFunc(after, func(pod corev1.Pod) bool { return pod.Name == member.Pod.Name })
 		if index < 0 {
 			return CentralTopology{}, errors.New("central endpoint disappeared during discovery")
+		}
+		if !podReady(after[index]) {
+			return CentralTopology{}, errors.New("central Pod readiness changed during discovery")
 		}
 		current, err := centralKubernetesIdentity(ctx, reader, installation, after[index])
 		if err != nil {

@@ -108,8 +108,13 @@ all three owned workload controllers must carry the plan-bound quiesce marker
 and saved rollout state. Completion must remove those markers, restore the
 original Deployment pause/StatefulSet strategy, retain native cluster/server
 identities, and expose the restored snapshot marker on every node for both
-databases. The API request and controller status are used directly; no backup,
-plan or execution status is fabricated by the test.
+databases. Acceptance repeats the same native restore after rediscovering the
+current processes, and each successful request must be followed by an
+installation Ready condition for the current generation. Only the exact
+verified spec, manifest and version become the recovery apply checkpoint;
+unrelated later inputs still require their own lifecycle authorization. The
+API request and controller status are used directly; no backup, plan or
+execution status is fabricated by the test.
 
 The request includes a fractional-second expiration. The persisted plan's
 timestamp uses the API status field's second precision, while its immutable
@@ -129,3 +134,11 @@ This uses the healthy quorum path and needs no destructive recovery approval.
 It does not establish lost-quorum reconstruction, approval consumption during
 that failure, a version-changing rollback, or an application write barrier
 across the sequential NB/SB captures.
+
+
+Member-command process identity is checked independently of Pod readiness:
+leaving NB can make the shared container unready before its separately
+verified SB leave. Ownership, Pod UID, node, container ID, restart count and a
+running central container remain pinned. Native status still proves database
+identities and quorum, mutations still require the current remote fence, and
+complete healthy topology discovery still requires every Pod to be Ready.

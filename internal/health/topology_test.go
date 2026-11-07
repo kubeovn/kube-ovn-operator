@@ -43,7 +43,7 @@ func topologyStatus(pod, database string) string {
 }
 
 func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T) {
-	for _, scenario := range []string{"healthy", "dynamic listener", "local config listener", "unsupported listener database", "missing pod", "unhealthy peer", "extra raft member", "cluster drift", "node replaced", "pod replaced", "listener changed", "ephemeral storage", "wrong node address", "wrong node address with explicit replacement", "wrong node address with replacement for another endpoint", "cordoned node", "cordoned node with explicit replacement", "no listener"} {
+	for _, scenario := range []string{"healthy", "unready pod", "readiness changed during discovery", "dynamic listener", "local config listener", "unsupported listener database", "missing pod", "unhealthy peer", "extra raft member", "cluster drift", "node replaced", "pod replaced", "listener changed", "ephemeral storage", "wrong node address", "wrong node address with explicit replacement", "wrong node address with replacement for another endpoint", "cordoned node", "cordoned node with explicit replacement", "no listener"} {
 		t.Run(scenario, func(t *testing.T) {
 			installation, kube, objects := healthFixture(t)
 			if strings.Contains(scenario, "with explicit replacement") || strings.Contains(scenario, "replacement for another endpoint") {
@@ -67,6 +67,10 @@ func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T)
 					t.Fatal(err)
 				}
 				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "ovn-central", ContainerID: "containerd://" + pod.Name, Ready: true, State: corev1.ContainerState{Running: new(corev1.ContainerStateRunning)}}}
+				if scenario == "unready pod" && i == 0 {
+					pod.Status.Conditions[0].Status = corev1.ConditionFalse
+					pod.Status.ContainerStatuses[0].Ready = false
+				}
 				if err := kube.Status().Update(t.Context(), pod); err != nil {
 					t.Fatal(err)
 				}
@@ -89,6 +93,17 @@ func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T)
 			remoteReads := map[string]int{}
 			mutated := false
 			runner := runnerFunc(func(ctx context.Context, _, pod, _ string, command []string) ([]byte, error) {
+				if !mutated && scenario == "readiness changed during discovery" {
+					mutated = true
+					current := new(corev1.Pod)
+					if err := kube.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: pod}, current); err != nil {
+						t.Fatal(err)
+					}
+					current.Status.Conditions[0].Status = corev1.ConditionFalse
+					if err := kube.Status().Update(ctx, current); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if !mutated && (scenario == "node replaced" || scenario == "pod replaced") {
 					mutated = true
 					var target client.Object
