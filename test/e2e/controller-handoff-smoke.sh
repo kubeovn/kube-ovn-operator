@@ -778,10 +778,10 @@ if [[ "${automatic_phase}" != Complete ]]; then
   exit 1
 fi
 # The completed lifecycle still needs one Chart apply to consume its handoff
-# authorization. Stop the fixture guards before that write, then immediately
-# replace the one-shot automatic member request with the next explicit
-# scale-in request. Leaving the approval-backed request in the spec would make
-# the controller infer a second automatic replacement after handoff.
+# authorization. Wait for that reconciliation before reading the final
+# inventory; otherwise the status may still point at the pre-operation
+# topology. Then immediately replace the one-shot automatic member request
+# with the next explicit scale-in request.
 kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
 for _ in $(seq 1 30); do
   if ! kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
@@ -840,6 +840,22 @@ if [[ "$(kubectl get kubeovnmemberremovalapproval "${automatic_approval_name}" -
   kubectl get kubeovnmemberremovalapproval "${automatic_approval_name}" -n kube-ovn-operator-system -o yaml || true
   exit 1
 fi
+automatic_handoff=""
+automatic_operation_request=""
+for _ in $(seq 1 90); do
+  automatic_operation_request=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.requestName}' 2>/dev/null || true)
+  automatic_handoff=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.handoffApplied}' 2>/dev/null || true)
+  if [[ "${automatic_operation_request}" == "${automatic_request_name}" && "${automatic_handoff}" == true ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ "${automatic_operation_request}" != "${automatic_request_name}" || "${automatic_handoff}" != true ]]; then
+  echo 'automatic lifecycle handoff was not consumed before final topology verification' >&2
+  kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
+  cat "${test_dir}/operator.log"
+  exit 1
+fi
 automatic_final_inventory=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.inventory.name}')
 automatic_final_topology=$(kubectl get configmap "${automatic_final_inventory}" -n kube-ovn-operator-system -o jsonpath='{.data.topology\.json}')
 AUTO_TOPOLOGY="${automatic_final_topology}" TARGET_POD="${automatic_target_pod}" AUTOMATIC_POD="${automatic_pod}" python3 - <<'PYTHON'
@@ -862,21 +878,6 @@ PYTHON
 echo "automatic Deployment replacement completed: ${automatic_target_pod} retired and Chart Deployment scaled to one"
 echo "automatic replacement StatefulSet ready: ${automatic_set}/${automatic_pod}"
 
-automatic_handoff=""
-for _ in $(seq 1 90); do
-  automatic_operation_request=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.requestName}' 2>/dev/null || true)
-  automatic_handoff=$(kubectl get koi/controller-retirement -n kube-ovn-operator-system -o jsonpath='{.status.topology.operation.handoffApplied}' 2>/dev/null || true)
-  if [[ "${automatic_operation_request}" == "${automatic_request_name}" && "${automatic_handoff}" == true ]]; then
-    break
-  fi
-  sleep 1
-done
-if [[ "${automatic_operation_request}" != "${automatic_request_name}" || "${automatic_handoff}" != true ]]; then
-  echo 'automatic lifecycle handoff was not consumed before the next request' >&2
-  kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
-  cat "${test_dir}/operator.log"
-  exit 1
-fi
 echo "automatic lifecycle handoff authorization consumed"
 
 # Replace the one-shot automatic member request immediately after its handoff
