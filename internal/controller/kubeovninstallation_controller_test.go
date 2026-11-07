@@ -853,6 +853,17 @@ func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 	if got.Status.Upgrade.Step != "ApplyCheckpoint" || !meta.IsStatusConditionTrue(got.Status.Conditions, "Degraded") {
 		t.Fatalf("checkpoint rejection not reported: %+v", got.Status)
 	}
+	got.Spec.Central.Replicas = 3
+	got.Spec.NetworkStack = "dual_stack"
+	if err := kube.Update(t.Context(), got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if workload.applyCalls != 2 {
+		t.Fatal("network stack migration bypassed the first-apply checkpoint")
+	}
 }
 
 func TestLifecycleHandoffAuthorizesOnlyTheNextApplyCheckpoint(t *testing.T) {

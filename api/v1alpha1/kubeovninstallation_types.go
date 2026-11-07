@@ -51,6 +51,10 @@ type KubeOVNInstallationSpec struct {
 	Upgrade      UpgradeSpec       `json:"upgrade,omitempty"`
 	Adoption     AdoptionSpec      `json:"adoption,omitempty"`
 	NetworkProbe *NetworkProbeSpec `json:"networkProbe,omitempty"`
+	// NetworkStack selects the upstream chart's address-family preset. Empty
+	// preserves the chart default; changing it after installation is not a migration.
+	// +kubebuilder:validation:Enum=ipv4;ipv6;dual_stack
+	NetworkStack string `json:"networkStack,omitempty"`
 }
 
 // NetworkProbeSpec enables ordinary pod-network canaries using this operator's

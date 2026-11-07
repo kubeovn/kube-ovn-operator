@@ -312,6 +312,11 @@ with the same contract.
    policy still need an end-to-end check. The renderer verifies HTTPS archive or OCI
    chart-layer SHA-256, chart appVersion and kubeVersion, maps upstream values,
    and separates lifecycle hooks from normal resources.
+   `spec.networkStack` now selects the upstream IPv4, IPv6 or dual-stack preset;
+   omitted values preserve Chart defaults. Network readiness checks the selected
+   families, and the installation workflow can verify both families on a
+   disposable dual-stack Kind cluster. Custom CIDRs, stack migration and
+   IPv6-only central/HCP transport acceptance remain open.
 2. Connect the persistent joint lifecycle executor to default-controller operation
    selection, lifecycle-authorized topology transitions and generation/apply-checkpoint changes.
    The default controller now retains and verifies the initial complete local RAFT

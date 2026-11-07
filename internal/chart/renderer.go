@@ -91,5 +91,13 @@ func installationValues(spec operatorv1alpha1.KubeOVNInstallationSpec) (map[stri
 	if spec.DataPlane.OVSUpdateStrategy != "" {
 		values["ovs-ovn"] = map[string]any{"updateStrategy": map[string]any{"type": spec.DataPlane.OVSUpdateStrategy}}
 	}
+	if spec.NetworkStack != "" {
+		networking, _ := values["networking"].(map[string]any)
+		if networking == nil {
+			networking = make(map[string]any)
+		}
+		networking["NET_STACK"] = spec.NetworkStack
+		values["networking"] = networking
+	}
 	return values, nil
 }

@@ -16,6 +16,7 @@ import (
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"helm.sh/helm/v3/pkg/chartutil"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -541,46 +542,62 @@ func TestReleasedKubeOVNChart(t *testing.T) {
 	caps := chartutil.DefaultCapabilities.Copy()
 	caps.KubeVersion = chartutil.KubeVersion{Version: "v1.34.3", Major: "1", Minor: "34"}
 	renderer := &HelmRenderer{Name: "kube-ovn", Namespace: "network", Mapper: mapper, Capabilities: caps, HTTPClient: server.Client(), Reader: fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodes...).Build()}
-	for _, mode := range []operatorv1alpha1.InstallationMode{operatorv1alpha1.InstallationModeFull, operatorv1alpha1.InstallationModeControlPlaneOnly, operatorv1alpha1.InstallationModeDataPlaneOnly} {
-		t.Run(string(mode), func(t *testing.T) {
-			spec := operatorv1alpha1.KubeOVNInstallationSpec{
-				Version: "v1.16.13", Chart: operatorv1alpha1.ChartSpec{Source: server.URL, Digest: digest}, Mode: mode,
-				Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
-				DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example", SBEndpoint: "sb.example"}},
-			}
-			got, err := renderer.Render(t.Context(), spec)
-			if err != nil {
-				t.Fatal(err)
-			}
-			central, controller, ovs, cni := false, false, false, false
-			for _, object := range got.Objects {
-				if object.GetAnnotations()["helm.sh/hook"] != "" {
-					t.Fatal("hook included in apply batch")
+	for _, stack := range []string{"", "ipv4", "ipv6", "dual_stack"} {
+		for _, mode := range []operatorv1alpha1.InstallationMode{operatorv1alpha1.InstallationModeFull, operatorv1alpha1.InstallationModeControlPlaneOnly, operatorv1alpha1.InstallationModeDataPlaneOnly} {
+			t.Run(string(mode)+"/"+stack, func(t *testing.T) {
+				spec := operatorv1alpha1.KubeOVNInstallationSpec{
+					Version: "v1.16.13", Chart: operatorv1alpha1.ChartSpec{Source: server.URL, Digest: digest}, Mode: mode, NetworkStack: stack,
+					Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+					DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example", SBEndpoint: "sb.example"}},
 				}
-				if object.GetKind() == "Deployment" && object.GetName() == "ovn-central" {
-					central = true
-					replicas, _, _ := unstructured.NestedInt64(object.Object, "spec", "replicas")
-					if replicas != 3 {
-						t.Fatalf("central replicas=%d", replicas)
+				got, err := renderer.Render(t.Context(), spec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				central, controller, ovs, cni := false, false, false, false
+				for _, object := range got.Objects {
+					if object.GetAnnotations()["helm.sh/hook"] != "" {
+						t.Fatal("hook included in apply batch")
+					}
+					if object.GetKind() == "Deployment" && object.GetName() == "ovn-central" {
+						central = true
+						replicas, _, _ := unstructured.NestedInt64(object.Object, "spec", "replicas")
+						if replicas != 3 {
+							t.Fatalf("central replicas=%d", replicas)
+						}
+					}
+					if object.GetKind() == "Deployment" && object.GetName() == "kube-ovn-controller" {
+						controller = true
+						var deployment appsv1.Deployment
+						if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &deployment); err != nil {
+							t.Fatal(err)
+						}
+						cidr := "10.16.0.0/16"
+						if stack == "ipv6" {
+							cidr = "fd00:10:16::/112"
+						}
+						if stack == "dual_stack" {
+							cidr += ",fd00:10:16::/112"
+						}
+						if !slices.Contains(deployment.Spec.Template.Spec.Containers[0].Args, "--default-cidr="+cidr) {
+							t.Fatalf("rendered controller lost %s CIDR: %v", stack, deployment.Spec.Template.Spec.Containers[0].Args)
+						}
+					}
+					if object.GetKind() == "DaemonSet" && object.GetName() == "ovs-ovn" {
+						ovs = true
+					}
+					if object.GetKind() == "DaemonSet" && object.GetName() == "kube-ovn-cni" {
+						cni = true
+					}
+					if object.GetNamespace() != "" && object.GetNamespace() != "network" {
+						t.Fatal("namespace mismatch")
 					}
 				}
-				if object.GetKind() == "Deployment" && object.GetName() == "kube-ovn-controller" {
-					controller = true
+				if central != (mode != operatorv1alpha1.InstallationModeDataPlaneOnly) || controller != (mode != operatorv1alpha1.InstallationModeControlPlaneOnly) || ovs != controller || cni != controller {
+					t.Fatalf("incorrect mode split: central=%t controller=%t ovs=%t cni=%t", central, controller, ovs, cni)
 				}
-				if object.GetKind() == "DaemonSet" && object.GetName() == "ovs-ovn" {
-					ovs = true
-				}
-				if object.GetKind() == "DaemonSet" && object.GetName() == "kube-ovn-cni" {
-					cni = true
-				}
-				if object.GetNamespace() != "" && object.GetNamespace() != "network" {
-					t.Fatal("namespace mismatch")
-				}
-			}
-			if central != (mode != operatorv1alpha1.InstallationModeDataPlaneOnly) || controller != (mode != operatorv1alpha1.InstallationModeControlPlaneOnly) || ovs != controller || cni != controller {
-				t.Fatalf("incorrect mode split: central=%t controller=%t ovs=%t cni=%t", central, controller, ovs, cni)
-			}
-		})
+			})
+		}
 	}
 }
 

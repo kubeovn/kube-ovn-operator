@@ -7,6 +7,17 @@ import (
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 )
 
+func TestValidateNetworkStack(t *testing.T) {
+	for _, stack := range []string{"", "ipv4", "ipv6", "dual_stack", "dual", "IPv4", " ipv4"} {
+		spec := operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.16.13", Mode: operatorv1alpha1.InstallationModeFull, NetworkStack: stack,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}
+		valid := stack == "" || stack == "ipv4" || stack == "ipv6" || stack == "dual_stack"
+		if errs := ValidateInstallationSpec(spec); (len(errs) == 0) != valid {
+			t.Errorf("networkStack %q: valid=%v errors=%v", stack, valid, errs)
+		}
+	}
+}
+
 func TestValidateAdoptionRequiresValidSelector(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,

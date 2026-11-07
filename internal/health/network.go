@@ -133,6 +133,18 @@ func (o *NetworkObserver) snapshot(ctx context.Context, installation *operatorv1
 			result.servers = pods
 		}
 	}
+	var required []string
+	switch installation.Spec.NetworkStack {
+	case "ipv4":
+		required = []string{"IPv4"}
+	case "ipv6":
+		required = []string{"IPv6"}
+	case "dual_stack":
+		required = []string{"IPv4", "IPv6"}
+	}
+	if required != nil && !slices.Equal(families, required) {
+		return result, fmt.Errorf("network probe address families %v do not match configured networkStack %s", families, installation.Spec.NetworkStack)
+	}
 	service := new(corev1.Service)
 	if err := o.Reader.Get(ctx, types.NamespacedName{Namespace: installation.Namespace, Name: name}, service); err != nil {
 		return result, err
