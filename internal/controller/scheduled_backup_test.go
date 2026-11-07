@@ -314,3 +314,40 @@ func threeMemberScheduledTopology() health.CentralTopology {
 	}
 	return topology
 }
+
+func TestReconcileCompletedLifecyclePreservesNewerScheduledBackup(t *testing.T) {
+	now := time.Unix(10000, 0).UTC()
+	installation := scheduledBackupInstallation(now)
+	installation.Status.LastBackup.CompletedAt = metav1.NewTime(now.Add(-10 * time.Minute))
+	original := new(api.BackupStatus)
+	installation.Status.LastBackup.DeepCopyInto(original)
+	ref := installation.Status.Topology.Inventory
+	installation.Status.Topology.Operation = &api.CentralOperationReference{HandoffInventory: ref, HandoffApplied: true, CompletionDigest: "complete"}
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation).WithObjects(installation).Build()
+	captures := 0
+	reconciler := scheduledBackupReconciler(&captures, func(context.Context, *api.KubeOVNInstallation, health.CentralTopology, lifecycle.BackupBinding) (*api.BackupStatus, error) {
+		return nil, errors.New("newer scheduled backup is not due")
+	})
+	reconciler.Client, reconciler.Scheme, reconciler.Clock = kube, controllerScheme(t), func() time.Time { return now }
+	reconciler.Lifecycle = &lifecycleCoordinatorFake{reader: kube, recovery: &lifecycle.Recovery{
+		Request: lifecycle.Request{Databases: []lifecycle.Inventory{{Database: "OVN_Northbound"}, {Database: "OVN_Southbound"}}},
+		State: lifecycle.State{Phase: lifecycle.Complete, Databases: [2]lifecycle.DatabaseState{
+			{BackupRef: "sha256:" + strings.Repeat("a", 64), CapturedAt: now.Add(-2 * time.Hour)},
+			{BackupRef: "sha256:" + strings.Repeat("b", 64), CapturedAt: now.Add(-2*time.Hour + time.Second)},
+		}},
+	}}
+	result, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(installation)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != 50*time.Minute || captures != 0 {
+		t.Fatalf("completed lifecycle displaced the newer scheduled backup: result=%+v captures=%d", result, captures)
+	}
+	got := new(api.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.LastBackup.ID != original.ID || !got.Status.LastBackup.CompletedAt.Equal(&original.CompletedAt) {
+		t.Fatalf("completed lifecycle overwrote the newer backup: got=%+v want=%+v", got.Status.LastBackup, original)
+	}
+}

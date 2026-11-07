@@ -385,8 +385,11 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 					}
 					return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 				}
+				// Once the handoff is consumed, this journal is historical. Do
+				// not replace a later scheduled backup or rebind its old pair
+				// to a newer observed version/topology on every reconcile.
+				recordLifecycleBackupStatus(installation, recovery)
 			}
-			recordLifecycleBackupStatus(installation, recovery)
 			if installation.Status.Topology.Operation == nil {
 				installation.Status.Topology.Operation = newOperationReference(recovery, installation.Status.Topology.Inventory)
 			}
