@@ -998,6 +998,11 @@ echo "automatic replacement fence-agent mTLS endpoint verified"
 
 echo "automatic lifecycle handoff authorization consumed"
 
+# Handoff consumption records the accepted apply, not asynchronous rollout
+# completion. Bind the recovery fixture only after all retained processes are
+# ready on their storage nodes.
+kubectl rollout status deployment/"${central_deployment}" -n kube-ovn-operator-system --timeout=120s
+
 # Exercise the public recovery API while the real controller is still running.
 if ! python3 test/e2e/fence-takeover-restore.py "${fence_dir}" controller-recovery "${backup_dir}"; then
   kubectl get koi/controller-retirement -n kube-ovn-operator-system -o yaml || true
