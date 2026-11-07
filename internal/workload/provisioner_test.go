@@ -559,8 +559,11 @@ func TestReplacementMemberRetainsFenceAgentAcrossRestart(t *testing.T) {
 	}
 	foundSocket, foundToken := false, false
 	for _, mount := range spec.Containers[1].VolumeMounts {
-		foundSocket = foundSocket || mount.Name == "runtime" && mount.MountPath == "/var/run" && mount.ReadOnly
+		foundSocket = foundSocket || mount.Name == "runtime" && mount.MountPath == "/var/run/ovn" && mount.SubPath == "ovn" && mount.ReadOnly
 		foundToken = foundToken || mount.Name == "fence-api-access" && mount.ReadOnly
+	}
+	if len(spec.InitContainers) != 1 || len(spec.InitContainers[0].VolumeMounts) != 1 || spec.InitContainers[0].VolumeMounts[0].Name != "runtime" {
+		t.Fatal("runtime socket directory is not initialized independently of persistent storage")
 	}
 	if !foundSocket || !foundToken {
 		t.Fatal("fence sidecar cannot access socket or Lease token")
@@ -568,9 +571,13 @@ func TestReplacementMemberRetainsFenceAgentAcrossRestart(t *testing.T) {
 	if !matchesPod(spec, spec) {
 		t.Fatal("valid fenced member rejected")
 	}
-	for _, mutation := range []string{"extra sidecar", "args", "token mount"} {
+	for _, mutation := range []string{"extra sidecar", "args", "token mount", "extra init", "privileged init"} {
 		changed := spec.DeepCopy()
 		switch mutation {
+		case "extra init":
+			changed.InitContainers = append(changed.InitContainers, corev1.Container{Name: "unexpected"})
+		case "privileged init":
+			changed.InitContainers[0].SecurityContext.Privileged = new(true)
 		case "extra sidecar":
 			changed.Containers = append(changed.Containers, corev1.Container{Name: "unexpected"})
 		case "args":

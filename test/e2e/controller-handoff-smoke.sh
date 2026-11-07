@@ -371,9 +371,33 @@ journal_phase() {
     python3 -c 'import json,sys; print(json.load(sys.stdin)["state"]["phase"])'
 }
 
+# Surface permanent container startup failures before waiting for the full
+# membership timeout. Diagnostics contain runtime errors, never Secret data.
+check_member_startup() {
+  if ! kubectl get pods -n kube-ovn-operator-system -l 'operator.kubeovn.io/member-record,app=ovn-central' -o json | python3 -c '
+import json
+import sys
+
+failed = False
+reasons = {"CreateContainerError", "CreateContainerConfigError", "RunContainerError", "CrashLoopBackOff", "ErrImagePull", "ImagePullBackOff"}
+for pod in json.load(sys.stdin).get("items", []):
+    for container in pod.get("status", {}).get("initContainerStatuses", []) + pod.get("status", {}).get("containerStatuses", []):
+        waiting = container.get("state", {}).get("waiting", {})
+        if waiting.get("reason") in reasons:
+            print(f"{pod["metadata"]["name"]}/{container["name"]}: {waiting.get("reason")}: {waiting.get("message", "")}", file=sys.stderr)
+            failed = True
+sys.exit(1 if failed else 0)
+'; then
+    kubectl get events -n kube-ovn-operator-system --sort-by=.metadata.creationTimestamp >&2 || true
+    tail -n 80 "${test_dir}/operator.log" >&2 || true
+    return 1
+  fi
+}
+
 final_phase=""
 for _ in $(seq 1 240); do
   final_phase=$(journal_phase "$journal_name" 2>/dev/null || true)
+  if [[ "${final_phase}" == Starting ]]; then check_member_startup; fi
   if [[ "$final_phase" == Complete ]]; then
     break
   fi
@@ -821,6 +845,7 @@ echo "automatic loss replacement admitted: ${automatic_target_pod} on ${automati
 automatic_phase=""
 for _ in $(seq 1 240); do
   automatic_phase=$(journal_phase "${automatic_journal_name}" 2>/dev/null || true)
+  if [[ "${automatic_phase}" == Starting ]]; then check_member_startup; fi
   if [[ "${automatic_phase}" == Complete ]]; then
     break
   fi
