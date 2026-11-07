@@ -140,6 +140,43 @@ func TestDryRunUsesServerSideApplyAndCreateOptions(t *testing.T) {
 	}
 }
 
+func TestDryRunForcesOnlySelfManagedConflicts(t *testing.T) {
+	live := configMap("workload", nil)
+	live.SetManagedFields([]metav1.ManagedFieldsEntry{{
+		Manager:    DefaultFieldManager,
+		Operation:  metav1.ManagedFieldsOperationUpdate,
+		FieldsType: "FieldsV1",
+	}})
+	resource := &conflictResource{err: apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "workload", errors.New(`conflicts with "kube-ovn-operator" using apps/v1:`))}
+	objects := []preparedObject{{object: configMap("workload", nil), resource: resource, exists: true, live: live}}
+	if err := dryRunAll(t.Context(), objects); err != nil {
+		t.Fatal(err)
+	}
+	if len(resource.patchOptions) != 2 || resource.patchOptions[0].Force != nil || resource.patchOptions[1].Force == nil || !*resource.patchOptions[1].Force {
+		t.Fatalf("unexpected force retry options: %#v", resource.patchOptions)
+	}
+	if !objects[0].force {
+		t.Fatal("self-owned conflict did not persist force decision for the write")
+	}
+}
+
+func TestDryRunRejectsExternalManagedConflicts(t *testing.T) {
+	live := configMap("workload", nil)
+	live.SetManagedFields([]metav1.ManagedFieldsEntry{{
+		Manager:    "helm",
+		Operation:  metav1.ManagedFieldsOperationUpdate,
+		FieldsType: "FieldsV1",
+	}})
+	resource := &conflictResource{err: apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "workload", errors.New(`conflicts with "helm" using apps/v1:`))}
+	objects := []preparedObject{{object: configMap("workload", nil), resource: resource, exists: true, live: live}}
+	if err := dryRunAll(t.Context(), objects); err == nil {
+		t.Fatal("external managed conflict unexpectedly succeeded")
+	}
+	if len(resource.patchOptions) != 1 || resource.patchOptions[0].Force != nil {
+		t.Fatalf("unexpected external conflict options: %#v", resource.patchOptions)
+	}
+}
+
 func testMapper() meta.RESTMapper {
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
 	mapper.Add(corev1.SchemeGroupVersion.WithKind("ConfigMap"), meta.RESTScopeNamespace)
@@ -206,6 +243,20 @@ type recordingResource struct {
 	dynamic.ResourceInterface
 	patchOptions  []metav1.PatchOptions
 	createOptions []metav1.CreateOptions
+}
+
+type conflictResource struct {
+	dynamic.ResourceInterface
+	patchOptions []metav1.PatchOptions
+	err          error
+}
+
+func (r *conflictResource) Patch(_ context.Context, _ string, _ types.PatchType, _ []byte, options metav1.PatchOptions, _ ...string) (*unstructured.Unstructured, error) {
+	r.patchOptions = append(r.patchOptions, options)
+	if len(r.patchOptions) == 1 {
+		return nil, r.err
+	}
+	return new(unstructured.Unstructured), nil
 }
 
 func (r *recordingResource) Patch(_ context.Context, _ string, _ types.PatchType, _ []byte, options metav1.PatchOptions, _ ...string) (*unstructured.Unstructured, error) {
