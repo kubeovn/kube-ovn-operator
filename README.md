@@ -628,7 +628,11 @@ and `OVS_TEST_SCHEMA`; see the CI workflow for the extracted package layout.
 The manually dispatched `Kube-OVN installation` workflow provisions a separate
 three-control-plane kind cluster without a default CNI. It installs the pinned
 v1.16.13 chart through the operator, waits for workload and OVN runtime health, records live
-NB/SB cluster status and probes Pod IP and Service DNS traffic between two nodes.
+NB/SB cluster status and probes Pod IP, Service IP and Service DNS traffic between two nodes.
+Select the workflow's `network_stack=dual_stack` input to create a dual-stack
+cluster. The test requires IPv4 and IPv6 addresses on both independent probe
+Pods and their Service, forces each HTTP/DNS request to its address family, and
+checks controller evidence for all three nodes and both families.
 It uses the job's existing admin kubeconfig and creates the upstream chart's
 ServiceAccounts and RBAC; it is separate from the default smoke workflow. The
 repository RBAC now covers the operator's Pod exec, member preparation,
@@ -638,3 +642,19 @@ and target cluster admission policies before production installation. Complete
 Kube-OVN installation and transition verification remain separate acceptance
 items. See [docs/design.md](docs/design.md) for the remaining execution
 boundaries and safety contract.
+
+`spec.networkStack` selects the upstream Chart's `ipv4`, `ipv6`, or `dual_stack`
+addressing preset. Omitting it preserves the Chart default. The selected preset
+uses the Chart's Pod, Service, gateway and join CIDRs; ensure these match the
+target cluster. Custom CIDR overrides are not exposed yet. For example:
+
+```yaml
+spec:
+  networkStack: dual_stack
+```
+
+When network probes are enabled, readiness requires exactly the requested
+address families. Selecting a different stack on an existing installation is
+blocked by the apply checkpoint; this field does not implement a network
+migration. The dual-stack installation test uses IPv4 central transport and
+does not establish IPv6-only RAFT or HCP endpoint acceptance.

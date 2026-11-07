@@ -4,6 +4,12 @@ name: Kube-OVN installation
 # Dispatch explicitly after reviewing the target chart and test configuration.
 on:
   workflow_dispatch:
+    inputs:
+      network_stack:
+        description: Upstream network stack preset to verify
+        type: choice
+        options: [ipv4, dual_stack]
+        default: ipv4
 
 permissions:
   contents: read
@@ -23,14 +29,16 @@ jobs:
       - uses: helm/kind-action@v1.12.0
         with:
           cluster_name: kube-ovn-operator-network
-          config: test/e2e/kind-cni.yaml
+          config: ${{ inputs.network_stack == 'dual_stack' && 'test/e2e/kind-cni-dual-stack.yaml' || 'test/e2e/kind-cni.yaml' }}
           wait: 120s
       - name: Install Kube-OVN through the operator and verify networking
+        env:
+          NETWORK_STACK: ${{ inputs.network_stack }}
         run: bash test/e2e/network-install.sh
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: network-install-diagnostics
+          name: network-install-diagnostics-${{ inputs.network_stack }}
           path: /tmp/kube-ovn-operator-network-logs
           if-no-files-found: ignore

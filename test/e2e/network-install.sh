@@ -2,6 +2,13 @@
 set -euo pipefail
 
 cluster_name=kube-ovn-operator-network
+network_stack=${NETWORK_STACK:-ipv4}
+service_family_policy=SingleStack
+case "${network_stack}" in
+  ipv4) expected_families=IPv4 ;;
+  dual_stack) expected_families=IPv4,IPv6; service_family_policy=RequireDualStack ;;
+  *) echo "unsupported network acceptance stack: ${network_stack}" >&2; exit 1 ;;
+esac
 log_dir=/tmp/kube-ovn-operator-network-logs
 mkdir -p "${log_dir}"
 operator_binary=$(mktemp)
@@ -10,6 +17,7 @@ cleanup() {
   kubectl -n kube-system get pods,deployments,daemonsets,services -o wide >"${log_dir}/workloads.txt" 2>&1 || true
   kubectl get events -A --sort-by=.lastTimestamp >"${log_dir}/events.txt" 2>&1 || true
   kubectl -n kube-system get kubeovninstallation/network -o yaml >"${log_dir}/installation.yaml" 2>&1 || true
+  kubectl -n default get pods,services -o wide >"${log_dir}/independent-probes.txt" 2>&1 || true
   if [[ -n "${operator_pid:-}" ]]; then
     kill "${operator_pid}" 2>/dev/null || true
     wait "${operator_pid}" 2>/dev/null || true
@@ -23,7 +31,7 @@ trap cleanup EXIT
 # separate deployment concern.
 kubectl config use-context "kind-${cluster_name}"
 bash test/e2e/probe-image.sh "${cluster_name}"
-for image in docker.io/kubeovn/kube-ovn:v1.16.13 registry.k8s.io/e2e-test-images/agnhost:2.53 docker.io/library/busybox:1.37.0; do
+for image in docker.io/kubeovn/kube-ovn:v1.16.13 registry.k8s.io/e2e-test-images/agnhost:2.53 docker.io/curlimages/curl:8.14.1; do
   docker pull --platform=linux/amd64 "${image}"
   image_archive=$(mktemp)
   # kind's Docker-image loader imports every manifest platform. Some upstream
@@ -42,7 +50,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 curl --fail --silent http://127.0.0.1:18084/readyz >/dev/null
-kubectl apply -f - <<'YAML'
+kubectl apply -f - <<YAML
 apiVersion: operator.kubeovn.io/v1alpha1
 kind: KubeOVNInstallation
 metadata:
@@ -54,6 +62,7 @@ spec:
     source: https://github.com/kubeovn/kube-ovn/releases/download/v1.16.13/kube-ovn-v1.16.13.tgz
     digest: sha256:24df922c7aa78e4a21e77289a6eec9a19ac50cb00953df9ada9291b61a638475
   mode: full
+  networkStack: ${network_stack}
   central:
     mode: raft
     replicas: 3
@@ -105,6 +114,7 @@ metadata:
   name: operator-network-server
   namespace: default
 spec:
+  ipFamilyPolicy: ${service_family_policy}
   selector:
     app: operator-network-server
   ports:
@@ -120,13 +130,59 @@ spec:
   nodeName: ${nodes[1]}
   containers:
     - name: client
-      image: docker.io/library/busybox:1.37.0
+      image: docker.io/curlimages/curl:8.14.1
       command: [sleep, '3600']
 YAML
 kubectl wait -n default pod/operator-network-server pod/operator-network-client --for=condition=Ready --timeout=180s
-server_ip=$(kubectl -n default get pod/operator-network-server -o jsonpath='{.status.podIP}')
-for destination in "${server_ip}" operator-network-server.default.svc.cluster.local; do
-  kubectl -n default exec operator-network-client -- wget -T 15 -q -O - "http://${destination}:8080/hostname" | tee -a "${log_dir}/connectivity.txt" | grep -qx operator-network-server
-done
+kubectl -n default get pod/operator-network-server -o json >"${log_dir}/server.json"
+kubectl -n default get pod/operator-network-client -o json >"${log_dir}/client.json"
+kubectl -n default get service/operator-network-server -o json >"${log_dir}/service.json"
+kubectl -n kube-system get koi/network -o json >"${log_dir}/network-evidence.json"
+python3 - "${log_dir}" "${expected_families}" "${network_stack}" <<'PYTHON' >"${log_dir}/destinations.tsv"
+import ipaddress
+import json
+from pathlib import Path
+import sys
+
+directory = Path(sys.argv[1])
+expected = set(sys.argv[2].split(","))
+def addresses(values):
+    result = {}
+    for value in values:
+        family = f"IPv{ipaddress.ip_address(value).version}"
+        if family in result:
+            raise SystemExit(f"duplicate {family} address")
+        result[family] = value
+    if set(result) != expected:
+        raise SystemExit(f"address families {set(result)} differ from requested {expected}")
+    return result
+
+server = json.loads((directory / "server.json").read_text())
+client = json.loads((directory / "client.json").read_text())
+service = json.loads((directory / "service.json").read_text())
+installation = json.loads((directory / "network-evidence.json").read_text())
+if installation["spec"].get("networkStack") != sys.argv[3]:
+    raise SystemExit("API server did not retain the requested networkStack")
+evidence = installation["status"]["network"]
+if set(evidence["addressFamilies"]) != expected or evidence["observedNodes"] != 3 or evidence["successfulProbes"] != 12 * len(expected):
+    raise SystemExit(f"incomplete controller network evidence: {evidence}")
+if server["spec"]["nodeName"] == client["spec"]["nodeName"]:
+    raise SystemExit("independent network probes must cross nodes")
+addresses([entry["ip"] for entry in client["status"]["podIPs"]])
+for kind, values in [("Pod", [entry["ip"] for entry in server["status"]["podIPs"]]), ("Service", service["spec"]["clusterIPs"])]:
+    for family, value in sorted(addresses(values).items()):
+        host = f"[{value}]" if family == "IPv6" else value
+        print(f"{family}\t{kind}\t{host}")
+for family in sorted(expected):
+    print(f"{family}\tDNS\toperator-network-server.default.svc.cluster.local")
+PYTHON
+while IFS=$'\t' read -r family kind destination; do
+  family_flag=--ipv4
+  if [[ "${family}" == IPv6 ]]; then family_flag=--ipv6; fi
+  response=$(kubectl -n default exec operator-network-client -- curl "${family_flag}" --noproxy '*' \
+    --fail --silent --show-error --max-time 15 "http://${destination}:8080/hostname")
+  [[ "${response}" == operator-network-server ]]
+  printf '%s %s connectivity passed\n' "${family}" "${kind}" | tee -a "${log_dir}/connectivity.txt"
+done <"${log_dir}/destinations.tsv"
 # Independent probes supplement the controller's network verification.
 kubectl -n kube-system get koi/network -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' | grep -qx VerificationComplete

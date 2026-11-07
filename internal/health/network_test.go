@@ -197,6 +197,23 @@ func TestNetworkObservationRequiresFreshFullCoverage(t *testing.T) {
 	}
 }
 
+func TestNetworkSnapshotRequiresConfiguredAddressFamilies(t *testing.T) {
+	for _, test := range []struct {
+		stack       string
+		dual, valid bool
+	}{{"", false, true}, {"ipv4", false, true}, {"dual_stack", true, true}, {"dual_stack", false, false}, {"ipv4", true, false}, {"ipv6", false, false}} {
+		t.Run(fmt.Sprintf("%s/dual=%t", test.stack, test.dual), func(t *testing.T) {
+			installation, kube, nodes := networkFixture(t, test.dual)
+			installation.Spec.NetworkStack = test.stack
+			observer := NetworkObserver{Reader: kube, Runner: runnerFunc(func(context.Context, string, string, string, []string) ([]byte, error) { return nil, nil })}
+			_, err := observer.snapshot(t.Context(), installation, nodes)
+			if (err == nil) != test.valid {
+				t.Fatalf("valid=%t error=%v", test.valid, err)
+			}
+		})
+	}
+}
+
 func TestNetworkObservationCannotInferUnconfiguredDataPlane(t *testing.T) {
 	observer := new(NetworkObserver)
 	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Mode: operatorv1alpha1.InstallationModeFull}}

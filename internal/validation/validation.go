@@ -14,6 +14,11 @@ import (
 // can write any child resource or change OVNDB membership.
 func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []error {
 	errs := make([]error, 0, 4)
+	switch spec.NetworkStack {
+	case "", "ipv4", "ipv6", "dual_stack":
+	default:
+		errs = append(errs, fmt.Errorf("spec.networkStack must be ipv4, ipv6, or dual_stack"))
+	}
 	if strings.TrimSpace(spec.Version) == "" || strings.EqualFold(spec.Version, "latest") {
 		errs = append(errs, fmt.Errorf("spec.version must be a pinned version and cannot be latest"))
 	}

@@ -41,6 +41,9 @@ spec:
                 mode:
                   type: string
                   enum: [full, controlPlaneOnly, dataPlaneOnly]
+                networkStack:
+                  type: string
+                  enum: [ipv4, ipv6, dual_stack]
                 central:
                   type: object
                   required: [mode, replicas]
