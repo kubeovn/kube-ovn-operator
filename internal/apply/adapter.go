@@ -6,7 +6,6 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
@@ -135,6 +134,11 @@ func (c *Client) persist(ctx context.Context, item *preparedObject) error {
 			if refreshErr := refreshPreparedObject(ctx, item); refreshErr != nil {
 				return fmt.Errorf("refresh %s after resource version conflict: %w", objectKey(item.object), refreshErr)
 			}
+			refreshed := []preparedObject{*item}
+			if err := dryRunAll(ctx, refreshed); err != nil {
+				return err
+			}
+			*item = refreshed[0]
 			if c.BeforeWrite != nil {
 				if guardErr := c.BeforeWrite(ctx); guardErr != nil {
 					return fmt.Errorf("guard workload retry: %w", guardErr)
@@ -151,8 +155,19 @@ func refreshPreparedObject(ctx context.Context, item *preparedObject) error {
 	if err != nil {
 		return err
 	}
+	if item.live == nil || live.GetUID() == "" || live.GetUID() != item.live.GetUID() || live.GetResourceVersion() == "" || live.GetDeletionTimestamp() != nil || live.GetName() != item.object.GetName() || live.GetNamespace() != item.object.GetNamespace() {
+		return ownershipConflict(item.object, "resource identity changed during apply")
+	}
+	labels := item.object.GetLabels()
+	identity := InstallationIdentity{Namespace: labels[InstallationNamespaceLabel], Name: labels[InstallationLabel], UID: types.UID(labels[InstallationUIDLabel])}
+	if err := checkOwnership(live, identity, true, len(item.object.GetOwnerReferences()) != 0); err != nil {
+		return err
+	}
 	item.live = live.DeepCopy()
 	item.expectedResourceVersion = live.GetResourceVersion()
+	// A newer version can include fields taken over by another manager. Never
+	// carry the old Force decision across a resourceVersion boundary.
+	item.force = false
 	return nil
 }
 
@@ -248,8 +263,6 @@ func patch(ctx context.Context, item preparedObject, dryRun bool) (*unstructured
 	return item.resource.Patch(ctx, item.object.GetName(), types.ApplyPatchType, payload, options)
 }
 
-var conflictManagerPattern = regexp.MustCompile(`conflicts with "([^"]+)"`)
-
 func isResourceVersionConflict(err error) bool {
 	return err != nil && apierrors.IsConflict(err) && strings.Contains(err.Error(), "object has been modified; please apply your changes to the latest version")
 }
@@ -262,22 +275,20 @@ func canForceSelfOwnedConflict(err error, live *unstructured.Unstructured) bool 
 	if err == nil || !apierrors.IsConflict(err) || live == nil {
 		return false
 	}
-	managers := conflictManagerPattern.FindAllStringSubmatch(err.Error(), -1)
-	if len(managers) == 0 {
+	status, ok := errors.AsType[*apierrors.StatusError](err)
+	if !ok || status.Status().Details == nil || len(status.Status().Details.Causes) == 0 {
 		return false
 	}
-	selfManaged := false
-	for _, match := range managers {
-		if len(match) != 2 || match[1] != DefaultFieldManager {
+	for _, cause := range status.Status().Details.Causes {
+		// Check each structured cause, including the singular conflict form.
+		// An unknown cause or mixed ownership must remain fail-closed.
+		suffix, self := strings.CutPrefix(cause.Message, `conflict with "`+DefaultFieldManager+`" using `+live.GetAPIVersion())
+		if cause.Type != metav1.CauseTypeFieldManagerConflict || cause.Field == "" || !self || (suffix != "" && !strings.HasPrefix(suffix, " at ")) {
 			return false
 		}
-		selfManaged = true
-	}
-	if !selfManaged {
-		return false
 	}
 	for _, entry := range live.GetManagedFields() {
-		if strings.TrimSpace(entry.Manager) == DefaultFieldManager {
+		if entry.Manager == DefaultFieldManager && entry.Operation == metav1.ManagedFieldsOperationUpdate && entry.APIVersion == live.GetAPIVersion() && entry.Subresource == "" {
 			return true
 		}
 	}

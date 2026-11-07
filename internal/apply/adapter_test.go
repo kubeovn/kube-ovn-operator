@@ -141,13 +141,14 @@ func TestDryRunUsesServerSideApplyAndCreateOptions(t *testing.T) {
 }
 
 func TestDryRunForcesOnlySelfManagedConflicts(t *testing.T) {
-	live := configMap("workload", nil)
+	live := ownedConfigMap("workload", testIdentity)
 	live.SetManagedFields([]metav1.ManagedFieldsEntry{{
 		Manager:    DefaultFieldManager,
 		Operation:  metav1.ManagedFieldsOperationUpdate,
 		FieldsType: "FieldsV1",
+		APIVersion: "v1",
 	}})
-	resource := &conflictResource{err: apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "workload", errors.New(`conflicts with "kube-ovn-operator" using apps/v1:`))}
+	resource := &conflictResource{err: apierrors.NewApplyConflict([]metav1.StatusCause{{Type: metav1.CauseTypeFieldManagerConflict, Field: ".data.managed", Message: `conflict with "kube-ovn-operator" using v1`}}, "self-owned conflict")}
 	objects := []preparedObject{{object: configMap("workload", nil), resource: resource, exists: true, live: live}}
 	if err := dryRunAll(t.Context(), objects); err != nil {
 		t.Fatal(err)
@@ -161,11 +162,12 @@ func TestDryRunForcesOnlySelfManagedConflicts(t *testing.T) {
 }
 
 func TestDryRunRejectsExternalManagedConflicts(t *testing.T) {
-	live := configMap("workload", nil)
+	live := ownedConfigMap("workload", testIdentity)
 	live.SetManagedFields([]metav1.ManagedFieldsEntry{{
 		Manager:    "helm",
 		Operation:  metav1.ManagedFieldsOperationUpdate,
 		FieldsType: "FieldsV1",
+		APIVersion: "v1",
 	}})
 	resource := &conflictResource{err: apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "workload", errors.New(`conflicts with "helm" using apps/v1:`))}
 	objects := []preparedObject{{object: configMap("workload", nil), resource: resource, exists: true, live: live}}
@@ -177,10 +179,58 @@ func TestDryRunRejectsExternalManagedConflicts(t *testing.T) {
 	}
 }
 
+func TestForceRejectsMixedOrUnstructuredConflicts(t *testing.T) {
+	live := ownedConfigMap("workload", testIdentity)
+	live.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: DefaultFieldManager, Operation: metav1.ManagedFieldsOperationUpdate, APIVersion: "v1"}})
+	self := metav1.StatusCause{Type: metav1.CauseTypeFieldManagerConflict, Field: ".data.managed", Message: `conflict with "kube-ovn-operator" using v1`}
+	external := metav1.StatusCause{Type: metav1.CauseTypeFieldManagerConflict, Field: ".data.external", Message: `conflict with "helm"`}
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"mixed managers", apierrors.NewApplyConflict([]metav1.StatusCause{self, external}, "conflicts with operator and helm")},
+		{"unstructured", apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "workload", errors.New(`conflicts with "kube-ovn-operator" using v1`))},
+		{"unknown cause", apierrors.NewApplyConflict([]metav1.StatusCause{self, {Type: metav1.CauseTypeUnexpectedServerResponse}}, "unknown conflict")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if canForceSelfOwnedConflict(tc.err, live) {
+				t.Fatal("unsafe conflict authorized Force")
+			}
+		})
+	}
+}
+
+func TestVersionRetryRejectsIdentityChanges(t *testing.T) {
+	for _, change := range []string{"uid", "labels", "owner", "deletion"} {
+		t.Run(change, func(t *testing.T) {
+			live := ownedConfigMap("workload", testIdentity)
+			switch change {
+			case "uid":
+				live.SetUID("replacement")
+			case "labels":
+				live.SetLabels(map[string]string{ManagedByLabel: "helm"})
+			case "owner":
+				live.SetOwnerReferences(nil)
+			case "deletion":
+				live.SetDeletionTimestamp(new(metav1.Now()))
+			}
+			resource := &versionConflictResource{live: live}
+			item := &preparedObject{object: ownedConfigMap("workload", testIdentity), live: ownedConfigMap("workload", testIdentity), resource: resource, exists: true, expectedResourceVersion: "1"}
+			if err := new(Client).persist(t.Context(), item); !errors.Is(err, ErrOwnershipConflict) {
+				t.Fatalf("identity change was accepted: %v", err)
+			}
+			if resource.patchCalls != 1 {
+				t.Fatalf("wrote after identity change: %d patches", resource.patchCalls)
+			}
+		})
+	}
+}
+
 func TestPersistRefreshesResourceVersionConflict(t *testing.T) {
 	resource := &versionConflictResource{}
 	item := &preparedObject{
-		object:                  configMap("workload", nil),
+		object:                  ownedConfigMap("workload", testIdentity),
+		live:                    ownedConfigMap("workload", testIdentity),
 		resource:                resource,
 		exists:                  true,
 		expectedResourceVersion: "1",
@@ -193,8 +243,8 @@ func TestPersistRefreshesResourceVersionConflict(t *testing.T) {
 	if err := client.persist(t.Context(), item); err != nil {
 		t.Fatal(err)
 	}
-	if resource.patchCalls != 2 || resource.getCalls != 1 {
-		t.Fatalf("expected one refresh and two patch attempts, got %d gets and %d patches", resource.getCalls, resource.patchCalls)
+	if resource.patchCalls != 3 || resource.getCalls != 1 {
+		t.Fatalf("expected one refresh, one dry-run and two patch attempts, got %d gets and %d patches", resource.getCalls, resource.patchCalls)
 	}
 	if item.expectedResourceVersion != "2" {
 		t.Fatalf("resourceVersion = %q, want refreshed version 2", item.expectedResourceVersion)
@@ -207,7 +257,8 @@ func TestPersistRefreshesResourceVersionConflict(t *testing.T) {
 func TestDryRunRefreshesResourceVersionConflict(t *testing.T) {
 	resource := &versionConflictResource{}
 	objects := []preparedObject{{
-		object:                  configMap("workload", nil),
+		object:                  ownedConfigMap("workload", testIdentity),
+		live:                    ownedConfigMap("workload", testIdentity),
 		resource:                resource,
 		exists:                  true,
 		expectedResourceVersion: "1",
@@ -301,11 +352,15 @@ type versionConflictResource struct {
 	dynamic.ResourceInterface
 	getCalls   int
 	patchCalls int
+	live       *unstructured.Unstructured
 }
 
 func (r *versionConflictResource) Get(_ context.Context, name string, _ metav1.GetOptions, _ ...string) (*unstructured.Unstructured, error) {
 	r.getCalls++
-	live := configMap(name, nil)
+	if r.live != nil {
+		return r.live.DeepCopy(), nil
+	}
+	live := ownedConfigMap(name, testIdentity)
 	live.SetResourceVersion("2")
 	return live, nil
 }
