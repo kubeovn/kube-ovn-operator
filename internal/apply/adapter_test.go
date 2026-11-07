@@ -535,3 +535,41 @@ func adoptedConfigMapWithOwner(name string, labels map[string]string) *unstructu
 	object.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "other", UID: "other", Controller: &controller}})
 	return object
 }
+
+// Deployment status can change between the initial self-conflict and its
+// forced retry. The refreshed version needs its own self-conflict retry.
+func TestDryRunRetriesSelfConflictAfterVersionRefresh(t *testing.T) {
+	live := ownedConfigMap("workload", testIdentity)
+	live.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: DefaultFieldManager, Operation: metav1.ManagedFieldsOperationUpdate, APIVersion: "v1"}})
+	resource := &interleavedConflictResource{live: live}
+	objects := []preparedObject{{object: live.DeepCopy(), live: live, exists: true, resource: resource, expectedResourceVersion: "1"}}
+	if err := dryRunAll(t.Context(), objects); err != nil {
+		t.Fatal(err)
+	}
+	if resource.calls != 4 {
+		t.Fatalf("expected two self-conflict attempts and one version refresh, got %d patches", resource.calls)
+	}
+}
+
+type interleavedConflictResource struct {
+	dynamic.ResourceInterface
+	live  *unstructured.Unstructured
+	calls int
+}
+
+func (r *interleavedConflictResource) Get(context.Context, string, metav1.GetOptions, ...string) (*unstructured.Unstructured, error) {
+	live := r.live.DeepCopy()
+	live.SetResourceVersion("2")
+	return live, nil
+}
+
+func (r *interleavedConflictResource) Patch(_ context.Context, _ string, _ types.PatchType, _ []byte, options metav1.PatchOptions, _ ...string) (*unstructured.Unstructured, error) {
+	r.calls++
+	if r.calls == 2 {
+		return nil, apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "workload", errors.New("object has been modified; please apply your changes to the latest version"))
+	}
+	if options.Force == nil || !*options.Force {
+		return nil, apierrors.NewApplyConflict([]metav1.StatusCause{{Type: metav1.CauseTypeFieldManagerConflict, Field: ".data.managed", Message: `conflict with "kube-ovn-operator" using v1`}}, "self-owned conflict")
+	}
+	return r.live.DeepCopy(), nil
+}

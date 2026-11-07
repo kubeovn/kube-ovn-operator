@@ -203,16 +203,20 @@ func dryRunAll(ctx context.Context, objects []preparedObject) error {
 		item := &objects[index]
 		var lastErr error
 		forced := false
-		for attempt := 0; attempt < 3; attempt++ {
+		// A self-conflict retry belongs to one resource version. Budget version
+		// refreshes independently so an intervening status update cannot consume
+		// the retry needed to migrate that version's Update ownership.
+		for refreshes := 0; ; {
 			if _, err := patch(ctx, *item, true); err == nil {
 				lastErr = nil
 				break
 			} else {
 				lastErr = err
-				if isResourceVersionConflict(err) && item.exists && attempt < 2 {
+				if isResourceVersionConflict(err) && item.exists && refreshes < 2 {
 					if refreshErr := refreshPreparedObject(ctx, item); refreshErr != nil {
 						return fmt.Errorf("server-side dry-run %s: %w", objectKey(item.object), refreshErr)
 					}
+					refreshes++
 					continue
 				}
 				if !item.force && canForceSelfOwnedConflict(err, item.live) {
