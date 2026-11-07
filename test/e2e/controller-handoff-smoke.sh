@@ -532,6 +532,37 @@ kill -STOP "${operator_pid}"
 automatic_replicaset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["replicaset"])' "${automatic_candidates_file}")
 automatic_roles_file="${test_dir}/automatic-roles.tsv"
 automatic_target_pod=""
+# Exercise the replacement's authenticated mutation path, not just its TCP
+# listener. OVS 3.5's one-shot test hook transfers leadership without changing
+# membership and clears itself after one main-loop iteration. Require both
+# databases to elect the replacement before admitting the next operation.
+for database_socket in ovnnb_db ovnsb_db; do
+  database_name=OVN_Northbound
+  if [[ "${database_socket}" == ovnsb_db ]]; then database_name=OVN_Southbound; fi
+  replacement_is_leader=0
+  for _ in $(seq 1 30); do
+    replacement_role=$(kubectl exec -n kube-ovn-operator-system "${replacement_pod}" -c ovn-central -- \
+      ovs-appctl -t "/var/run/ovn/${database_socket}.ctl" cluster/status "${database_name}" | awk '$1 == "Role:" {print $2}')
+    if [[ "${replacement_role}" == leader ]]; then
+      replacement_is_leader=1
+      break
+    fi
+    while read -r candidate; do
+      candidate_role=$(kubectl exec -n kube-ovn-operator-system "${candidate}" -c ovn-central -- \
+        ovs-appctl -t "/var/run/ovn/${database_socket}.ctl" cluster/status "${database_name}" | awk '$1 == "Role:" {print $2}')
+      if [[ "${candidate_role}" == leader ]]; then
+        kubectl exec -n kube-ovn-operator-system "${candidate}" -c ovn-central -- \
+          ovs-appctl -t "/var/run/ovn/${database_socket}.ctl" cluster/failure-test transfer-leadership >/dev/null
+      fi
+    done < <(python3 -c 'import json,sys; print("\n".join(item["name"] for item in json.load(open(sys.argv[1]))))' "${automatic_candidates_file}")
+    sleep 1
+  done
+  if [[ "${replacement_is_leader}" != 1 ]]; then
+    echo "replacement did not become ${database_name} leader before fence-agent acceptance" >&2
+    exit 1
+  fi
+  echo "replacement fence-agent will execute ${database_name} mutations on leader ${replacement_pod}"
+done
 for _ in $(seq 1 30); do
   : >"${automatic_roles_file}"
   while read -r candidate; do
