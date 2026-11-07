@@ -105,14 +105,15 @@ func (c *Client) Apply(ctx context.Context, objects []*unstructured.Unstructured
 	if err := dryRunAll(ctx, prepared); err != nil {
 		return err
 	}
-	for _, item := range prepared {
+	for index := range prepared {
+		item := &prepared[index]
 		if c.BeforeWrite != nil {
 			if err := c.BeforeWrite(ctx); err != nil {
 				return fmt.Errorf("guard workload write: %w", err)
 			}
 		}
 		if item.exists {
-			_, err = patch(ctx, item, false)
+			err = c.persist(ctx, item)
 		} else {
 			_, err = item.resource.Create(ctx, item.object, metav1.CreateOptions{
 				FieldManager: DefaultFieldManager, FieldValidation: metav1.FieldValidationStrict,
@@ -123,6 +124,29 @@ func (c *Client) Apply(ctx context.Context, objects []*unstructured.Unstructured
 		}
 	}
 	return nil
+}
+
+func (c *Client) persist(ctx context.Context, item *preparedObject) error {
+	for attempt := 0; ; attempt++ {
+		if _, err := patch(ctx, *item, false); err != nil {
+			if attempt >= 2 || !isResourceVersionConflict(err) {
+				return err
+			}
+			latest, getErr := item.resource.Get(ctx, item.object.GetName(), metav1.GetOptions{})
+			if getErr != nil {
+				return fmt.Errorf("refresh %s after resource version conflict: %w", objectKey(item.object), getErr)
+			}
+			item.live = latest.DeepCopy()
+			item.expectedResourceVersion = latest.GetResourceVersion()
+			if c.BeforeWrite != nil {
+				if guardErr := c.BeforeWrite(ctx); guardErr != nil {
+					return fmt.Errorf("guard workload retry: %w", guardErr)
+				}
+			}
+			continue
+		}
+		return nil
+	}
 }
 
 // Adopt validates the complete target set before writing any ownership
@@ -198,6 +222,10 @@ func patch(ctx context.Context, item preparedObject, dryRun bool) (*unstructured
 }
 
 var conflictManagerPattern = regexp.MustCompile(`conflicts with "([^"]+)"`)
+
+func isResourceVersionConflict(err error) bool {
+	return err != nil && apierrors.IsConflict(err) && strings.Contains(err.Error(), "object has been modified; please apply your changes to the latest version")
+}
 
 // canForceSelfOwnedConflict permits Force only when the API server identifies
 // every conflicting manager as this adapter. This repairs objects initially

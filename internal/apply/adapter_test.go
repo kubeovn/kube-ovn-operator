@@ -177,6 +177,33 @@ func TestDryRunRejectsExternalManagedConflicts(t *testing.T) {
 	}
 }
 
+func TestPersistRefreshesResourceVersionConflict(t *testing.T) {
+	resource := &versionConflictResource{}
+	item := &preparedObject{
+		object:                  configMap("workload", nil),
+		resource:                resource,
+		exists:                  true,
+		expectedResourceVersion: "1",
+	}
+	guardCalls := 0
+	client := &Client{BeforeWrite: func(context.Context) error {
+		guardCalls++
+		return nil
+	}}
+	if err := client.persist(t.Context(), item); err != nil {
+		t.Fatal(err)
+	}
+	if resource.patchCalls != 2 || resource.getCalls != 1 {
+		t.Fatalf("expected one refresh and two patch attempts, got %d gets and %d patches", resource.getCalls, resource.patchCalls)
+	}
+	if item.expectedResourceVersion != "2" {
+		t.Fatalf("resourceVersion = %q, want refreshed version 2", item.expectedResourceVersion)
+	}
+	if guardCalls != 1 {
+		t.Fatalf("retry guard calls = %d, want 1", guardCalls)
+	}
+}
+
 func testMapper() meta.RESTMapper {
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
 	mapper.Add(corev1.SchemeGroupVersion.WithKind("ConfigMap"), meta.RESTScopeNamespace)
@@ -249,6 +276,27 @@ type conflictResource struct {
 	dynamic.ResourceInterface
 	patchOptions []metav1.PatchOptions
 	err          error
+}
+
+type versionConflictResource struct {
+	dynamic.ResourceInterface
+	getCalls   int
+	patchCalls int
+}
+
+func (r *versionConflictResource) Get(_ context.Context, name string, _ metav1.GetOptions, _ ...string) (*unstructured.Unstructured, error) {
+	r.getCalls++
+	live := configMap(name, nil)
+	live.SetResourceVersion("2")
+	return live, nil
+}
+
+func (r *versionConflictResource) Patch(_ context.Context, _ string, _ types.PatchType, _ []byte, _ metav1.PatchOptions, _ ...string) (*unstructured.Unstructured, error) {
+	r.patchCalls++
+	if r.patchCalls == 1 {
+		return nil, apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "workload", errors.New("object has been modified; please apply your changes to the latest version"))
+	}
+	return new(unstructured.Unstructured), nil
 }
 
 func (r *conflictResource) Patch(_ context.Context, _ string, _ types.PatchType, _ []byte, options metav1.PatchOptions, _ ...string) (*unstructured.Unstructured, error) {
