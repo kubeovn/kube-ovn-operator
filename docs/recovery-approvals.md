@@ -91,3 +91,41 @@ The provider and binding rules are covered by unit tests. A real lost-quorum
 restore still requires the configured fenced executor and a multi-node
 acceptance test of the complete controller recovery/approval workflow; the
 healthy-quorum agent transport test does not establish that capability.
+
+
+## Healthy-quorum controller acceptance
+
+The disposable three-node controller handoff fixture also submits a real
+`KubeOVNRecoveryRequest` in `reconvert` mode. It enables scheduled capture long
+enough to obtain a fresh native NB/SB pair, disables the schedule, and checks
+that replaying the completed member journal does not replace that pair. It
+changes a marker in both databases and requires a foreign backup reference to
+fail admission without changing data or rollout state.
+
+For the valid request, acceptance observes the immutable plan and durable
+`Restoring`, `Workloads`, `Verifying`, and `Succeeded` phases. Before restore,
+all three owned workload controllers must carry the plan-bound quiesce marker
+and saved rollout state. Completion must remove those markers, restore the
+original Deployment pause/StatefulSet strategy, retain native cluster/server
+identities, and expose the restored snapshot marker on every node for both
+databases. The API request and controller status are used directly; no backup,
+plan or execution status is fabricated by the test.
+
+The request includes a fractional-second expiration. The persisted plan's
+timestamp uses the API status field's second precision, while its immutable
+digest and expiration admission retain the request's full precision.
+
+Temporary contention for either operation Lease leaves the request executing
+at its durable phase and retries admission. It does not invoke a restore step
+while another holder owns the Lease. Lease loss and restore failures remain
+terminal failures.
+
+An executing request whose plan pins the current installation UID owns its
+durable recovery phases. Normal installation reconciliation yields to it and
+rechecks that ownership under the installation Lease before mutations, so
+routine Lease events cannot starve recovery or undo rollout quiescence.
+
+This uses the healthy quorum path and needs no destructive recovery approval.
+It does not establish lost-quorum reconstruction, approval consumption during
+that failure, a version-changing rollback, or an application write barrier
+across the sequential NB/SB captures.

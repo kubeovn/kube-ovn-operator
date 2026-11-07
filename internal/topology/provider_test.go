@@ -9,6 +9,7 @@ import (
 	"uuid"
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -332,5 +333,91 @@ func TestRetainedVerificationUsesPinnedCountAcrossDesiredReplicaChanges(t *testi
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCurrentInventoryRebindsOnlyProcessesWithoutChangingBaseline(t *testing.T) {
+	for _, scenario := range []string{"pod restarted", "database replaced", "node replaced", "volume replaced"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newFixture(t)
+			ref, err := f.ensure(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.installation.Status.Topology.Inventory = ref
+			if err := f.kube.Status().Update(t.Context(), f.installation); err != nil {
+				t.Fatal(err)
+			}
+			pod := new(corev1.Pod)
+			if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "central-0"}, pod); err != nil {
+				t.Fatal(err)
+			}
+			pod.UID = "new-pod"
+			pod.Status.ContainerStatuses[0].ContainerID = "containerd://new-process"
+			if err := f.kube.Update(t.Context(), pod); err != nil {
+				t.Fatal(err)
+			}
+			pod.Status.ContainerStatuses[0].ContainerID = "containerd://new-process"
+			if err := f.kube.Status().Update(t.Context(), pod); err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "database replaced":
+				f.serverID = "bbbb0000-1111-2222-3333-444444444444"
+			case "node replaced":
+				node := new(corev1.Node)
+				if err := f.kube.Get(t.Context(), client.ObjectKey{Name: "node"}, node); err != nil {
+					t.Fatal(err)
+				}
+				node.UID = "new-node"
+				if err := f.kube.Update(t.Context(), node); err != nil {
+					t.Fatal(err)
+				}
+			case "volume replaced":
+				volume := new(corev1.PersistentVolume)
+				if err := f.kube.Get(t.Context(), client.ObjectKey{Name: "data"}, volume); err != nil {
+					t.Fatal(err)
+				}
+				volume.UID = "new-volume"
+				if err := f.kube.Update(t.Context(), volume); err != nil {
+					t.Fatal(err)
+				}
+			}
+			provider, ok := any(f.provider).(interface {
+				Current(context.Context, *api.KubeOVNInstallation) (health.CentralTopology, error)
+			})
+			if !ok {
+				t.Fatal("current inventory cannot rebind restarted processes")
+			}
+			leases := lease.New(f.kube)
+			err = leases.With(t.Context(), f.installation, lease.Installation, func(ctx context.Context) error {
+				return leases.With(ctx, f.installation, lease.Central, func(ctx context.Context) error {
+					current, err := provider.Current(ctx, f.installation)
+					if scenario != "pod restarted" {
+						if err == nil {
+							return errors.New("changed durable identity accepted")
+						}
+						return nil
+					}
+					if err != nil {
+						return err
+					}
+					if current.Members[0].Pod.UID != "new-pod" || current.Members[0].ContainerID != "containerd://new-process" {
+						return errors.New("current inventory reused old process identity")
+					}
+					saved, err := f.provider.Retained(ctx, f.installation)
+					if err != nil {
+						return err
+					}
+					if saved.Members[0].Pod.UID != "pod" || *f.installation.Status.Topology.Inventory != *ref {
+						return errors.New("process rebind changed immutable baseline")
+					}
+					return nil
+				})
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

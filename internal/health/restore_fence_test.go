@@ -1,14 +1,18 @@
 package health
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/fencing"
+	"github.com/kubeovn/kube-ovn-operator/internal/lease"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -30,13 +34,35 @@ func TestRemoteRestoreFencePreflightsEveryRetainedCentralPod(t *testing.T) {
 		t.Fatal(err)
 	}
 	fence := &RemoteRestoreFence{Remote: remote}
-	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"}}
+	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "installation"}}
 	topology := CentralTopology{Members: []CentralIdentity{
 		restoreFenceMember("central-0", "00000000-0000-0000-0000-000000000001"),
 		restoreFenceMember("central-1", "00000000-0000-0000-0000-000000000002"),
 	}}
-	if err := fence.ReadyFor(t.Context(), installation, topology); err == nil || !strings.Contains(err.Error(), "central-1") {
-		t.Fatalf("unarmed retained Pod was accepted: %v", err)
+	_, kube, _ := healthFixture(t)
+	if err := coordinationv1.AddToScheme(kube.Scheme()); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range []lease.Scope{lease.Installation, lease.Central} {
+		if err := kube.Create(t.Context(), &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+			Name: lease.Name(scope, installation.Name), Namespace: installation.Namespace, UID: types.UID(string(scope) + "-lease"),
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation", Name: installation.Name, UID: installation.UID, Controller: new(true)}},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager := lease.New(kube)
+	if err := manager.With(t.Context(), installation, lease.Installation, func(ctx context.Context) error {
+		return manager.With(ctx, installation, lease.Central, func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+			defer cancel()
+			if err := fence.ReadyFor(ctx, installation, topology); err == nil || !strings.Contains(err.Error(), "central-1") {
+				t.Fatalf("unarmed retained Pod was accepted: %v", err)
+			}
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
 	}
 	if len(seen) != 2 {
 		t.Fatalf("readiness probes = %v, want both retained Pods", seen)

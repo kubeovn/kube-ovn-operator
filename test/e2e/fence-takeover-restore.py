@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Exercise real agents only in the disposable controller-handoff Kind fixture."""
 
+import contextlib
 import datetime
 import http.client
 import json
+import os
 import re
+import select
 import ssl
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -273,6 +278,181 @@ def run(certificate_dir):
     print("Lease expiry: readiness failed closed, membership and restore rejected; reacquisition armed all three agents", flush=True)
 
 
+
+def patch_installation(patch):
+    return json.loads(kubectl("patch", "koi", INSTALLATION, "--type=merge",
+                              "-p", json.dumps({"spec": patch}), "-o", "json"))
+
+
+def controllers(fixture):
+    objects = json.loads(kubectl("get", "deployments,statefulsets", "-l",
+                                f"operator.kubeovn.io/installation-uid={fixture.installation_uid}",
+                                "-o", "json"))["items"]
+    check(len(objects) == 3, "expected one Deployment and two replacement StatefulSets")
+    return objects
+
+
+def controller_state(objects):
+    return {item["metadata"]["uid"]: (item["spec"].get("paused", False),
+            item["spec"].get("updateStrategy")) for item in objects}
+
+
+def create_recovery(name, backup_ref):
+    request = {"apiVersion": "operator.kubeovn.io/v1alpha1", "kind": "KubeOVNRecoveryRequest",
+               "metadata": {"name": name, "namespace": NAMESPACE},
+               "spec": {"installationRef": INSTALLATION, "reason": "Disposable Kind native restore acceptance",
+                        "mode": "reconvert", "backupRef": backup_ref, "approvedBy": "kind-e2e-audit",
+                        "expiresAt": (datetime.datetime.now(datetime.timezone.utc)
+                                      + datetime.timedelta(minutes=15)).isoformat().replace("+00:00", "Z")}}
+    return json.loads(kubectl("create", "-f", "-", "-o", "json", data=json.dumps(request).encode()))
+
+
+def recovery_statuses(request, timeout=240):
+    # Start from the create response's resourceVersion: even phases that finish
+    # before this watch connects remain observable from the API event history.
+    query = urllib.parse.urlencode({"watch": "true", "resourceVersion": request["metadata"]["resourceVersion"],
+                                    "fieldSelector": "metadata.name=" + request["metadata"]["name"],
+                                    "timeoutSeconds": timeout})
+    path = f"/apis/operator.kubeovn.io/v1alpha1/namespaces/{NAMESPACE}/kubeovnrecoveryrequests?{query}"
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(["kubectl", "--context", CONTEXT, f"--request-timeout={timeout + 5}s",
+                                    "get", "--raw", path], stdout=subprocess.PIPE, stderr=errors)
+        try:
+            pending = b""
+            last_status = {}
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                check(remaining > 0, f"controller recovery watch timed out: {last_status}")
+                ready, _, _ = select.select([process.stdout], [], [], remaining)
+                check(ready, f"controller recovery watch timed out: {last_status}")
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    errors.seek(0)
+                    raise AssertionError(f"controller recovery watch ended before completion: {errors.read().decode()}")
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    if not line.strip():
+                        continue
+                    event = json.loads(line)
+                    check(event.get("type") != "ERROR", f"recovery watch API error: {event}")
+                    current = event["object"]
+                    check(current["metadata"]["uid"] == request["metadata"]["uid"], "recovery request was replaced")
+                    last_status = current.get("status", {})
+                    yield last_status
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            process.stdout.close()
+
+
+def native_membership(topology):
+    # Rollout may replace a Pod while the native database, Node, workload and
+    # storage identities remain pinned by the controller's topology verifier.
+    return {(database, value[1]): value for (_, database), value in topology.items()}
+
+
+def run_controller_recovery(certificate_dir, backup_dir):
+    fixture = Fixture(certificate_dir)
+    before = native_membership(fixture.topology())
+    original_state = controller_state(controllers(fixture))
+    for database, stem, table in DATABASES:
+        leader = next(p for p in fixture.endpoints if fixture.status(p, database, stem)[0]["Role"] == "leader")
+        fixture.write_marker(leader, database, stem, table, "controller-snapshot")
+    previous = resource("koi", INSTALLATION).get("status", {}).get("lastBackup", {}).get("id")
+    patch_installation({"upgrade": {"backup": {"required": True, "destination": backup_dir.resolve().as_uri(), "schedule": "1m"}}})
+
+    def captured():
+        backup = resource("koi", INSTALLATION).get("status", {}).get("lastBackup", {})
+        return backup.get("id") and backup["id"] != previous
+
+    eventually("controller captures a fresh scheduled native backup pair", captured, timeout=180)
+    backup = resource("koi", INSTALLATION)["status"]["lastBackup"]
+    check(set(backup["databaseRefs"]) == {d[0] for d in DATABASES}, "scheduled backup lacks NB/SB references")
+    installation = patch_installation({"upgrade": {"backup": {"schedule": ""}}})
+    # The completed member journal is still reconciled. It must not replace a
+    # newer scheduled pair with the older pre-replacement backup summary.
+    time.sleep(5)
+    check(resource("koi", INSTALLATION)["status"]["lastBackup"]["id"] == backup["id"],
+          "completed member lifecycle overwrote the newer scheduled backup")
+    print("Controller scheduled backup: fresh native NB/SB pair remains pinned after scheduling is disabled", flush=True)
+    for database, stem, table in DATABASES:
+        leader = next(p for p in fixture.endpoints if fixture.status(p, database, stem)[0]["Role"] == "leader")
+        fixture.write_marker(leader, database, stem, table, "controller-changed")
+
+    create_recovery("controller-invalid-backup", "sha256:" + "f" * 64)
+    eventually("invalid backup request fails admission",
+               lambda: resource("kubeovnrecoveryrequest", "controller-invalid-backup").get("status", {}).get("phase") == "Failed")
+    invalid = resource("kubeovnrecoveryrequest", "controller-invalid-backup")["status"]
+    check(any(c.get("reason") == "BackupMismatch" for c in invalid["conditions"]),
+          "invalid backup was rejected for an unrelated reason")
+    check(not invalid.get("execution"), "invalid backup reached execution")
+    check(controller_state(controllers(fixture)) == original_state, "rejected request changed rollout state")
+    for database, stem, table in DATABASES:
+        fixture.wait_marker(database, stem, table, "controller-changed")
+
+    for attempt in range(2):
+        if attempt:
+            for database, stem, table in DATABASES:
+                leader = next(p for p in fixture.endpoints if fixture.status(p, database, stem)[0]["Role"] == "leader")
+                fixture.write_marker(leader, database, stem, table, "controller-changed")
+        name = "controller-native-restore" + ("-repeat" if attempt else "")
+        request = create_recovery(name, backup["id"])
+        seen = set()
+        plan = None
+        with contextlib.closing(recovery_statuses(request)) as statuses:
+            for status in statuses:
+                check(status.get("phase") not in ("Failed", "Expired"), f"controller recovery failed: {status}")
+                if status.get("plan"):
+                    if plan is None:
+                        plan = status["plan"]
+                        check(plan["installationUID"] == fixture.installation_uid
+                              and plan["installationGeneration"] == installation["metadata"]["generation"]
+                              and plan["backupRef"] == backup["id"]
+                              and plan["databaseRefs"] == backup["databaseRefs"]
+                              and plan["topologyDigest"] == backup["topologyDigest"], "recovery plan lost its admitted bindings")
+                    check(status["plan"] == plan, "immutable recovery plan changed during execution")
+                phase = status.get("execution", {}).get("phase")
+                if phase and phase not in seen:
+                    seen.add(phase)
+                    print(f"Controller recovery phase: {phase}", flush=True)
+                if phase == "Restoring":
+                    for item in controllers(fixture):
+                        annotations = item["metadata"].get("annotations", {})
+                        check(annotations.get("operator.kubeovn.io/rollback-quiesced") == plan["digest"],
+                              "restore began without the operation-bound rollout quiesce marker")
+                        check("operator.kubeovn.io/rollback-state" in annotations, "original rollout state was not persisted")
+                        if item["kind"] == "Deployment":
+                            check(item["spec"].get("paused"), "restore began before Deployment pause")
+                        else:
+                            check(item["spec"]["updateStrategy"]["type"] == "OnDelete", "restore began before StatefulSet freeze")
+                if status.get("phase") == "Succeeded":
+                    break
+        check({"Restoring", "Workloads", "Verifying", "Succeeded"} <= seen,
+              f"recovery skipped durable execution phases: {seen}")
+        check(status.get("completedAt") and status["execution"].get("startedAt")
+              and status["execution"].get("completedAt"), "recovery completion lacks audit timestamps")
+        fixture = Fixture(certificate_dir)
+        check(controller_state(controllers(fixture)) == original_state, "recovery did not restore original rollout state")
+        for item in controllers(fixture):
+            check(not any(key.startswith("operator.kubeovn.io/rollback-") for key in item["metadata"].get("annotations", {})),
+                  "completed recovery left durable quiesce markers")
+        for database, stem, table in DATABASES:
+            fixture.wait_marker(database, stem, table, "controller-snapshot")
+        check(native_membership(fixture.topology()) == before, "controller recovery changed native cluster/server identities")
+        print("Controller RecoveryRequest succeeded: rejected foreign backup; restored NB/SB snapshot on all three nodes; rollout state and membership preserved", flush=True)
+
+
 if __name__ == "__main__":
-    check(len(sys.argv) == 2, "usage: fence-takeover-restore.py CERTIFICATE_DIRECTORY")
-    run(Path(sys.argv[1]))
+    check(len(sys.argv) in (2, 4), "usage: fence-takeover-restore.py CERTIFICATE_DIRECTORY [controller-recovery BACKUP_DIRECTORY]")
+    if len(sys.argv) == 4:
+        check(sys.argv[2] == "controller-recovery", "unknown acceptance mode")
+        run_controller_recovery(Path(sys.argv[1]), Path(sys.argv[3]))
+    else:
+        run(Path(sys.argv[1]))

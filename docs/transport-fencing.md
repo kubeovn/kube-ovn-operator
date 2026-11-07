@@ -107,7 +107,14 @@ admission. The injected sidecar mounts the OVN database sockets and uses the
 same central Lease identity as the operator; its renderer configuration also
 creates the namespace-scoped Lease reader binding.
 The agent also serves `GET /healthz` for liveness and `GET /readyz` for
-readiness. Readiness is `503` until the Lease watcher has armed a current
+readiness. A readiness request carrying fence headers must match the complete
+current token; stale tokens return `409` and partial tokens return `400`.
+Before quiescing and before streaming restore input, the operator waits up to
+five seconds for the watcher to observe its exact holder/epoch, honoring Lease
+cancellation throughout. No restore body is consumed during this wait.
+Tokenless Kubernetes probes continue to report armed readiness.
+
+Readiness is `503` until the Lease watcher has armed a current
 fence, and becomes `200` only while that fence remains armed. Restore requests
 with a declared `Content-Length` larger than 1 GiB are rejected before staging;
 unknown-length requests are read into the same bounded temporary file and

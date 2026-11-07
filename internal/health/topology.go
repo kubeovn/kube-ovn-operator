@@ -98,11 +98,18 @@ var topologyDatabases = [2]string{"OVN_Northbound", "OVN_Southbound"}
 // and container restarts require fresh discovery of the same native identities,
 // node, workload and storage; they do not establish a new topology baseline.
 func (t CentralTopology) SameIdentity(other CentralTopology) bool {
-	return slices.EqualFunc(t.Members, other.Members, func(a, b CentralIdentity) bool {
-		a.Pod, b.Pod = ObjectIdentity{}, ObjectIdentity{}
-		a.ContainerID, b.ContainerID = "", ""
-		return reflect.DeepEqual(a, b)
-	})
+	stable := func(members []CentralIdentity) []CentralIdentity {
+		result := slices.Clone(members)
+		for i := range result {
+			result[i].Pod = ObjectIdentity{}
+			result[i].ContainerID = ""
+		}
+		slices.SortFunc(result, func(a, b CentralIdentity) int {
+			return cmp.Or(cmp.Compare(a.Workload.UID, b.Workload.UID), cmp.Compare(a.Node.UID, b.Node.UID), cmp.Compare(a.Databases[0].ServerID, b.Databases[0].ServerID))
+		})
+		return result
+	}
+	return reflect.DeepEqual(stable(t.Members), stable(other.Members))
 }
 
 // SameIdentityExceptEndpoints verifies that one exact retained member keeps
@@ -504,4 +511,74 @@ func (t CentralTopology) Validate() error {
 		}
 	}
 	return nil
+}
+
+// RebindRetainedProcesses refreshes surviving process endpoints without
+// approving any native topology transition. Missing or unready members retain
+// their last identity so a separately approved unique-loss operation can still
+// select them. Every restarted survivor must prove the same native databases,
+// node, workload and storage before its Pod/container identity is substituted.
+func RebindRetainedProcesses(ctx context.Context, reader client.Reader, runner CommandRunner, installation *api.KubeOVNInstallation, retained CentralTopology) (CentralTopology, error) {
+	if err := retained.Validate(); err != nil {
+		return CentralTopology{}, err
+	}
+	bound, err := newMembershipRunner(ctx, reader, runner, installation)
+	if err != nil {
+		return CentralTopology{}, err
+	}
+	result := CentralTopology{Members: slices.Clone(retained.Members)}
+	seen := map[int]bool{}
+	for _, name := range slices.Sorted(maps.Keys(bound.pods)) {
+		pod := bound.pods[name]
+		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || !podReady(pod) {
+			continue
+		}
+		current, err := centralKubernetesIdentity(ctx, reader, installation, pod)
+		if err != nil {
+			return CentralTopology{}, err
+		}
+		index := slices.IndexFunc(retained.Members, func(member CentralIdentity) bool {
+			return member.Node == current.Node && member.Workload == current.Workload
+		})
+		if index < 0 || seen[index] {
+			return CentralTopology{}, errors.New("owned central process is outside the retained node/workload inventory")
+		}
+		seen[index] = true
+		expected := retained.Members[index]
+		if current.Pod == expected.Pod && current.ContainerID == expected.ContainerID {
+			current.Databases = expected.Databases
+		} else {
+			for i, database := range topologyDatabases {
+				data, err := bound.Run(ctx, pod.Name, []string{"ovs-appctl", "--timeout=5", "-t", topologySocket(i), "cluster/status", database})
+				if err != nil {
+					return CentralTopology{}, err
+				}
+				status, err := ovnadmin.ParseClusterStatus(data, database)
+				if err != nil {
+					return CentralTopology{}, err
+				}
+				address, err := bound.clientAddress(ctx, pod.Name, i, status.Address)
+				if err != nil {
+					return CentralTopology{}, err
+				}
+				current.Databases[i] = DatabaseIdentity{Database: database, ClusterID: status.ClusterID, ServerID: status.ServerID, Address: status.Address, ClientAddress: address}
+			}
+		}
+		if !(CentralTopology{Members: []CentralIdentity{expected}}).SameIdentity(CentralTopology{Members: []CentralIdentity{current}}) {
+			return CentralTopology{}, errors.New("restarted central process changed a retained native, node, workload or storage identity")
+		}
+		if err := bound.validate(ctx, pod.Name); err != nil {
+			return CentralTopology{}, err
+		}
+		after, err := centralKubernetesIdentity(ctx, reader, installation, pod)
+		if err != nil {
+			return CentralTopology{}, err
+		}
+		after.Databases = current.Databases
+		if !reflect.DeepEqual(after, current) {
+			return CentralTopology{}, errors.New("central identity changed during process rebinding")
+		}
+		result.Members[index] = current
+	}
+	return result, result.Validate()
 }

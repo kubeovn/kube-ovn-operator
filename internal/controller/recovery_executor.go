@@ -94,7 +94,7 @@ func (e *LifecycleRecoveryExecutor) Execute(ctx context.Context, plan RecoveryPl
 				recovery, err = e.Lifecycle.Resume(centralCtx, installation, pinned)
 				return err
 			}
-			retained, err := e.Topology.Retained(centralCtx, installation)
+			retained, err := topology.SelectableInventory(centralCtx, e.Topology, installation)
 			if err != nil {
 				return fmt.Errorf("read retained topology for rejoin: %w", err)
 			}
@@ -208,8 +208,13 @@ func (e *LifecycleRecoveryExecutor) executeDestructive(ctx context.Context, plan
 		})
 	})
 	if err != nil {
+		// Contention can occur before either operation Lease is acquired. Keep
+		// the durable phase intact so a later reconcile can acquire and resume.
+		if errors.Is(err, lease.ErrHeld) {
+			return err
+		}
 		if errors.Is(err, ErrRollbackInProgress) {
-			execution.Reason = "destructive recovery phase accepted; waiting for convergence"
+			execution.Reason = err.Error()
 			if updateErr := e.Client.Status().Update(ctx, request); updateErr != nil {
 				return errors.Join(err, updateErr)
 			}

@@ -5,6 +5,11 @@ metadata:
   namespace: {{ .Values.namespace }}
 spec:
   replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: ovn-central
@@ -51,13 +56,19 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["/fixture/start.sh"]
           env:
-            - name: MASTER_NODES
+            - name: NODE_IPS
               value: {{ .Values.MASTER_NODES | quote }}
             - name: NODE_IP
               valueFrom:
                 fieldRef:
                   apiVersion: v1
                   fieldPath: status.hostIP
+          readinessProbe:
+            exec:
+              command: ["/fixture/ready.sh"]
+            periodSeconds: 1
+            timeoutSeconds: 3
+            failureThreshold: 2
           volumeMounts:
             - name: ovn-data
               mountPath: /etc/ovn
