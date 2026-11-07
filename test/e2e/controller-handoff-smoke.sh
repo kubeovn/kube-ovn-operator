@@ -516,63 +516,65 @@ if [[ "${automatic_candidate_count}" -lt 2 ]]; then
   exit 1
 fi
 
-# Stop the local operator while the ReplicaSet is reduced. The Deployment
-# remains a two-replica retirement contract until automatic admission pins the
-# lost endpoint; the replacement guard below removes any Pod created after the
-# operator resumes.
+# Stop the local operator while the ReplicaSet is reduced. The first seeded
+# control-plane node owns the initial RAFT leader. Keep that Pod as the
+# survivor: a permanently lost follower can be kicked through the leader's
+# fence-agent after its own Pod has disappeared.
 kill -STOP "${operator_pid}"
 automatic_replicaset=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["replicaset"])' "${automatic_candidates_file}")
-kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null
-kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null
-automatic_target_pod=""
-automatic_target_node=""
-for _ in $(seq 1 90); do
-  current_pods=$(kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json 2>/dev/null || true)
-  candidate=$(CANDIDATES_FILE="${automatic_candidates_file}" CURRENT_PODS="${current_pods}" python3 - <<'PYTHON'
-import json
-import os
-
-candidates = json.load(open(os.environ["CANDIDATES_FILE"]))
-current = {
-    item["metadata"]["name"]: item
-    for item in json.loads(os.environ["CURRENT_PODS"]).get("items", [])
-    if any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in item.get("metadata", {}).get("ownerReferences", []))
-}
-deleting = [item for item in candidates if item["name"] in current and current[item["name"]]["metadata"].get("deletionTimestamp")]
-if deleting:
-    print(f'{deleting[0]["name"]}|{deleting[0]["node"]}')
-elif len(current) >= 2:
-    print(f'{candidates[0]["name"]}|{candidates[0]["node"]}')
-PYTHON
-  )
-  if [[ -n "${candidate}" ]]; then
-    automatic_target_pod=${candidate%%|*}
-    automatic_target_node=${candidate#*|}
-    kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
-    break
-  fi
-  sleep 1
-done
-if [[ -z "${automatic_target_pod}" || -z "${automatic_target_node}" ]]; then
-  kill -CONT "${operator_pid}"
-  echo 'Deployment scale-down did not retire exactly one original Pod' >&2
-  exit 1
-fi
-automatic_survivor_pod=$(CANDIDATES_FILE="${automatic_candidates_file}" TARGET_POD="${automatic_target_pod}" python3 - <<'PYTHON'
+automatic_leader_node=${control_plane_nodes[0]}
+automatic_target_pod=$(LEADER_NODE="${automatic_leader_node}" CANDIDATES_FILE="${automatic_candidates_file}" python3 - <<'PYTHON'
 import json
 import os
 
 for item in json.load(open(os.environ["CANDIDATES_FILE"])):
-    if item["name"] != os.environ["TARGET_POD"]:
+    if item["node"] != os.environ["LEADER_NODE"]:
+        print(item["name"])
+        break
+PYTHON
+)
+if [[ -z "${automatic_target_pod}" ]]; then
+  kill -CONT "${operator_pid}"
+  echo "could not identify a non-leader Deployment Pod on ${automatic_leader_node}" >&2
+  exit 1
+fi
+automatic_target_node=$(CANDIDATES_FILE="${automatic_candidates_file}" TARGET_POD="${automatic_target_pod}" python3 - <<'PYTHON'
+import json
+import os
+
+for item in json.load(open(os.environ["CANDIDATES_FILE"])):
+    if item["name"] == os.environ["TARGET_POD"]:
+        print(item["node"])
+        break
+PYTHON
+)
+automatic_survivor_pod=$(LEADER_NODE="${automatic_leader_node}" CANDIDATES_FILE="${automatic_candidates_file}" TARGET_POD="${automatic_target_pod}" python3 - <<'PYTHON'
+import json
+import os
+
+for item in json.load(open(os.environ["CANDIDATES_FILE"])):
+    if item["node"] == os.environ["LEADER_NODE"] and item["name"] != os.environ["TARGET_POD"]:
         print(item["name"])
         break
 PYTHON
 )
 if [[ -z "${automatic_survivor_pod}" ]]; then
   kill -CONT "${operator_pid}"
-  echo 'could not identify the retained Deployment survivor Pod' >&2
+  echo "could not identify the seeded leader Deployment survivor on ${automatic_leader_node}" >&2
   exit 1
 fi
+kubectl annotate pod "${automatic_survivor_pod}" -n kube-ovn-operator-system \
+  controller.kubernetes.io/pod-deletion-cost=2147483647 --overwrite >/dev/null
+kubectl annotate pod "${automatic_target_pod}" -n kube-ovn-operator-system \
+  controller.kubernetes.io/pod-deletion-cost=-2147483648 --overwrite >/dev/null
+kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":true}}' >/dev/null
+kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null
+for _ in $(seq 1 90); do
+  if ! kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
 for _ in $(seq 1 30); do
   if ! kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
     break
