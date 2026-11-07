@@ -17,6 +17,7 @@ import (
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
 	"github.com/kubeovn/kube-ovn-operator/internal/central"
+	"github.com/kubeovn/kube-ovn-operator/internal/fenceagent"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/prepare"
 	batchv1 "k8s.io/api/batch/v1"
@@ -99,13 +100,24 @@ type binding struct {
 type Provisioner struct {
 	kube         client.Client
 	installation *api.KubeOVNInstallation
+	fenceAgent   *fenceagent.Config
 }
 
-func New(kube client.Client, installation *api.KubeOVNInstallation) (*Provisioner, error) {
+func New(kube client.Client, installation *api.KubeOVNInstallation, configs ...*fenceagent.Config) (*Provisioner, error) {
 	if kube == nil || installation == nil || installation.Name == "" || installation.Namespace == "" || installation.UID == "" {
 		return nil, errors.New("uncached client and installation identity are required")
 	}
-	return &Provisioner{kube: kube, installation: installation.DeepCopy()}, nil
+	if len(configs) > 1 {
+		return nil, errors.New("at most one fence-agent configuration is allowed")
+	}
+	p := &Provisioner{kube: kube, installation: installation.DeepCopy()}
+	if len(configs) == 1 && configs[0] != nil {
+		if err := configs[0].Validate(); err != nil {
+			return nil, err
+		}
+		p.fenceAgent = new(*configs[0])
+	}
+	return p, nil
 }
 
 // Prepare persists a reservation before creating a Job. Retry the same request
@@ -228,6 +240,9 @@ func (p *Provisioner) Start(ctx context.Context, ref Reference, launch central.R
 		return Reference{}, err
 	}
 	workload := p.statefulSet(request, ref, config)
+	if err := p.injectMemberFenceAgent(workload); err != nil {
+		return Reference{}, err
+	}
 	if err := p.ensure(ctx, request, ref, workload, ref.Name+"-workload"); err != nil {
 		return Reference{}, err
 	}

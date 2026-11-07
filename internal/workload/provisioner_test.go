@@ -11,6 +11,7 @@ import (
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/central"
+	"github.com/kubeovn/kube-ovn-operator/internal/fenceagent"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/prepare"
 	appsv1 "k8s.io/api/apps/v1"
@@ -514,5 +515,84 @@ func TestInstallationGenerationPinnedAcrossRestart(t *testing.T) {
 	f.p, _ = New(f.kube, current)
 	if err := f.guarded(t, func(ctx context.Context) error { _, err := f.p.Start(ctx, ref, f.launch(result)); return err }); err == nil {
 		t.Fatal("new installation generation reused old launch authorization")
+	}
+}
+
+func TestReplacementMemberRetainsFenceAgentAcrossRestart(t *testing.T) {
+	f := setup(t, nil)
+	config := &fenceagent.Config{Image: "registry.example/fence-agent@sha256:" + strings.Repeat("b", 64), ServerTLSSecret: "server-tls", ClientCASecret: "client-ca", Port: 8443}
+	var err error
+	f.p, err = New(f.kube, f.installation, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := f.prepare(t)
+	job := new(batchv1.Job)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: prepared.Record.Name + "-prepare"}, job); err != nil {
+		t.Fatal(err)
+	}
+	if len(job.Spec.Template.Spec.Containers) != 1 || *job.Spec.Template.Spec.AutomountServiceAccountToken {
+		t.Fatal("preparation received sidecar or API credentials")
+	}
+	result := f.complete(t, prepared.Record)
+	f.prepare(t)
+	var started Reference
+	if err := f.guarded(t, func(ctx context.Context) error {
+		var err error
+		started, err = f.p.Start(ctx, prepared.Record, f.launch(result))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	set := new(appsv1.StatefulSet)
+	if err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "test", Name: started.Name}, set); err != nil {
+		t.Fatal(err)
+	}
+	spec := set.Spec.Template.Spec
+	if len(spec.Containers) != 2 || spec.Containers[1].Name != "kube-ovn-fence-agent" || spec.Containers[1].Image != config.Image || spec.ServiceAccountName != fenceagent.ResourceName(f.installation.Name) || *spec.AutomountServiceAccountToken {
+		t.Fatal("replacement member lacks its isolated fence-agent identity")
+	}
+	for _, mount := range spec.Containers[0].VolumeMounts {
+		if mount.Name == "fence-api-access" {
+			t.Fatal("native member received API token")
+		}
+	}
+	foundSocket, foundToken := false, false
+	for _, mount := range spec.Containers[1].VolumeMounts {
+		foundSocket = foundSocket || mount.Name == "runtime" && mount.MountPath == "/var/run" && mount.ReadOnly
+		foundToken = foundToken || mount.Name == "fence-api-access" && mount.ReadOnly
+	}
+	if !foundSocket || !foundToken {
+		t.Fatal("fence sidecar cannot access socket or Lease token")
+	}
+	if !matchesPod(spec, spec) {
+		t.Fatal("valid fenced member rejected")
+	}
+	for _, mutation := range []string{"extra sidecar", "args", "token mount"} {
+		changed := spec.DeepCopy()
+		switch mutation {
+		case "extra sidecar":
+			changed.Containers = append(changed.Containers, corev1.Container{Name: "unexpected"})
+		case "args":
+			changed.Containers[1].Args = append(changed.Containers[1].Args, "--unknown")
+		case "token mount":
+			changed.Containers[0].VolumeMounts = append(changed.Containers[0].VolumeMounts, changed.Containers[1].VolumeMounts[len(changed.Containers[1].VolumeMounts)-1])
+		}
+		if matchesPod(spec, *changed) {
+			t.Fatalf("accepted workload mutation: %s", mutation)
+		}
+	}
+	f.p, err = New(f.kube, f.installation, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.guarded(t, func(ctx context.Context) error {
+		again, err := f.p.Start(ctx, prepared.Record, f.launch(result))
+		if again != started {
+			t.Fatal("restart replaced fenced member")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

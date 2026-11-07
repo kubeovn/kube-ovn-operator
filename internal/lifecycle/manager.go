@@ -13,6 +13,7 @@ import (
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/backup"
+	"github.com/kubeovn/kube-ovn-operator/internal/fenceagent"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/ovnadmin"
@@ -29,6 +30,7 @@ type Manager struct {
 	Runner       health.BackupRunner
 	StoreFactory func(*api.KubeOVNInstallation) (backup.Store, error)
 	RestoreFence RestoreFence
+	FenceAgent   *fenceagent.Config
 	MaxAge       time.Duration
 	MaxBytes     int64
 }
@@ -446,7 +448,7 @@ func (m *Manager) executor(installation *api.KubeOVNInstallation) (*Executor, fu
 	if closer, ok := store.(interface{ Close() error }); ok {
 		closeStore = func() { _ = closer.Close() }
 	}
-	executor, err := NewKubernetes(m.Client, installation, m.Runner, store, m.MaxAge, m.MaxBytes)
+	executor, err := NewKubernetes(m.Client, installation, m.Runner, store, m.MaxAge, m.MaxBytes, m.FenceAgent)
 	if err != nil {
 		closeStore()
 		return nil, func() {}, err
