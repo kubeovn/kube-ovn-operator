@@ -2483,7 +2483,7 @@ func (r *RecoveryRequestReconciler) Reconcile(ctx context.Context, req reconcile
 		if refreshErr := r.Get(ctx, client.ObjectKeyFromObject(request), latest); refreshErr == nil {
 			request = latest
 		}
-		if errors.Is(err, ErrRecoveryInProgress) {
+		if errors.Is(err, ErrRecoveryInProgress) || errors.Is(err, lease.ErrHeld) {
 			if progressErr := r.setRecoveryInProgress(ctx, request, now); progressErr != nil {
 				return reconcile.Result{}, progressErr
 			}

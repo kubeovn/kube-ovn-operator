@@ -532,6 +532,70 @@ func TestDestructiveRecoveryPersistsRestoreFailureAndStopsRetrying(t *testing.T)
 	}
 }
 
+func TestDestructiveRecoveryRetriesLeaseContention(t *testing.T) {
+	for _, phase := range []operatorv1alpha1.RollbackPhase{operatorv1alpha1.RollbackPhaseQuiescing, operatorv1alpha1.RollbackPhaseRestoring, operatorv1alpha1.RollbackPhaseWorkloads, operatorv1alpha1.RollbackPhaseVerifying} {
+		t.Run(string(phase), func(t *testing.T) {
+			now := time.Now().UTC().Truncate(time.Second)
+			scheme := controllerScheme(t)
+			installation := recoveryInstallation()
+			installation.Status.ObservedVersion = installation.Spec.Version
+			installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{
+				ID: testBackupPairID(), Version: installation.Status.ObservedVersion, TopologyDigest: installation.Status.Topology.Inventory.Digest,
+				DatabaseRefs: testBackupPairRefs(), CompletedAt: metav1.NewTime(now),
+			}
+			request := recoveryRequest(now)
+			request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
+			request.Spec.TargetMemberRef = ""
+			request.Spec.BackupRef = installation.Status.LastBackup.ID
+			kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
+			steps := &rollbackExecutorFake{}
+			executor := &LifecycleRecoveryExecutor{Client: kube, Leases: lease.New(kube), Topology: &lifecycleTopologyFake{retained: additionTopologyFixture()}, Lifecycle: &lifecycleCoordinatorFake{reader: kube}, Rollback: steps}
+			reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }, Executor: executor}
+			key := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)}
+			if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+				t.Fatal(err)
+			}
+			stored := new(operatorv1alpha1.KubeOVNRecoveryRequest)
+			if err := kube.Get(t.Context(), key.NamespacedName, stored); err != nil {
+				t.Fatal(err)
+			}
+			digest := stored.Status.Plan.Digest
+			stored.Status.Execution = &operatorv1alpha1.RecoveryExecutionStatus{Phase: phase, StartedAt: metav1.NewTime(now)}
+			if err := kube.Status().Update(t.Context(), stored); err != nil {
+				t.Fatal(err)
+			}
+			// Hold the real operation Lease as the installation reconciler would.
+			// No rollback step may run until this independent holder releases it.
+			if err := lease.New(kube).With(t.Context(), installation, lease.Installation, func(ctx context.Context) error {
+				result, err := reconciler.Reconcile(t.Context(), key)
+				if err != nil {
+					return err
+				}
+				if err := kube.Get(ctx, key.NamespacedName, stored); err != nil {
+					return err
+				}
+				if result.RequeueAfter <= 0 || stored.Status.Phase != operatorv1alpha1.RecoveryPhaseExecuting || stored.Status.Execution.Phase != phase || len(steps.phases) != 0 {
+					t.Fatalf("lease contention became terminal or advanced recovery: result=%+v status=%+v steps=%v", result, stored.Status, steps.phases)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			for range 5 {
+				if _, err := reconciler.Reconcile(t.Context(), key); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := kube.Get(t.Context(), key.NamespacedName, stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status.Phase != operatorv1alpha1.RecoveryPhaseSucceeded || stored.Status.Plan.Digest != digest || len(steps.phases) == 0 || steps.phases[0] != phase {
+				t.Fatalf("recovery did not resume its pinned phase after Lease release: status=%+v steps=%v", stored.Status, steps.phases)
+			}
+		})
+	}
+}
+
 type recoveryExecutorFunc func(context.Context, RecoveryPlan) error
 
 func (f recoveryExecutorFunc) Execute(ctx context.Context, plan RecoveryPlan) error {

@@ -208,6 +208,11 @@ func (e *LifecycleRecoveryExecutor) executeDestructive(ctx context.Context, plan
 		})
 	})
 	if err != nil {
+		// Contention can occur before either operation Lease is acquired. Keep
+		// the durable phase intact so a later reconcile can acquire and resume.
+		if errors.Is(err, lease.ErrHeld) {
+			return err
+		}
 		if errors.Is(err, ErrRollbackInProgress) {
 			execution.Reason = "destructive recovery phase accepted; waiting for convergence"
 			if updateErr := e.Client.Status().Update(ctx, request); updateErr != nil {

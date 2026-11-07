@@ -115,6 +115,11 @@ The request includes a fractional-second expiration. The persisted plan's
 timestamp uses the API status field's second precision, while its immutable
 digest and expiration admission retain the request's full precision.
 
+Temporary contention for either operation Lease leaves the request executing
+at its durable phase and retries admission. It does not invoke a restore step
+while another holder owns the Lease. Lease loss and restore failures remain
+terminal failures.
+
 This uses the healthy quorum path and needs no destructive recovery approval.
 It does not establish lost-quorum reconstruction, approval consumption during
 that failure, a version-changing rollback, or an application write barrier
