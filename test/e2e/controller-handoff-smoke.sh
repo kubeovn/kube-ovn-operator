@@ -694,70 +694,46 @@ JSON
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/automatic-replacement.json" >/dev/null
 kubectl cordon "${automatic_target_node}" >/dev/null
 
-# Keep the active ReplicaSet at one so the Kubernetes controllers cannot retain
-# a second unpinned replacement between lifecycle observations. This is
-# test-only coordination for the injection; the operator remains running and
-# must still drive the lifecycle.
-guard_automatic_workload() {
-  while true; do
-    automatic_replicas=$(kubectl get replicaset "${automatic_replicaset}" -n kube-ovn-operator-system -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
-    if [[ "${automatic_replicas}" != 1 ]]; then
-      kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
-    fi
-    kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json 2>/dev/null |
-      SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
+# Unpausing the Deployment intentionally creates one healthy ReplicaSet
+# replacement. PinDeploymentRetirementAfterLoss requires that replacement to
+# be Running and Ready before automatic admission, so let the Kubernetes
+# controller converge before resuming the operator. The survivor receives the
+# highest deletion cost so the later lifecycle scale-down retains it.
+kubectl annotate pod "${automatic_survivor_pod}" -n kube-ovn-operator-system \
+  controller.kubernetes.io/pod-deletion-cost=2147483647 --overwrite >/dev/null
+kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":false}}' >/dev/null
+automatic_replacement_pod=""
+for _ in $(seq 1 120); do
+  automatic_replacement_pod=$(kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json |
+    SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
 import json
 import os
-import subprocess
 import sys
 
 for item in json.load(sys.stdin).get("items", []):
-    owners = item.get("metadata", {}).get("ownerReferences", [])
-    controller = next((owner for owner in owners if owner.get("controller")), None)
-    if controller is not None and controller.get("kind") != "ReplicaSet":
-        continue
     if item["metadata"]["name"] == os.environ["SURVIVOR_POD"]:
+        continue
+    owners = item.get("metadata", {}).get("ownerReferences", [])
+    if not any(owner.get("controller") and owner.get("kind") == "ReplicaSet" for owner in owners):
         continue
     ready = item.get("status", {}).get("phase") == "Running" and any(
         condition.get("type") == "Ready" and condition.get("status") == "True"
         for condition in item.get("status", {}).get("conditions", [])
     )
     if ready:
-        continue
-    subprocess.run(["kubectl", "delete", "pod", item["metadata"]["name"], "-n", "kube-ovn-operator-system", "--grace-period=0", "--force", "--wait=false"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-' || true
-    sleep 0.2
-  done
-}
-guard_automatic_replacements() {
-  while true; do
-    kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o json 2>/dev/null |
-      SURVIVOR_POD="${automatic_survivor_pod}" python3 -c '
-import json
-import os
-import subprocess
-import sys
-
-for item in json.load(sys.stdin).get("items", []):
-    owners = item.get("metadata", {}).get("ownerReferences", [])
-    controller = next((owner for owner in owners if owner.get("controller")), None)
-    if controller is not None and controller.get("kind") != "ReplicaSet":
-        continue
-    if item["metadata"]["name"] == os.environ["SURVIVOR_POD"]:
-        continue
-    subprocess.run(["kubectl", "delete", "pod", item["metadata"]["name"], "-n", "kube-ovn-operator-system", "--grace-period=0", "--force", "--wait=false"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-' || true
-    sleep 0.2
-  done
-}
-# Start both fixture guards before unpausing the Deployment. The Kubernetes
-# Deployment controller may create a replacement immediately after the
-# pause is lifted, before the operator has admitted the automatic request.
-guard_automatic_workload &
-deployment_guard_pid=$!
-guard_automatic_replacements &
-replacement_guard_pid=$!
-kubectl patch deployment "${central_deployment}" -n kube-ovn-operator-system --type=merge -p '{"spec":{"paused":false}}' >/dev/null
+        print(item["metadata"]["name"])
+        break
+')
+  if [[ -n "${automatic_replacement_pod}" ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ -z "${automatic_replacement_pod}" ]]; then
+  echo 'Deployment replacement Pod did not become healthy before automatic admission' >&2
+  kubectl get pods -n kube-ovn-operator-system -l app=ovn-central -o wide || true
+  exit 1
+fi
 kill -CONT "${operator_pid}"
 
 previous_request_name=${request_name}
@@ -777,8 +753,6 @@ fi
 # Admission has pinned the unique lost endpoint. Keep the Deployment's
 # original desired replica count until the durable operation has removed the
 # old database member; the lifecycle executor rejects an early scale-down.
-kubectl annotate pod "${automatic_survivor_pod}" -n kube-ovn-operator-system \
-  controller.kubernetes.io/pod-deletion-cost=2147483647 --overwrite >/dev/null
 automatic_request_json=$(kubectl get configmap "${automatic_request_name}" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
 printf '%s\n' "${automatic_request_json}" | grep -Fq "${automatic_target_pod}"
 printf '%s\n' "${automatic_request_json}" | grep -Fq '"automaticReplacement":true'
@@ -791,32 +765,6 @@ echo "automatic loss replacement admitted: ${automatic_target_pod} on ${automati
 automatic_phase=""
 for _ in $(seq 1 240); do
   automatic_phase=$(journal_phase "${automatic_journal_name}" 2>/dev/null || true)
-  if [[ "${automatic_phase}" == Retiring ]]; then
-    # The executor owns the final Deployment scale-down after joint removal
-    # converges. Stop the ReplicaSet/paused-Deployment guard before that step,
-    # but keep the replacement guard alive so a late Kubernetes Pod cannot
-    # violate the pinned lost-endpoint retirement contract.
-    kill "${deployment_guard_pid}" 2>/dev/null || true
-    wait "${deployment_guard_pid}" 2>/dev/null || true
-    deployment_guard_pid=""
-  elif [[ "${automatic_phase}" == Complete ]]; then
-    # Once the durable operation has completed, the remaining fixture guard
-    # must stop writing before the follow-up Chart apply consumes its handoff.
-    kill "${replacement_guard_pid}" 2>/dev/null || true
-    wait "${replacement_guard_pid}" 2>/dev/null || true
-    replacement_guard_pid=""
-  else
-    # Keep the Deployment's active ReplicaSet at one while the operator drains
-    # the old database identity. A Deployment can otherwise restore its
-    # ReplicaSet count during a reconciliation and recreate the lost endpoint.
-    # Keep this guard through Retiring: the executor must first scale the
-    # Deployment itself, while a late Kubernetes replacement Pod would violate
-    # the pinned lost-endpoint retirement contract.
-    kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
-    if kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
-      kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
-    fi
-  fi
   if [[ "${automatic_phase}" == Complete ]]; then
     break
   fi
@@ -834,14 +782,6 @@ fi
 # replace the one-shot automatic member request with the next explicit
 # scale-in request. Leaving the approval-backed request in the spec would make
 # the controller infer a second automatic replacement after handoff.
-kill "${deployment_guard_pid}" 2>/dev/null || true
-wait "${deployment_guard_pid}" 2>/dev/null || true
-deployment_guard_pid=""
-kill "${replacement_guard_pid}" 2>/dev/null || true
-wait "${replacement_guard_pid}" 2>/dev/null || true
-replacement_guard_pid=""
-
-kubectl scale replicaset "${automatic_replicaset}" -n kube-ovn-operator-system --replicas=1 >/dev/null 2>&1 || true
 kubectl delete pod "${automatic_target_pod}" -n kube-ovn-operator-system --grace-period=0 --force --wait=false >/dev/null 2>&1 || true
 for _ in $(seq 1 30); do
   if ! kubectl get pod "${automatic_target_pod}" -n kube-ovn-operator-system >/dev/null 2>&1; then
