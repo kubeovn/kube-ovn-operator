@@ -60,6 +60,25 @@ func TestRunRejectsUnsafeTool(t *testing.T) {
 	}
 }
 
+func TestParseWorkloadArgumentsRequiresAbsoluteBoundInputs(t *testing.T) {
+	valid := []string{
+		"--workload-plan=/plan/plan.json", "--isolation-proof=/proof/proof.json",
+		"--target-root=/target", "--proc-root=/proc", "--backup-dir=/backups", "--member=new",
+	}
+	if _, err := parseWorkloadArguments(valid); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"--workload-plan=relative"},
+		append(append([]string(nil), valid...), "--member=other"),
+		append(append([]string(nil), valid...), "--unknown=/value"),
+	} {
+		if _, err := parseWorkloadArguments(args); err == nil {
+			t.Fatalf("unsafe workload arguments accepted: %v", args)
+		}
+	}
+}
+
 func fakeTool(t *testing.T, script string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ovsdb-tool")

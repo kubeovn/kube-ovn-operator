@@ -18,10 +18,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
+	"github.com/kubeovn/kube-ovn-operator/internal/recovery"
 )
 
 const maxOutput = 4 << 10
+
+const retainedRootPrefix = "/var/lib/ovn-rebuild-retained"
 
 type raftHeader struct {
 	ServerID        string   `json:"server_id"`
@@ -50,6 +54,9 @@ func run(ctx context.Context, args []string, tool string) error {
 	}
 	if err := validateTool(tool); err != nil {
 		return err
+	}
+	if len(args) > 0 && strings.HasPrefix(args[0], "--workload-plan=") {
+		return runWorkload(ctx, args)
 	}
 	if len(args) == 2 && args[0] == "inspect" {
 		identity, err := inspect(ctx, tool, args[1])
@@ -87,6 +94,233 @@ func run(ctx context.Context, args []string, tool string) error {
 		return fmt.Errorf("created cluster ID %q differs from target %q", identity.ClusterID, targetID)
 	}
 	return nil
+}
+
+type workloadArguments struct {
+	PlanPath   string
+	ProofPath  string
+	TargetRoot string
+	ProcRoot   string
+	BackupDir  string
+	MemberName string
+}
+
+func runWorkload(ctx context.Context, args []string) error {
+	arguments, err := parseWorkloadArguments(args)
+	if err != nil {
+		return err
+	}
+	planBytes, err := readPrivateRegular(arguments.PlanPath, 1<<20)
+	if err != nil {
+		return fmt.Errorf("read offline rebuild plan: %w", err)
+	}
+	var plan recovery.Plan
+	if err := json.Unmarshal(planBytes, &plan, json.RejectUnknownMembers(true)); err != nil {
+		return fmt.Errorf("decode offline rebuild plan: %w", err)
+	}
+	canonical, digest, err := plan.Canonical()
+	if err != nil {
+		return err
+	}
+	proofBytes, err := readPrivateRegular(arguments.ProofPath, 64<<10)
+	if err != nil {
+		return fmt.Errorf("read offline isolation proof: %w", err)
+	}
+	var proof recovery.IsolationProof
+	if err := json.Unmarshal(proofBytes, &proof, json.RejectUnknownMembers(true)); err != nil {
+		return fmt.Errorf("decode offline isolation proof: %w", err)
+	}
+	if err := proof.Validate(canonical); err != nil {
+		return err
+	}
+	member, ok := targetMember(canonical.TargetMembers, arguments.MemberName)
+	if !ok {
+		return fmt.Errorf("offline rebuild target member %q is not in the plan", arguments.MemberName)
+	}
+	if err := verifyTargetStorage(arguments.TargetRoot, canonical, member, digest); err != nil {
+		return err
+	}
+	isolation := &workloadIsolation{procRoot: arguments.ProcRoot, proof: proof, plan: canonical, digest: digest}
+	store, err := backup.OpenFileStore(arguments.BackupDir)
+	if err != nil {
+		return fmt.Errorf("open offline rebuild backups: %w", err)
+	}
+	defer func() { _ = store.Close() }()
+	native := recovery.CommandNative{Binary: executablePath()}
+	result, err := (&recovery.Executor{Root: arguments.TargetRoot, Backups: store, Isolation: isolation, Native: native, MaxBackupBytes: 1 << 30}).Rebuild(ctx, canonical, member.Name)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("encode offline rebuild result: %w", err)
+	}
+	_, err = os.Stdout.Write(append(encoded, '\n'))
+	return err
+}
+
+func parseWorkloadArguments(args []string) (workloadArguments, error) {
+	var result workloadArguments
+	seen := make(map[string]bool, len(args))
+	for _, argument := range args {
+		name, value, ok := strings.Cut(argument, "=")
+		if !ok {
+			return result, errors.New("offline rebuild workload arguments must use --name=value")
+		}
+		value = strings.TrimSpace(value)
+		if value == "" || seen[name] {
+			return result, errors.New("offline rebuild workload arguments are missing or duplicated")
+		}
+		seen[name] = true
+		switch name {
+		case "--workload-plan":
+			result.PlanPath = value
+		case "--isolation-proof":
+			result.ProofPath = value
+		case "--target-root":
+			result.TargetRoot = value
+		case "--proc-root":
+			result.ProcRoot = value
+		case "--backup-dir":
+			result.BackupDir = value
+		case "--member":
+			result.MemberName = value
+		default:
+			return result, fmt.Errorf("unknown offline rebuild workload argument %q", name)
+		}
+	}
+	if result.PlanPath == "" || result.ProofPath == "" || result.TargetRoot == "" || result.ProcRoot == "" || result.BackupDir == "" || result.MemberName == "" {
+		return result, errors.New("offline rebuild workload requires plan, proof, target root, proc root, backup dir and member")
+	}
+	for name, path := range map[string]string{"plan": result.PlanPath, "proof": result.ProofPath, "target root": result.TargetRoot, "proc root": result.ProcRoot, "backup dir": result.BackupDir} {
+		if !filepath.IsAbs(path) {
+			return result, fmt.Errorf("offline rebuild %s must be absolute", name)
+		}
+	}
+	return result, nil
+}
+
+func targetMember(members []recovery.Member, name string) (recovery.Member, bool) {
+	for _, member := range members {
+		if member.Name == name {
+			return member, true
+		}
+	}
+	return recovery.Member{}, false
+}
+
+type storageOwnershipProof struct {
+	PlanDigest  string `json:"planDigest"`
+	OperationID string `json:"operationID"`
+	MemberName  string `json:"memberName"`
+	VolumeUID   string `json:"volumeUID"`
+}
+
+func verifyTargetStorage(root string, plan recovery.Plan, member recovery.Member, digest string) error {
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+		return errors.New("offline rebuild target root must be an existing private directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return errors.New("offline rebuild target root belongs to another OS user")
+	}
+	marker := filepath.Join(root, ".kube-ovn-recovery-owner")
+	markerInfo, err := os.Lstat(marker)
+	if err != nil || !markerInfo.Mode().IsRegular() || markerInfo.Mode().Perm() != 0600 {
+		return errors.New("offline rebuild target ownership proof is missing or unsafe")
+	}
+	markerStat, ok := markerInfo.Sys().(*syscall.Stat_t)
+	if !ok || int(markerStat.Uid) != os.Geteuid() {
+		return errors.New("offline rebuild target ownership proof belongs to another OS user")
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		return fmt.Errorf("read offline rebuild target ownership proof: %w", err)
+	}
+	var proof storageOwnershipProof
+	if err := json.Unmarshal(data, &proof, json.RejectUnknownMembers(true)); err != nil {
+		return fmt.Errorf("decode offline rebuild target ownership proof: %w", err)
+	}
+	if proof.PlanDigest != digest || proof.OperationID != plan.OperationID || proof.MemberName != member.Name || proof.VolumeUID != member.Storage.VolumeUID {
+		return errors.New("offline rebuild target ownership proof does not match the plan")
+	}
+	return nil
+}
+
+type workloadIsolation struct {
+	procRoot string
+	proof    recovery.IsolationProof
+	plan     recovery.Plan
+	digest   string
+}
+
+func (i *workloadIsolation) OldProcessesIsolated(ctx context.Context, plan recovery.Plan) error {
+	if err := i.proof.Validate(plan); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(i.procRoot)
+	if err != nil {
+		return fmt.Errorf("read host process table: %w", err)
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !isPID(entry.Name()) {
+			continue
+		}
+		processRoot := filepath.Join(i.procRoot, entry.Name(), "root")
+		cwd := filepath.Join(i.procRoot, entry.Name(), "cwd")
+		for _, path := range []string{processRoot, cwd} {
+			value, err := os.Readlink(path)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return fmt.Errorf("inspect process isolation: %w", err)
+			}
+			if strings.Contains(value, retainedRootPrefix) {
+				return fmt.Errorf("retained OVN process %s still references rebuild storage", entry.Name())
+			}
+		}
+	}
+	return nil
+}
+
+func (i *workloadIsolation) TargetStorageOwned(_ context.Context, member recovery.Member, root string) error {
+	return verifyTargetStorage(root, i.plan, member, i.digest)
+}
+
+func isPID(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, character := range name {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func executablePath() string {
+	path, err := os.Executable()
+	if err != nil {
+		return "/recovery-native"
+	}
+	return path
+}
+
+func readPrivateRegular(path string, limit int64) ([]byte, error) {
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("path must be absolute")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, errors.New("path must reference a bounded regular file")
+	}
+	return os.ReadFile(path)
 }
 
 func inspect(ctx context.Context, tool, database string) (inspection, error) {

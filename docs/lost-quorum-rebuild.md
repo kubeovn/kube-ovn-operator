@@ -83,3 +83,31 @@ approved target. The OVS binary must contain the Kube-OVN target-CID
 but still generates a random ID, so `/recovery-native` detects and rejects
 that result. The helper is not yet wired into Kubernetes storage replacement
 or process startup.
+
+## Dedicated rebuild workload
+
+The native adapter runs in a one-shot, digest-pinned Kubernetes `Job` rendered
+by `recovery.WorkloadSpec`. The Job is separate from the ordinary operator
+Deployment and central member workloads. It is pinned to the target node, uses
+`hostPID` and `hostNetwork`, runs the versioned `/recovery-native` executable as
+a privileged container, and has a zero retry budget with a bounded deadline.
+Its root filesystem and every input volume are read-only except for the
+selected target PVC.
+
+The Job mounts the target PVC read-write, every retained member PVC read-only,
+the operator-owned backup PVC read-only, an immutable plan ConfigMap, and an
+independently produced isolation-proof ConfigMap. It also mounts the host
+`/proc` tree read-only so the helper can reject a process that still references
+the rebuild's retained mount paths. The helper refuses to start unless the
+target directory is private and owned by its effective UID, and contains a
+0600 `.kube-ovn-recovery-owner` marker binding the plan digest, operation ID,
+member name, and target volume UID.
+
+The isolation proof is not a Boolean approval. It contains the same canonical
+plan digest and operation ID, the complete retained member set, and a bounded
+verification timestamp. The helper validates that proof again inside the
+privileged workload and scans the host process table before the executor opens
+the target root. A missing, stale, partial, or mismatched proof fails closed.
+The workload does not delete retained PVCs, stop arbitrary host processes, or
+create a random cluster identity; those actions remain outside this boundary
+and require the controller's durable approval and fencing protocol.
