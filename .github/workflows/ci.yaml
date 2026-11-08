@@ -35,8 +35,20 @@ jobs:
           grep -q -- '--fence-agent-image=' /tmp/kube-ovn-operator-fencing.yaml
           grep -q 'fence-client-ca' /tmp/kube-ovn-operator-fencing.yaml
       - name: Render pinned upstream chart
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl --fail --location --silent --show-error https://github.com/kubeovn/kube-ovn/releases/download/v1.16.13/kube-ovn-v1.16.13.tgz --output /tmp/kube-ovn-v1.16.13.tgz
+          asset_url="$(curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            https://api.github.com/repos/kubeovn/kube-ovn/releases/tags/v1.16.13 \
+            | python3 -c 'import json, sys; print(next(a["url"] for a in json.load(sys.stdin)["assets"] if a["name"] == "kube-ovn-v1.16.13.tgz"))')"
+          curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            -H 'Accept: application/octet-stream' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "${asset_url}" --output /tmp/kube-ovn-v1.16.13.tgz
           KUBE_OVN_CHART_ARCHIVE=/tmp/kube-ovn-v1.16.13.tgz go test ./internal/chart -run TestReleasedKubeOVNChart -count=1
       - name: Test
         run: make test
