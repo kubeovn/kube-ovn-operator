@@ -48,6 +48,14 @@ identities for durable persistence by the caller. It never starts
 `ovsdb-server` or `ovn-northd`, removes retained storage, changes a PVC, or
 mutates Kubernetes.
 
+The operation directory is journaled before the first native write. A retry
+revalidates the exact canonical plan and target member, reuses only private
+single-link backup files whose bytes still match the authenticated record,
+reinspects any existing database identities, and publishes `result.json`
+atomically after both databases pass. An interrupted operation can therefore
+resume the missing database without recreating a completed one; unknown files,
+changed identities, and malformed journals stop the retry.
+
 The upstream `ovsdb-tool create-cluster` command generates a new cluster UUID
 and has no option to select one. A stock tool therefore cannot implement the
 `Native` capability safely: the executor rejects an observed UUID that differs
