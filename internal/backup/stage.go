@@ -27,8 +27,13 @@ func (s *StagedSnapshot) Close() error { return s.file.Close() }
 // Reader returns a new read-only view starting at the first verified byte.
 // The caller must keep the snapshot open until every consumer has finished.
 func (s *StagedSnapshot) Reader() io.Reader {
-	return io.NewSectionReader(s.file, 0, s.record.Size)
+	return snapshotReader{reader: io.NewSectionReader(s.file, 0, s.record.Size)}
 }
+
+// Do not expose SectionReader.Outer: it would reveal the writable staging fd.
+type snapshotReader struct{ reader *io.SectionReader }
+
+func (r snapshotReader) Read(data []byte) (int, error) { return r.reader.Read(data) }
 
 func (s *StagedSnapshot) Record() Record {
 	record := s.record

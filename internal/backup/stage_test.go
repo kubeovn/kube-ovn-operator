@@ -27,6 +27,11 @@ func TestStageSurvivesStoreMutationWithoutLiveSource(t *testing.T) {
 			return err
 		}
 		defer func() { _ = staged.Close() }()
+		if _, ok := staged.Reader().(interface {
+			Outer() (io.ReaderAt, int64, int64)
+		}); ok {
+			return errors.New("staged reader exposes its writable file through SectionReader.Outer")
+		}
 		path := filepath.Join(directory, strings.TrimPrefix(ref, "sha256:"), "snapshot.db")
 		if err := os.WriteFile(path, []byte("damaged after staging"), 0600); err != nil {
 			return err
