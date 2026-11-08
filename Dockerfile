@@ -8,6 +8,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/network-probe ./cm
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/member-prepare ./cmd/member-prepare
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/member-run ./cmd/member-run
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/fence-agent ./cmd/fence-agent
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/recovery-native ./cmd/recovery-native
 
 FROM build AS central-test-build
 RUN CGO_ENABLED=0 go test -c -o /out/central.test ./internal/central
@@ -21,6 +22,7 @@ RUN set -eu; mkdir /opt/ovn-native; \
 ENV PATH="/opt/ovn-native:${PATH}"
 COPY --from=build /out/member-prepare /member-prepare
 COPY --from=build /out/member-run /member-run
+COPY --from=build /out/recovery-native /recovery-native
 USER 65532:65532
 ENTRYPOINT ["/member-run"]
 CMD []

@@ -35,8 +35,20 @@ jobs:
           grep -q -- '--fence-agent-image=' /tmp/kube-ovn-operator-fencing.yaml
           grep -q 'fence-client-ca' /tmp/kube-ovn-operator-fencing.yaml
       - name: Render pinned upstream chart
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl --fail --location --silent --show-error https://github.com/kubeovn/kube-ovn/releases/download/v1.16.13/kube-ovn-v1.16.13.tgz --output /tmp/kube-ovn-v1.16.13.tgz
+          asset_url="$(curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            https://api.github.com/repos/kubeovn/kube-ovn/releases/tags/v1.16.13 \
+            | python3 -c 'import json, sys; print(next(a["url"] for a in json.load(sys.stdin)["assets"] if a["name"] == "kube-ovn-v1.16.13.tgz"))')"
+          curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            -H 'Accept: application/octet-stream' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "${asset_url}" --output /tmp/kube-ovn-v1.16.13.tgz
           KUBE_OVN_CHART_ARCHIVE=/tmp/kube-ovn-v1.16.13.tgz go test ./internal/chart -run TestReleasedKubeOVNChart -count=1
       - name: Test
         run: make test
@@ -74,9 +86,23 @@ jobs:
         run: go test -race ./internal/lease ./internal/apply ./internal/controller ./internal/ovnadmin ./internal/health ./internal/probe ./internal/backup ./internal/approval ./internal/prepare ./internal/recovery ./internal/central ./internal/workload ./internal/lifecycle ./internal/topology
       - name: Vet
         run: make vet
+      - name: Install golangci-lint from release API
+        run: |
+          asset_url="$(curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            https://api.github.com/repos/golangci/golangci-lint/releases/tags/v2.14.0 \
+            | python3 -c 'import json, sys; print(next(a["url"] for a in json.load(sys.stdin)["assets"] if a["name"] == "golangci-lint-2.14.0-linux-amd64.tar.gz"))')"
+          curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            -H 'Accept: application/octet-stream' "${asset_url}" \
+            --output /tmp/golangci-lint.tar.gz
+          tar -xzf /tmp/golangci-lint.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/golangci-lint-2.14.0-linux-amd64/golangci-lint /usr/local/bin/golangci-lint
+          golangci-lint version
       - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.14.0
+          install-mode: none
       - name: Build
         run: make build
 
@@ -150,8 +176,13 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Install kind
         run: |
+          kind_url="$(curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            https://api.github.com/repos/kubernetes-sigs/kind/releases/tags/v0.29.0 \
+            | python3 -c 'import json, sys; print(next(a["url"] for a in json.load(sys.stdin)["assets"] if a["name"] == "kind-linux-amd64"))')"
           curl --fail --location --silent --show-error \
-            https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64 \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            -H 'Accept: application/octet-stream' "${kind_url}" \
             --output /tmp/kind
           chmod +x /tmp/kind
           sudo mv /tmp/kind /usr/local/bin/kind

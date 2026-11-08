@@ -70,7 +70,16 @@ and then invokes `inspect <db>`. The inspection command must return one JSON
 object containing `clusterID`, `serverID`, `address`, and `clustered`; reading
 the identity in one helper invocation avoids accepting a file that changed
 between separate metadata queries. Output is bounded and every field is
-validated. The helper path must be an absolute executable without setuid,
-setgid, or file capabilities. The repository does not ship this helper yet; a
-stock `ovsdb-tool` is expected to reject the extra identity flag or fail the
-subsequent identity check.
+validated. The helper path must be an absolute, non-writable executable
+without setuid, setgid, or file capabilities. The repository ships this
+adapter as `/recovery-native`; a stock `ovsdb-tool` is expected to reject the
+extra identity flag or fail the subsequent identity check.
+
+The adapter translates the recovery protocol to
+`ovsdb-tool --cid=<uuid> create-cluster` and reads one `db-raft-header` result;
+it rejects joining headers and verifies that the created cluster ID equals the
+approved target. The OVS binary must contain the Kube-OVN target-CID
+`create-cluster` extension. The stock binary accepts the global `--cid` option
+but still generates a random ID, so `/recovery-native` detects and rejects
+that result. The helper is not yet wired into Kubernetes storage replacement
+or process startup.
