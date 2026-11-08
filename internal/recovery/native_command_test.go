@@ -17,14 +17,8 @@ func TestCommandNativeBindsTargetIDAndInspectsIdentity(t *testing.T) {
 				return "", errors.New("unexpected create arguments")
 			}
 			return "", nil
-		case "db-cid":
-			return targetNB + "\n", nil
-		case "db-sid":
-			return "eeee0000-1111-2222-3333-555555555555\n", nil
-		case "db-local-address":
-			return "tcp:192.0.2.4:6643\n", nil
-		case "db-is-clustered":
-			return "yes\n", nil
+		case "inspect":
+			return `{"clusterID":"` + targetNB + `","serverID":"eeee0000-1111-2222-3333-555555555555","address":"tcp:192.0.2.4:6643","clustered":true}`, nil
 		default:
 			return "", errors.New("unexpected command")
 		}
@@ -36,7 +30,7 @@ func TestCommandNativeBindsTargetIDAndInspectsIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if identity.ClusterID != targetNB || identity.Address != "tcp:192.0.2.4:6643" || len(calls) != 5 {
+	if identity.ClusterID != targetNB || identity.Address != "tcp:192.0.2.4:6643" || len(calls) != 2 {
 		t.Fatalf("unexpected native identity or calls: %+v %v", identity, calls)
 	}
 }
@@ -46,20 +40,16 @@ func TestCommandNativeRejectsUnsafeInputsAndInspection(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			native := CommandNative{Run: func(_ context.Context, args ...string) (string, error) {
 				switch args[0] {
-				case "db-cid":
-					return targetNB, nil
-				case "db-sid":
+				case "inspect":
+					serverID := "eeee0000-1111-2222-3333-555555555555"
 					if scenario == "invalid server" {
-						return "bad", nil
+						serverID = "bad"
 					}
-					return "eeee0000-1111-2222-3333-555555555555", nil
-				case "db-local-address":
-					return "tcp:192.0.2.4:6643", nil
-				case "db-is-clustered":
+					clustered := "true"
 					if scenario == "nonclustered" {
-						return "no", nil
+						clustered = "false"
 					}
-					return "yes", nil
+					return `{"clusterID":"` + targetNB + `","serverID":"` + serverID + `","address":"tcp:192.0.2.4:6643","clustered":` + clustered + `}`, nil
 				default:
 					return "", nil
 				}
