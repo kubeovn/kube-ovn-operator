@@ -170,7 +170,8 @@ func (m *Manager) RestoreFenceReadyFor(ctx context.Context, installation *api.Ku
 
 // RestoreBackupPair restores both databases from one immutable, version-bound
 // pair. The caller must hold the installation and central Leases; this method
-// also checks the central fence before and after every database mutation so a
+// verifies and stages both snapshots before either database mutation. It also
+// checks the central fence before and after every database mutation so a
 // stale or cancelled operation cannot continue with the second database.
 func (m *Manager) RestoreBackupPair(ctx context.Context, installation *api.KubeOVNInstallation, topology health.CentralTopology, binding BackupBinding, status *api.BackupStatus) error {
 	if m == nil || installation == nil {
@@ -194,12 +195,21 @@ func (m *Manager) RestoreBackupPair(ctx context.Context, installation *api.KubeO
 	if installation.Status.Topology.Inventory == nil || installation.Status.Topology.Inventory.Digest != binding.TopologyDigest {
 		return errors.New("database restore topology does not match the retained installation topology")
 	}
+	inventories := inventories(topology)
+	staged, err := m.stageRestorePair(ctx, installation, inventories, status)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for _, snapshot := range staged {
+			_ = snapshot.Close()
+		}
+	}()
 	executor, closeStore, err := m.executor(installation)
 	if err != nil {
 		return err
 	}
 	defer closeStore()
-	inventories := inventories(topology)
 	restorers, err := preflightFencedRestoreAdapters(ctx, inventories, executor.dependencies.Database)
 	if err != nil {
 		return err
@@ -209,13 +219,12 @@ func (m *Manager) RestoreBackupPair(ctx context.Context, installation *api.KubeO
 			return fmt.Errorf("fence %s restore: %w", inventory.Database, err)
 		}
 		restorer := restorers[index]
-		ref := status.DatabaseRefs[inventory.Database]
 		token, err := lease.Token(ctx, lease.Central)
 		if err != nil {
 			return fmt.Errorf("read current restore fence for %s: %w", inventory.Database, err)
 		}
 		if err := m.RestoreFence.Restore(ctx, installation, inventory.Database, func(restoreCtx context.Context) error {
-			return restorer.RestoreFenced(restoreCtx, ref, token)
+			return restorer.RestoreStagedFenced(restoreCtx, staged[index], token)
 		}); err != nil {
 			return fmt.Errorf("restore %s database: %w", inventory.Database, err)
 		}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/central"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
@@ -37,9 +38,9 @@ type DatabaseRestorer interface {
 }
 
 // FencedDatabaseRestorer is required for destructive recovery. The supplied
-// token must reach a server-side fence before native restore input is accepted.
+// token must reach a server-side fence before the preverified input is accepted.
 type FencedDatabaseRestorer interface {
-	RestoreFenced(context.Context, string, lease.FenceToken) error
+	RestoreStagedFenced(context.Context, *backup.StagedSnapshot, lease.FenceToken) error
 }
 
 // RestoreFence is the destructive restore admission boundary. Implementations

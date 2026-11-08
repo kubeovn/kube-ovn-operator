@@ -438,6 +438,53 @@ def native_membership(topology):
     return {(database, value[1]): value for (_, database), value in topology.items()}
 
 
+def reject_corrupt_pair(fixture, backup, backup_dir, expected_membership):
+    # Damage only the disposable fixture's SB backup, never a live DB file.
+    # A valid NB backup must not be replayed before this error is detected.
+    for database, stem, table in DATABASES:
+        leader = next(p for p in fixture.endpoints if fixture.status(p, database, stem)[0]["Role"] == "leader")
+        fixture.write_marker(leader, database, stem, table, "corrupt-pair-unchanged")
+    reference = backup["databaseRefs"]["OVN_Southbound"]
+    check(re.fullmatch(r"sha256:[0-9a-f]{64}", reference), "invalid fixture backup reference")
+    path = backup_dir / reference.removeprefix("sha256:") / "snapshot.db"
+    with path.open("r+b") as snapshot:
+        snapshot.seek(-1, os.SEEK_END)
+        position, original = snapshot.tell(), snapshot.read(1)
+        snapshot.seek(position)
+        snapshot.write(b"!")
+        snapshot.flush()
+        os.fsync(snapshot.fileno())
+        try:
+            request = create_recovery("controller-corrupt-pair", backup["id"])
+            with contextlib.closing(recovery_statuses(request)) as statuses:
+                for status in statuses:
+                    check(status.get("phase") not in ("Succeeded", "Expired"), "corrupt pair was accepted or expired")
+                    check(status.get("execution", {}).get("phase") not in ("Workloads", "Verifying", "Succeeded"),
+                          "corrupt pair advanced past restore")
+                    if status.get("phase") == "Failed":
+                        break
+            check(status.get("execution", {}).get("phase") == "Failed"
+                  and "stage OVN_Southbound restore input" in status["execution"].get("reason", ""),
+                  f"corrupt SB backup failed at an unrelated boundary: {status}")
+            for database, stem, table in DATABASES:
+                fixture.wait_marker(database, stem, table, "corrupt-pair-unchanged")
+            check(native_membership(fixture.topology()) == expected_membership,
+                  "corrupt pair changed database membership")
+            for item in controllers(fixture):
+                check(item["metadata"].get("annotations", {}).get("operator.kubeovn.io/rollback-quiesced")
+                      == status["plan"]["digest"], "failed restore lost its operation-bound quiesce marker")
+                if item["kind"] == "Deployment":
+                    check(item["spec"].get("paused"), "failed restore resumed Deployment rollout")
+                else:
+                    check(item["spec"]["updateStrategy"]["type"] == "OnDelete", "failed restore resumed StatefulSet rollout")
+            print("Controller corrupt-pair rejection: damaged SB snapshot rejected before NB/SB writes; three-node data and membership unchanged; rollout remains quiesced", flush=True)
+        finally:
+            snapshot.seek(position)
+            snapshot.write(original)
+            snapshot.flush()
+            os.fsync(snapshot.fileno())
+
+
 def run_controller_recovery(certificate_dir, backup_dir):
     fixture = Fixture(certificate_dir)
     before = native_membership(fixture.topology())
@@ -564,6 +611,8 @@ def run_controller_recovery(certificate_dir, backup_dir):
                   == completed["metadata"]["resourceVersion"], "terminal recovery rewrote approval audit")
             print("Controller approval-backed recovery succeeded: suspended request bound to real UID/generation; controller recorded Reserved -> Completed; healthy quorum", flush=True)
         print("Controller RecoveryRequest succeeded: rejected foreign backup; restored NB/SB snapshot on all three nodes; rollout state and membership preserved; installation Ready", flush=True)
+
+    reject_corrupt_pair(fixture, backup, backup_dir, before)
 
 
 if __name__ == "__main__":

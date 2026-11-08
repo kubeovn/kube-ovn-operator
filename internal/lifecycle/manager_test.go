@@ -10,6 +10,7 @@ import (
 	"time"
 
 	api "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/backup"
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/membership"
@@ -152,7 +153,7 @@ type fencedRestoreDatabaseAdapter struct {
 	restoreCalls int
 }
 
-func (a *fencedRestoreDatabaseAdapter) RestoreFenced(context.Context, string, lease.FenceToken) error {
+func (a *fencedRestoreDatabaseAdapter) RestoreStagedFenced(context.Context, *backup.StagedSnapshot, lease.FenceToken) error {
 	a.restoreCalls++
 	return nil
 }
