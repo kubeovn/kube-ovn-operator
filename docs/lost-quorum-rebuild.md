@@ -27,3 +27,31 @@ backup, or mutate Kubernetes objects. The current controller continues to use
 the healthy-leader fenced restore path. A later integration must consume this
 contract through a dedicated privileged workload that proves old-process
 isolation and new storage ownership before creating the target databases.
+
+## Native execution boundary
+
+`internal/recovery.Executor` is the next, deliberately narrow execution layer.
+It accepts one target member at a time and requires three capabilities before
+writing anything:
+
+1. an authenticated `backup.Store` whose records match the installation,
+   source cluster IDs, and content digests in the plan;
+2. an `Isolation` implementation that proves every retained process is
+   isolated and that the new root belongs to the selected target member; and
+3. a `Native` implementation that creates and inspects both clustered database
+   files with the exact target cluster UUID, server UUID, and RAFT address.
+
+The executor takes an exclusive lock on a private, already provisioned target
+root, copies each verified backup into that root, and invokes the native
+capability only below the operation directory. It returns the observed native
+identities for durable persistence by the caller. It never starts
+`ovsdb-server` or `ovn-northd`, removes retained storage, changes a PVC, or
+mutates Kubernetes.
+
+The upstream `ovsdb-tool create-cluster` command generates a new cluster UUID
+and has no option to select one. A stock tool therefore cannot implement the
+`Native` capability safely: the executor rejects an observed UUID that differs
+from the approved target. A privileged workload must provide a native adapter
+with this exact identity binding (or an equivalent audited native operation)
+before this layer can be used in production. This is intentional; random
+cluster creation must not be reported as completion of lost-quorum recovery.
