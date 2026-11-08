@@ -125,7 +125,7 @@ func TestStageAndStagedRestoreRejectInvalidInputs(t *testing.T) {
 				}
 				return nil
 			})
-			if err != nil && !(scenario == "cancelled" && errors.Is(err, context.Canceled)) {
+			if err != nil && (scenario != "cancelled" || !errors.Is(err, context.Canceled)) {
 				t.Fatal(err)
 			}
 		})
