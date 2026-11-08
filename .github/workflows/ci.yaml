@@ -86,9 +86,23 @@ jobs:
         run: go test -race ./internal/lease ./internal/apply ./internal/controller ./internal/ovnadmin ./internal/health ./internal/probe ./internal/backup ./internal/approval ./internal/prepare ./internal/recovery ./internal/central ./internal/workload ./internal/lifecycle ./internal/topology
       - name: Vet
         run: make vet
+      - name: Install golangci-lint from release API
+        run: |
+          asset_url="$(curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            https://api.github.com/repos/golangci/golangci-lint/releases/tags/v2.14.0 \
+            | python3 -c 'import json, sys; print(next(a["url"] for a in json.load(sys.stdin)["assets"] if a["name"] == "golangci-lint-2.14.0-linux-amd64.tar.gz"))')"
+          curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            -H 'Accept: application/octet-stream' "${asset_url}" \
+            --output /tmp/golangci-lint.tar.gz
+          tar -xzf /tmp/golangci-lint.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/golangci-lint-2.14.0-linux-amd64/golangci-lint /usr/local/bin/golangci-lint
+          golangci-lint version
       - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.14.0
+          install-mode: none
       - name: Build
         run: make build
 
