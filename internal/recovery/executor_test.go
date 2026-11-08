@@ -54,9 +54,13 @@ type rebuildNative struct {
 	created []string
 	ids     map[string]NativeDatabase
 	err     error
+	failAt  int
 }
 
 func (n *rebuildNative) CreateCluster(_ context.Context, database, contents, _ string, _ string) error {
+	if n.failAt > 0 && len(n.created)+1 == n.failAt {
+		return fmt.Errorf("simulated native interruption")
+	}
 	if n.err != nil {
 		return n.err
 	}
@@ -196,7 +200,7 @@ func TestRebuildRejectsBackupProvenanceAndNativeIdentity(t *testing.T) {
 	}
 }
 
-func TestRebuildRejectsExistingOperationDirectory(t *testing.T) {
+func TestRebuildResumesAndRejectsUnjournaledOperation(t *testing.T) {
 	plan, store, isolation, native := executorFixture(t)
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
@@ -205,7 +209,44 @@ func TestRebuildRejectsExistingOperationDirectory(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, plan.OperationID), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (&Executor{Root: root, Backups: store, Isolation: isolation, Native: native, MaxBackupBytes: 1 << 20}).Rebuild(t.Context(), plan, "new"); err == nil {
-		t.Fatal("existing operation directory was reused")
+	executor := &Executor{Root: root, Backups: store, Isolation: isolation, Native: native, MaxBackupBytes: 1 << 20}
+	if _, err := executor.Rebuild(t.Context(), plan, "new"); err != nil {
+		t.Fatal(err)
+	}
+	created := len(native.created)
+	if _, err := executor.Rebuild(t.Context(), plan, "new"); err != nil {
+		t.Fatalf("journaled retry failed: %v", err)
+	}
+	if len(native.created) != created {
+		t.Fatalf("journaled retry recreated native files: before=%d after=%d", created, len(native.created))
+	}
+	if err := os.WriteFile(filepath.Join(root, plan.OperationID, "unexpected"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.Rebuild(t.Context(), plan, "new"); err == nil {
+		t.Fatal("unexpected operation entry was accepted")
+	}
+}
+
+func TestRebuildResumesAfterNativeInterruption(t *testing.T) {
+	plan, store, isolation, native := executorFixture(t)
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	native.failAt = 2
+	executor := &Executor{Root: root, Backups: store, Isolation: isolation, Native: native, MaxBackupBytes: 1 << 20}
+	if _, err := executor.Rebuild(t.Context(), plan, "new"); err == nil {
+		t.Fatal("native interruption was ignored")
+	}
+	if len(native.created) != 1 {
+		t.Fatalf("partial native writes = %d, want one", len(native.created))
+	}
+	native.failAt = 0
+	if _, err := executor.Rebuild(t.Context(), plan, "new"); err != nil {
+		t.Fatalf("resume after native interruption failed: %v", err)
+	}
+	if len(native.created) != 2 {
+		t.Fatalf("resume recreated the completed database: native writes=%d", len(native.created))
 	}
 }
