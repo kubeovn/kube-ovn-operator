@@ -201,6 +201,29 @@ must record `Reserved` before restore, reject a late suspension change through
 API validation, and record immutable `Completed` audit after convergence.
 The fixture never writes request execution or approval status itself.
 
+Before restoring either database, the lifecycle manager authenticates and
+fully stages both native snapshots against the retained cluster IDs, server
+IDs and RAFT addresses. A corrupt, missing, expired or foreign SB backup
+therefore fails before NB receives restore input. Staging uses private,
+unlinked files and bounded streaming; both handles are closed on failure or
+completion. It requires temporary disk space for both snapshots (up to 2 GiB
+with the maximum policy), rather than buffering them in operator memory.
+Execution consumes those exact bytes without reopening the store, and still
+rechecks live topology, age, the operation Lease and remote fencing.
+
+The fixture finishes by corrupting only its disposable SB backup, submitting
+a new public recovery request and requiring a staging failure before any
+NB/SB marker changes. Membership must remain unchanged on all three nodes,
+and failed recovery must leave rollout quiesced. This deliberate failure is
+separate from the two successful recoveries and their Ready checks.
+
+`backup.Provider.Stage` can verify a stored capture without a live database
+source, while still requiring the installation's central Lease. This is an
+input boundary for future offline reconstruction; it grants no authority to
+isolate old processes, replace storage, create a new RAFT cluster or bypass
+the current healthy-quorum restore transport. Later NB/SB execution remains
+sequential: a runtime failure after the first write is not atomic rollback.
+
 This uses healthy quorum and verifies the public approval consumption path. It
 does not establish lost-quorum reconstruction or approval consumption during
 that failure, a version-changing rollback, or an application write barrier

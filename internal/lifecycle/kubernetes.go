@@ -95,12 +95,12 @@ func (d *kubernetesDatabase) Capture(ctx context.Context) (string, error) {
 	return d.backups.Capture(ctx, d.inventory.Database, leader)
 }
 
-func (d *kubernetesDatabase) RestoreFenced(ctx context.Context, ref string, token lease.FenceToken) error {
+func (d *kubernetesDatabase) RestoreStagedFenced(ctx context.Context, staged *backup.StagedSnapshot, token lease.FenceToken) error {
 	leader, err := d.leader(ctx)
 	if err != nil {
 		return err
 	}
-	return d.backups.RestoreFenced(ctx, d.inventory.Database, leader, ref, token)
+	return d.backups.RestoreStagedFenced(ctx, d.inventory.Database, leader, staged, token)
 }
 
 func (d *kubernetesDatabase) Verify(ctx context.Context, snapshot ovnadmin.Snapshot, ref string) error {

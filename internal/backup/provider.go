@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
@@ -99,7 +98,7 @@ type Provider struct {
 var _ ovnadmin.BackupVerifier = (*Provider)(nil)
 
 func (p *Provider) configured() error {
-	if p.Store == nil || p.InstallationUID == "" || p.MaxBytes <= 0 || p.MaxBytes > 1<<30 || p.MaxAge <= 0 {
+	if p == nil || p.Store == nil || p.InstallationUID == "" || p.MaxBytes <= 0 || p.MaxBytes > 1<<30 || p.MaxAge <= 0 {
 		return errors.New("backup requires a store, installation UID, size limit (at most 1 GiB) and positive maximum age")
 	}
 	return nil
@@ -269,11 +268,32 @@ func (p *Provider) RestoreFenced(ctx context.Context, database, endpoint, ref st
 func (p *Provider) restore(ctx context.Context, database, endpoint, ref string, token *lease.FenceToken) error {
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
+	staged, err := p.Stage(ctx, database, ref)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = staged.Close() }()
+	return p.restoreStaged(ctx, database, endpoint, staged, token)
+}
+
+func (p *Provider) restoreStaged(ctx context.Context, database, endpoint string, staged *StagedSnapshot, token *lease.FenceToken) error {
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
 	if err := p.configured(); err != nil {
 		return err
 	}
-	if p.Source == nil || endpoint == "" || database == "" || ref == "" {
-		return errors.New("restore requires a source, database, endpoint and backup reference")
+	if p.Source == nil || endpoint == "" || staged == nil || staged.file == nil {
+		return errors.New("restore requires a source, endpoint and staged backup")
+	}
+	record := staged.record
+	if record.Identity.InstallationUID != p.InstallationUID || record.Snapshot.Database != database {
+		return errors.New("staged backup belongs to another installation or database")
+	}
+	if _, err := staged.file.Stat(); err != nil {
+		return fmt.Errorf("staged backup is unavailable: %w", err)
+	}
+	if err := p.stagedPolicy(record); err != nil {
+		return err
 	}
 	var restorer RestoreSource
 	if token == nil {
@@ -303,60 +323,38 @@ func (p *Provider) restore(ctx context.Context, database, endpoint, ref string, 
 			return errors.New("restore fence token is stale")
 		}
 	}
-	record, data, err := p.Store.Open(ctx, ref)
-	if err != nil {
-		return fmt.Errorf("open restore backup: %w", err)
-	}
-	defer func() { _ = data.Close() }()
-	if record.FormatVersion != 1 || record.Identity.InstallationUID != p.InstallationUID || record.Endpoint == "" || record.Snapshot.Database != database || validSnapshot(record.Snapshot) != nil {
-		return errors.New("restore backup is not a valid installation-bound database snapshot")
-	}
 	current, err := p.Source.Status(ctx, database, endpoint)
 	if err != nil {
 		return fmt.Errorf("observe %s before restore: %w", database, err)
 	}
+	if err := validSnapshot(current); err != nil {
+		return fmt.Errorf("validate %s before restore: %w", database, err)
+	}
 	if current.ClusterID != record.Snapshot.ClusterID || !sameMembers(current.Members, record.Snapshot.Members) {
 		return errors.New("restore backup topology does not match the current database cluster")
 	}
-	age := time.Since(record.CompletedAt)
-	if record.CompletedAt.IsZero() || age < 0 || age > p.MaxAge || record.Size <= 0 || record.Size > p.MaxBytes {
-		return errors.New("restore backup age or size is outside the configured policy")
-	}
-	temporary, err := os.CreateTemp("", "kube-ovn-restore-*")
-	if err != nil {
-		return fmt.Errorf("create restore staging file: %w", err)
-	}
-	path := temporary.Name()
-	defer func() {
-		_ = temporary.Close()
-		_ = os.Remove(path)
-	}()
-	info, err := inspect(ctx, io.TeeReader(data, temporary), database, p.MaxBytes)
-	if err != nil {
-		return fmt.Errorf("inspect restore backup: %w", err)
-	}
-	if info.Size != record.Size || info.SHA256 != record.SHA256 || info.SchemaVersion != record.SchemaVersion {
-		return errors.New("restore backup differs from its capture record")
-	}
-	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind restore backup: %w", err)
+	if err := p.stagedPolicy(record); err != nil {
+		return err
 	}
 	if err := lease.CheckFor(ctx, lease.Central, types.UID(p.InstallationUID)); err != nil {
 		return err
 	}
 	if token != nil {
-		if err := fenced.RestoreFenced(ctx, database, endpoint, temporary, *token); err != nil {
+		if err := fenced.RestoreFenced(ctx, database, endpoint, staged.Reader(), *token); err != nil {
 			return fmt.Errorf("restore %s database through fenced transport: %w", database, err)
 		}
-	} else if err := restorer.Restore(ctx, database, endpoint, temporary); err != nil {
+	} else if err := restorer.Restore(ctx, database, endpoint, staged.Reader()); err != nil {
 		return fmt.Errorf("restore %s database: %w", database, err)
 	}
-	if time.Since(record.CompletedAt) > p.MaxAge {
-		return errors.New("restore backup expired during execution")
+	if err := p.stagedPolicy(record); err != nil {
+		return err
 	}
 	after, err := p.Source.Status(ctx, database, endpoint)
 	if err != nil {
 		return fmt.Errorf("observe %s after restore: %w", database, err)
+	}
+	if err := validSnapshot(after); err != nil {
+		return fmt.Errorf("validate %s after restore: %w", database, err)
 	}
 	if after.ClusterID != record.Snapshot.ClusterID || !sameMembers(after.Members, record.Snapshot.Members) {
 		return errors.New("restored database topology differs from the verified backup")
