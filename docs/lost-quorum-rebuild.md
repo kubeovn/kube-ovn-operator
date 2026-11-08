@@ -63,3 +63,11 @@ from the approved target. A privileged workload must provide a native adapter
 with this exact identity binding (or an equivalent audited native operation)
 before this layer can be used in production. This is intentional; random
 cluster creation must not be reported as completion of lost-quorum recovery.
+
+`internal/recovery.CommandNative` defines the adapter boundary for that helper:
+it invokes `--target-cluster-id=<uuid> create-cluster <db> <contents> <local>`
+and then reads `db-cid`, `db-sid`, `db-local-address`, and
+`db-is-clustered`. Each output is bounded and validated. The helper path must
+be an absolute executable without setuid, setgid, or file capabilities. The
+repository does not ship this helper yet; a stock `ovsdb-tool` is expected to
+reject the extra identity flag or fail the subsequent identity check.
