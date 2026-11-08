@@ -3,6 +3,7 @@ package recovery
 import (
 	"bytes"
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -39,24 +40,21 @@ func (n CommandNative) Inspect(ctx context.Context, database string) (NativeData
 	if !filepath.IsAbs(database) {
 		return NativeDatabase{}, errors.New("native database path must be absolute")
 	}
-	clusterID, err := n.run(ctx, "db-cid", database)
+	output, err := n.run(ctx, "inspect", database)
 	if err != nil {
 		return NativeDatabase{}, err
 	}
-	serverID, err := n.run(ctx, "db-sid", database)
-	if err != nil {
-		return NativeDatabase{}, err
+	var inspection struct {
+		ClusterID string `json:"clusterID"`
+		ServerID  string `json:"serverID"`
+		Address   string `json:"address"`
+		Clustered bool   `json:"clustered"`
 	}
-	address, err := n.run(ctx, "db-local-address", database)
-	if err != nil {
-		return NativeDatabase{}, err
+	if err := json.Unmarshal([]byte(output), &inspection); err != nil {
+		return NativeDatabase{}, fmt.Errorf("decode native inspection: %w", err)
 	}
-	clustered, err := n.run(ctx, "db-is-clustered", database)
-	if err != nil {
-		return NativeDatabase{}, err
-	}
-	clusterID, serverID, address, clustered = strings.TrimSpace(clusterID), strings.TrimSpace(serverID), strings.TrimSpace(address), strings.TrimSpace(clustered)
-	if !membership.ValidID(clusterID) || !membership.ValidID(serverID) || clustered != "yes" {
+	clusterID, serverID, address := strings.TrimSpace(inspection.ClusterID), strings.TrimSpace(inspection.ServerID), strings.TrimSpace(inspection.Address)
+	if !inspection.Clustered || !membership.ValidID(clusterID) || !membership.ValidID(serverID) {
 		return NativeDatabase{}, errors.New("native inspection did not return a clustered database identity")
 	}
 	if err := membership.ValidateMembers([]membership.Member{{ServerID: serverID, Address: address}}); err != nil {

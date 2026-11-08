@@ -66,8 +66,11 @@ cluster creation must not be reported as completion of lost-quorum recovery.
 
 `internal/recovery.CommandNative` defines the adapter boundary for that helper:
 it invokes `--target-cluster-id=<uuid> create-cluster <db> <contents> <local>`
-and then reads `db-cid`, `db-sid`, `db-local-address`, and
-`db-is-clustered`. Each output is bounded and validated. The helper path must
-be an absolute executable without setuid, setgid, or file capabilities. The
-repository does not ship this helper yet; a stock `ovsdb-tool` is expected to
-reject the extra identity flag or fail the subsequent identity check.
+and then invokes `inspect <db>`. The inspection command must return one JSON
+object containing `clusterID`, `serverID`, `address`, and `clustered`; reading
+the identity in one helper invocation avoids accepting a file that changed
+between separate metadata queries. Output is bounded and every field is
+validated. The helper path must be an absolute executable without setuid,
+setgid, or file capabilities. The repository does not ship this helper yet; a
+stock `ovsdb-tool` is expected to reject the extra identity flag or fail the
+subsequent identity check.
