@@ -30,8 +30,13 @@ jobs:
           cache: true
       - name: Install kind
         run: |
+          kind_url="$(curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            https://api.github.com/repos/kubernetes-sigs/kind/releases/tags/v0.29.0 \
+            | python3 -c 'import json, sys; print(next(a["url"] for a in json.load(sys.stdin)["assets"] if a["name"] == "kind-linux-amd64"))')"
           curl --fail --location --silent --show-error \
-            https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64 \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            -H 'Accept: application/octet-stream' "${kind_url}" \
             --output /tmp/kind
           chmod +x /tmp/kind
           sudo mv /tmp/kind /usr/local/bin/kind
@@ -78,8 +83,13 @@ jobs:
           cache: true
       - name: Install kind
         run: |
+          kind_url="$(curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            https://api.github.com/repos/kubernetes-sigs/kind/releases/tags/v0.29.0 \
+            | python3 -c 'import json, sys; print(next(a["url"] for a in json.load(sys.stdin)["assets"] if a["name"] == "kind-linux-amd64"))')"
           curl --fail --location --silent --show-error \
-            https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64 \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            -H 'Accept: application/octet-stream' "${kind_url}" \
             --output /tmp/kind
           chmod +x /tmp/kind
           sudo mv /tmp/kind /usr/local/bin/kind
