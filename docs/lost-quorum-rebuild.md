@@ -52,6 +52,15 @@ identities for durable persistence by the caller. It never starts
 `ovsdb-server` or `ovn-northd`, removes retained storage, changes a PVC, or
 mutates Kubernetes.
 
+The executor now requires an `IsolationSession` in addition to the point-in-
+time `Isolation` checks. `Begin` must establish fencing and target ownership
+and return an `IsolationGuard`; the guard is checked before every native write
+and before the completion receipt, then closed before success is returned. A
+provider that only implements independent observations is rejected before any
+backup is staged. This seam is intentionally injectable so a future provider
+can hold the fence-agent Lease token and verify the target PVC identity for the
+whole operation.
+
 The operation directory is journaled before the first native write. A retry
 revalidates the exact canonical plan and target member, reuses only private
 single-link backup files whose bytes still match the authenticated record,

@@ -36,10 +36,38 @@ func (s rebuildStore) Open(_ context.Context, reference string) (backup.Record, 
 type rebuildIsolation struct {
 	oldCalls      int
 	storageCalls  int
+	beginCalls    int
+	closeCalls    int
 	err           error
 	failOldAt     int
 	failStorageAt int
+	closeErr      error
 }
+
+func (i *rebuildIsolation) Begin(ctx context.Context, plan Plan, member Member, root string) (IsolationGuard, error) {
+	i.beginCalls++
+	if err := i.Check(ctx); err != nil {
+		return nil, err
+	}
+	return i, nil
+}
+
+func (i *rebuildIsolation) Check(ctx context.Context) error {
+	if err := i.OldProcessesIsolated(ctx, Plan{}); err != nil {
+		return err
+	}
+	return i.TargetStorageOwned(ctx, Member{}, "")
+}
+
+func (i *rebuildIsolation) Close(context.Context) error {
+	i.closeCalls++
+	return i.closeErr
+}
+
+type pointOnlyIsolation struct{}
+
+func (pointOnlyIsolation) OldProcessesIsolated(context.Context, Plan) error         { return nil }
+func (pointOnlyIsolation) TargetStorageOwned(context.Context, Member, string) error { return nil }
 
 func (i *rebuildIsolation) OldProcessesIsolated(context.Context, Plan) error {
 	i.oldCalls++
@@ -143,8 +171,8 @@ func TestRebuildStagesBothBackupsOnlyAfterIsolation(t *testing.T) {
 	if result.PlanDigest == "" || result.MemberName != "new" || len(result.Databases) != 2 {
 		t.Fatalf("unexpected rebuild result: %+v", result)
 	}
-	if isolation.oldCalls != 4 || isolation.storageCalls != 4 || len(native.created) != 2 {
-		t.Fatalf("precondition/native calls = %d/%d/%d", isolation.oldCalls, isolation.storageCalls, len(native.created))
+	if isolation.beginCalls != 1 || isolation.closeCalls != 1 || isolation.oldCalls != 4 || isolation.storageCalls != 4 || len(native.created) != 2 {
+		t.Fatalf("precondition/native calls = %d/%d/%d/%d/%d", isolation.beginCalls, isolation.closeCalls, isolation.oldCalls, isolation.storageCalls, len(native.created))
 	}
 	for _, name := range []string{"ovnnb_backup.db", "ovnsb_backup.db", "ovnnb_db.db", "ovnsb_db.db"} {
 		if _, err := os.Stat(filepath.Join(root, plan.OperationID, name)); err != nil {
@@ -269,6 +297,33 @@ func TestRebuildValidatesBothBackupsBeforeNativeWrites(t *testing.T) {
 	_, err := (&Executor{Root: root, Backups: store, Isolation: isolation, Native: native, MaxBackupBytes: 1 << 20}).Rebuild(t.Context(), plan, "new")
 	if err == nil || len(native.created) != 0 {
 		t.Fatalf("corrupt SB backup: err=%v native writes=%v", err, native.created)
+	}
+}
+
+func TestRebuildRejectsPointInTimeIsolationProvider(t *testing.T) {
+	plan, store, _, native := executorFixture(t)
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&Executor{Root: root, Backups: store, Isolation: pointOnlyIsolation{}, Native: native, MaxBackupBytes: 1 << 20}).Rebuild(t.Context(), plan, "new")
+	if err == nil || !strings.Contains(err.Error(), "continuous isolation session") {
+		t.Fatalf("point-in-time provider was accepted: %v", err)
+	}
+	if len(native.created) != 0 {
+		t.Fatalf("point-in-time provider wrote native files: %v", native.created)
+	}
+}
+
+func TestRebuildReportsIsolationCloseFailure(t *testing.T) {
+	plan, store, isolation, native := executorFixture(t)
+	isolation.closeErr = fmt.Errorf("fence release failed")
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Executor{Root: root, Backups: store, Isolation: isolation, Native: native, MaxBackupBytes: 1 << 20}).Rebuild(t.Context(), plan, "new"); err == nil || !strings.Contains(err.Error(), "close offline rebuild isolation") {
+		t.Fatalf("isolation close failure was hidden: %v", err)
 	}
 }
 
