@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// IsolationProof is produced after the retained OVN processes have been
-// stopped or fenced. It is mounted through an immutable ConfigMap and is bound
-// to the exact canonical plan; a generic "quiesced" flag is insufficient.
+// IsolationProof records plan-bound isolation audit metadata. Validation
+// checks its binding and freshness; it does not establish enforced isolation
+// and must never replace the live Isolation capability.
 type IsolationProof struct {
 	PlanDigest      string    `json:"planDigest"`
 	OperationID     string    `json:"operationID"`
@@ -18,19 +18,25 @@ type IsolationProof struct {
 	VerifiedAt      time.Time `json:"verifiedAt"`
 }
 
+const isolationProofMaxAge = 5 * time.Minute
+
 func (p IsolationProof) Validate(plan Plan) error {
-	_, digest, err := plan.Canonical()
+	return p.validateAt(plan, time.Now().UTC())
+}
+
+func (p IsolationProof) validateAt(plan Plan, now time.Time) error {
+	canonical, digest, err := plan.Canonical()
 	if err != nil {
 		return err
 	}
 	if p.PlanDigest != digest || p.OperationID != plan.OperationID {
 		return errors.New("isolation proof is not bound to the recovery plan")
 	}
-	if p.VerifiedAt.IsZero() || p.VerifiedAt.After(time.Now().UTC().Add(time.Minute)) {
-		return errors.New("isolation proof timestamp is invalid")
+	if p.VerifiedAt.IsZero() || p.VerifiedAt.After(now.Add(time.Minute)) || p.VerifiedAt.Before(now.Add(-isolationProofMaxAge)) {
+		return errors.New("isolation proof timestamp is invalid or expired")
 	}
-	expected := make([]string, 0, len(plan.RetainedMembers))
-	for _, member := range plan.RetainedMembers {
+	expected := make([]string, 0, len(canonical.RetainedMembers))
+	for _, member := range canonical.RetainedMembers {
 		expected = append(expected, member.Name)
 	}
 	actual := slices.Clone(p.RetainedMembers)

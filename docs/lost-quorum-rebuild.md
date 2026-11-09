@@ -21,10 +21,10 @@ malformed or reused cluster IDs, duplicate endpoints, even target member
 counts, reused workload/storage identities, and backup pair IDs that do not
 match the two database references.
 
-This package has no side effects. It does not create or replace PVC contents,
-stop old OVN processes, invoke `ovsdb-tool`, start a new RAFT cluster, stream a
-backup, or mutate Kubernetes objects. The current controller continues to use
-the healthy-leader fenced restore path. A later integration must consume this
+Plan validation has no side effects. It does not create or replace PVC
+contents, stop old OVN processes, invoke `ovsdb-tool`, start a new RAFT cluster,
+stream a backup, or mutate Kubernetes objects. The current controller continues
+to use the healthy-leader fenced restore path. A later integration must consume this
 contract through a dedicated privileged workload that proves old-process
 isolation and new storage ownership before creating the target databases.
 
@@ -42,8 +42,12 @@ writing anything:
    files with the exact target cluster UUID, server UUID, and RAFT address.
 
 The executor takes an exclusive lock on a private, already provisioned target
-root, copies each verified backup into that root, and invokes the native
-capability only below the operation directory. It returns the observed native
+root, stages and authenticates both backups before creating either native
+database, and invokes the native capability only below the operation directory.
+It rechecks isolation and target ownership before each database and before
+publishing or returning a completion receipt. The provider must keep isolation
+enforced throughout execution; repeated observations alone cannot guarantee
+that a stopped process stays stopped. It returns the observed native
 identities for durable persistence by the caller. It never starts
 `ovsdb-server` or `ovn-northd`, removes retained storage, changes a PVC, or
 mutates Kubernetes.
@@ -86,28 +90,37 @@ or process startup.
 
 ## Dedicated rebuild workload
 
-The native adapter runs in a one-shot, digest-pinned Kubernetes `Job` rendered
-by `recovery.WorkloadSpec`. The Job is separate from the ordinary operator
+`recovery.WorkloadSpec` renders a one-shot, digest-pinned Kubernetes `Job` for
+the future rebuild executor. The Job is separate from the ordinary operator
 Deployment and central member workloads. It is pinned to the target node, uses
 `hostPID` and `hostNetwork`, runs the versioned `/recovery-native` executable as
 a privileged container, and has a zero retry budget with a bounded deadline.
 Its root filesystem and every input volume are read-only except for the
 selected target PVC.
 
-The Job mounts the target PVC read-write, every retained member PVC read-only,
-the operator-owned backup PVC read-only, an immutable plan ConfigMap, and an
-independently produced isolation-proof ConfigMap. It also mounts the host
-`/proc` tree read-only so the helper can reject a process that still references
-the rebuild's retained mount paths. The helper refuses to start unless the
-target directory is private and owned by its effective UID, and contains a
-0600 `.kube-ovn-recovery-owner` marker binding the plan digest, operation ID,
-member name, and target volume UID.
+The builder describes a target PVC mounted read-write, retained member PVCs
+and the backup PVC mounted read-only, immutable plan and isolation metadata
+ConfigMaps, and a read-only host `/proc` mount. These mounts are not proof of
+isolation: a target-node process scan cannot establish that old processes on
+other nodes are fenced, and a JSON ownership marker cannot establish live PVC
+ownership.
 
-The isolation proof is not a Boolean approval. It contains the same canonical
-plan digest and operation ID, the complete retained member set, and a bounded
-verification timestamp. The helper validates that proof again inside the
-privileged workload and scans the host process table before the executor opens
-the target root. A missing, stale, partial, or mismatched proof fails closed.
-The workload does not delete retained PVCs, stop arbitrary host processes, or
-create a random cluster identity; those actions remain outside this boundary
-and require the controller's durable approval and fencing protocol.
+The `--workload-plan` entry point therefore validates the supplied plan and
+isolation audit metadata, then fails closed with an unavailable-provider error
+before opening the target root or backup store. It does not invoke the native
+adapter or write a completion receipt. A real provider must enforce isolation
+for every retained process and verify live target storage ownership before this
+entry point can be enabled. The controller does not create these rebuild Jobs.
+The standalone native create/inspect adapter remains available to callers that
+provide the required execution boundary.
+
+`IsolationProof` is audit metadata, not an isolation capability. It binds the
+canonical plan digest, operation ID and complete retained member set. Validation
+accepts timestamps at most five minutes old, with at most one minute of future
+clock skew, and rejects missing, expired, partial or mismatched metadata.
+Successful metadata validation never authorizes writes on its own.
+
+Current CI exercises the injected executor capabilities and the command's
+refusal to execute without an enforced provider. It does not demonstrate real
+lost-quorum reconstruction, member startup or data-plane recovery through this
+workload path.

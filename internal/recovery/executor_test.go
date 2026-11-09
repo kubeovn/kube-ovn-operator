@@ -34,18 +34,26 @@ func (s rebuildStore) Open(_ context.Context, reference string) (backup.Record, 
 }
 
 type rebuildIsolation struct {
-	oldCalls     int
-	storageCalls int
-	err          error
+	oldCalls      int
+	storageCalls  int
+	err           error
+	failOldAt     int
+	failStorageAt int
 }
 
 func (i *rebuildIsolation) OldProcessesIsolated(context.Context, Plan) error {
 	i.oldCalls++
+	if i.failOldAt > 0 && i.oldCalls >= i.failOldAt {
+		return fmt.Errorf("isolation expired")
+	}
 	return i.err
 }
 
 func (i *rebuildIsolation) TargetStorageOwned(context.Context, Member, string) error {
 	i.storageCalls++
+	if i.failStorageAt > 0 && i.storageCalls >= i.failStorageAt {
+		return fmt.Errorf("storage ownership changed")
+	}
 	return i.err
 }
 
@@ -135,7 +143,7 @@ func TestRebuildStagesBothBackupsOnlyAfterIsolation(t *testing.T) {
 	if result.PlanDigest == "" || result.MemberName != "new" || len(result.Databases) != 2 {
 		t.Fatalf("unexpected rebuild result: %+v", result)
 	}
-	if isolation.oldCalls != 1 || isolation.storageCalls != 1 || len(native.created) != 2 {
+	if isolation.oldCalls != 4 || isolation.storageCalls != 4 || len(native.created) != 2 {
 		t.Fatalf("precondition/native calls = %d/%d/%d", isolation.oldCalls, isolation.storageCalls, len(native.created))
 	}
 	for _, name := range []string{"ovnnb_backup.db", "ovnsb_backup.db", "ovnnb_db.db", "ovnsb_db.db"} {
@@ -248,5 +256,65 @@ func TestRebuildResumesAfterNativeInterruption(t *testing.T) {
 	}
 	if len(native.created) != 2 {
 		t.Fatalf("resume recreated the completed database: native writes=%d", len(native.created))
+	}
+}
+
+func TestRebuildValidatesBothBackupsBeforeNativeWrites(t *testing.T) {
+	plan, store, isolation, native := executorFixture(t)
+	store.data[plan.Databases[1].BackupRef] = []byte("corrupt southbound backup")
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&Executor{Root: root, Backups: store, Isolation: isolation, Native: native, MaxBackupBytes: 1 << 20}).Rebuild(t.Context(), plan, "new")
+	if err == nil || len(native.created) != 0 {
+		t.Fatalf("corrupt SB backup: err=%v native writes=%v", err, native.created)
+	}
+}
+
+func TestRebuildRechecksCapabilitiesBeforeWritesAndCompletion(t *testing.T) {
+	for _, capability := range []string{"isolation", "storage"} {
+		for _, call := range []int{2, 3, 4} {
+			t.Run(fmt.Sprintf("%s/check-%d", capability, call), func(t *testing.T) {
+				plan, store, isolation, native := executorFixture(t)
+				if capability == "isolation" {
+					isolation.failOldAt = call
+				} else {
+					isolation.failStorageAt = call
+				}
+				root := t.TempDir()
+				if err := os.Chmod(root, 0700); err != nil {
+					t.Fatal(err)
+				}
+				_, err := (&Executor{Root: root, Backups: store, Isolation: isolation, Native: native, MaxBackupBytes: 1 << 20}).Rebuild(t.Context(), plan, "new")
+				if err == nil || len(native.created) != call-2 {
+					t.Fatalf("lost capability: err=%v native writes=%d, want %d", err, len(native.created), call-2)
+				}
+				if _, err := os.Stat(filepath.Join(root, plan.OperationID, resultFile)); !os.IsNotExist(err) {
+					t.Fatalf("unexpected completion receipt: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestRebuildRechecksCapabilitiesBeforeReturningPersistedResult(t *testing.T) {
+	plan, store, isolation, native := executorFixture(t)
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	executor := &Executor{Root: root, Backups: store, Isolation: isolation, Native: native, MaxBackupBytes: 1 << 20}
+	if _, err := executor.Rebuild(t.Context(), plan, "new"); err != nil {
+		t.Fatal(err)
+	}
+	isolation.oldCalls = 0
+	isolation.failOldAt = 2
+	result, err := executor.Rebuild(t.Context(), plan, "new")
+	if err == nil || result.PlanDigest != "" {
+		t.Fatalf("persisted result bypassed isolation loss: %+v %v", result, err)
+	}
+	if len(native.created) != 2 {
+		t.Fatalf("retry recreated native databases: %v", native.created)
 	}
 }

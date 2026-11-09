@@ -20,7 +20,9 @@ import (
 // Isolation is the privileged precondition boundary for an offline rebuild.
 // Implementations must prove that every retained process is fenced/stopped
 // before native files are created and that the target root belongs to the
-// selected target member. A Kubernetes adapter may implement this interface,
+// selected target member. Isolation must remain enforced throughout the call;
+// repeated checks cannot make a transient observation into a fence.
+// A Kubernetes adapter may implement this interface,
 // but this package never performs those mutations itself.
 type Isolation interface {
 	OldProcessesIsolated(context.Context, Plan) error
@@ -89,11 +91,8 @@ func (e *Executor) Rebuild(ctx context.Context, plan Plan, memberName string) (R
 	if !ok {
 		return Result{}, fmt.Errorf("offline rebuild target member %q is not in the plan", memberName)
 	}
-	if err := e.Isolation.OldProcessesIsolated(ctx, canonical); err != nil {
-		return Result{}, fmt.Errorf("prove retained process isolation: %w", err)
-	}
-	if err := e.Isolation.TargetStorageOwned(ctx, member, e.Root); err != nil {
-		return Result{}, fmt.Errorf("prove target storage ownership: %w", err)
+	if err := e.checkCapabilities(ctx, canonical, member); err != nil {
+		return Result{}, err
 	}
 	root, lock, err := openRoot(e.Root)
 	if err != nil {
@@ -111,16 +110,27 @@ func (e *Executor) Rebuild(ctx context.Context, plan Plan, memberName string) (R
 	if result, err := e.readResult(ctx, operation, canonical, digest, member); err != nil {
 		return Result{}, err
 	} else if result != nil {
+		if err := e.checkCapabilities(ctx, canonical, member); err != nil {
+			return Result{}, err
+		}
 		return *result, nil
 	}
-	result := Result{PlanDigest: digest, MemberName: member.Name, Databases: make([]NativeDatabase, 0, len(canonical.Databases))}
+	// Authenticate the complete pair before any native database is created.
+	contents := make(map[string]string, len(canonical.Databases))
 	for _, database := range canonical.Databases {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		contents, err := e.stageBackup(ctx, operation, canonical, database)
+		staged, err := e.stageBackup(ctx, operation, canonical, database)
 		if err != nil {
 			return Result{}, fmt.Errorf("stage %s backup: %w", database.Name, err)
+		}
+		contents[database.Name] = staged
+	}
+	result := Result{PlanDigest: digest, MemberName: member.Name, Databases: make([]NativeDatabase, 0, len(canonical.Databases))}
+	for _, database := range canonical.Databases {
+		if err := e.checkCapabilities(ctx, canonical, member); err != nil {
+			return Result{}, err
 		}
 		dbPath := filepath.Join(operation.Name(), databaseFile(database.Name))
 		if existing, err := operation.Lstat(databaseFile(database.Name)); err == nil {
@@ -128,7 +138,7 @@ func (e *Executor) Rebuild(ctx context.Context, plan Plan, memberName string) (R
 				return Result{}, fmt.Errorf("existing %s target database is not a private regular file", database.Name)
 			}
 		} else if errors.Is(err, os.ErrNotExist) {
-			if err := e.Native.CreateCluster(ctx, dbPath, contents, member.RAFTAddress(database.Name), database.TargetClusterID); err != nil {
+			if err := e.Native.CreateCluster(ctx, dbPath, contents[database.Name], member.RAFTAddress(database.Name), database.TargetClusterID); err != nil {
 				return Result{}, fmt.Errorf("create %s target cluster: %w", database.Name, err)
 			}
 		} else {
@@ -143,10 +153,26 @@ func (e *Executor) Rebuild(ctx context.Context, plan Plan, memberName string) (R
 		}
 		result.Databases = append(result.Databases, observed)
 	}
+	if err := e.checkCapabilities(ctx, canonical, member); err != nil {
+		return Result{}, err
+	}
 	if err := writeJSON(operation, resultFile, result); err != nil {
 		return Result{}, fmt.Errorf("publish offline rebuild result: %w", err)
 	}
 	return result, nil
+}
+
+func (e *Executor) checkCapabilities(ctx context.Context, plan Plan, member Member) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := e.Isolation.OldProcessesIsolated(ctx, plan); err != nil {
+		return fmt.Errorf("prove retained process isolation: %w", err)
+	}
+	if err := e.Isolation.TargetStorageOwned(ctx, member, e.Root); err != nil {
+		return fmt.Errorf("prove target storage ownership: %w", err)
+	}
+	return nil
 }
 
 func (e *Executor) stageBackup(ctx context.Context, operation *os.Root, plan Plan, database Database) (string, error) {
