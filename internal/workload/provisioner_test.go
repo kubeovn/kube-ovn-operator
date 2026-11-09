@@ -549,7 +549,7 @@ func TestReplacementMemberRetainsFenceAgentAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := set.Spec.Template.Spec
-	if len(spec.Containers) != 2 || spec.Containers[1].Name != "kube-ovn-fence-agent" || spec.Containers[1].Image != config.Image || spec.ServiceAccountName != fenceagent.ResourceName(f.installation.Name) || *spec.AutomountServiceAccountToken {
+	if len(spec.Containers) != 2 || spec.Containers[1].Name != "kube-ovn-fence-agent" || spec.Containers[1].Image != config.Image || spec.ServiceAccountName != fenceagent.ResourceName(f.installation.Name) || *spec.AutomountServiceAccountToken || spec.ShareProcessNamespace == nil || !*spec.ShareProcessNamespace {
 		t.Fatal("replacement member lacks its isolated fence-agent identity")
 	}
 	for _, mount := range spec.Containers[0].VolumeMounts {

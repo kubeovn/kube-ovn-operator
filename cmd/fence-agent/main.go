@@ -88,10 +88,11 @@ func main() {
 	server := &http.Server{
 		Addr: listenAddress,
 		Handler: &fencing.Handler{
-			Gate:    gate,
-			Execute: fencing.NativeExecutor{}.Execute,
-			Restore: fencing.NativeExecutor{}.Restore,
-			Timeout: commandTimeout,
+			Gate:      gate,
+			Execute:   fencing.NativeExecutor{}.Execute,
+			Restore:   fencing.NativeExecutor{}.Restore,
+			Isolation: &fencing.ProcessIsolation{RuntimeDirectory: "/var/run/ovn"},
+			Timeout:   commandTimeout,
 		},
 		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: 5 * time.Second,

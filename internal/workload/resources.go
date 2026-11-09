@@ -229,8 +229,15 @@ func (p *Provisioner) matches(expected, actual client.Object, ref Reference) boo
 func matchesPod(expected, actual corev1.PodSpec) bool {
 	if !apiequality.Semantic.DeepDerivative(expected, actual) || actual.HostPID || actual.HostIPC ||
 		len(actual.Containers) != len(expected.Containers) || len(actual.InitContainers) != len(expected.InitContainers) || len(actual.EphemeralContainers) != 0 || len(actual.Volumes) != len(expected.Volumes) ||
-		actual.ShareProcessNamespace != nil && *actual.ShareProcessNamespace || actual.SecurityContext == nil || actual.SecurityContext.FSGroup != nil ||
+		actual.SecurityContext == nil || actual.SecurityContext.FSGroup != nil ||
 		len(actual.SecurityContext.SupplementalGroups) != 0 || len(actual.SecurityContext.Sysctls) != 0 {
+		return false
+	}
+	if expected.ShareProcessNamespace != nil && *expected.ShareProcessNamespace {
+		if actual.ShareProcessNamespace == nil || !*actual.ShareProcessNamespace {
+			return false
+		}
+	} else if actual.ShareProcessNamespace != nil && *actual.ShareProcessNamespace {
 		return false
 	}
 	for index, container := range expected.Containers {

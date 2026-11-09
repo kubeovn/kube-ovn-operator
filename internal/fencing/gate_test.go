@@ -3,8 +3,10 @@ package fencing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -108,5 +110,65 @@ func TestHandlerUsesGateAndReturnsStaleFenceCode(t *testing.T) {
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusConflict {
 		t.Fatalf("unexpected status: %d", response.StatusCode)
+	}
+}
+
+type processControllerFake struct{ actions []string }
+
+func (f *processControllerFake) Isolate(context.Context, lease.FenceToken) error {
+	f.actions = append(f.actions, "isolate")
+	return nil
+}
+
+func (f *processControllerFake) Check(context.Context, lease.FenceToken) error {
+	f.actions = append(f.actions, "check")
+	return nil
+}
+
+func (f *processControllerFake) Release(context.Context, lease.FenceToken) error {
+	f.actions = append(f.actions, "release")
+	return nil
+}
+
+func TestHandlerProcessFenceRequiresCurrentLeaseToken(t *testing.T) {
+	gate := new(Gate)
+	current := testToken(2)
+	if err := gate.Arm(current); err != nil {
+		t.Fatal(err)
+	}
+	process := new(processControllerFake)
+	handler := &Handler{Gate: gate, Isolation: process}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	for _, test := range []struct {
+		path   string
+		token  lease.FenceToken
+		status int
+	}{
+		{path: IsolationPath, token: current, status: http.StatusOK},
+		{path: CheckPath, token: current, status: http.StatusOK},
+		{path: ReleasePath, token: current, status: http.StatusOK},
+		{path: IsolationPath, token: testToken(1), status: http.StatusConflict},
+	} {
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+test.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("X-Kube-OVN-Installation-UID", string(test.token.InstallationUID))
+		request.Header.Set("X-Kube-OVN-Lease-UID", string(test.token.LeaseUID))
+		request.Header.Set("X-Kube-OVN-Fence-Scope", string(test.token.Scope))
+		request.Header.Set("X-Kube-OVN-Fence-Holder", test.token.Holder)
+		request.Header.Set("X-Kube-OVN-Fence-Epoch", fmt.Sprint(test.token.Epoch))
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != test.status {
+			t.Fatalf("%s status = %d, want %d", test.path, response.StatusCode, test.status)
+		}
+	}
+	if !slices.Equal(process.actions, []string{"isolate", "check", "release"}) {
+		t.Fatalf("process actions = %v", process.actions)
 	}
 }

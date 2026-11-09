@@ -280,6 +280,58 @@ func setFenceHeaders(request *http.Request, token lease.FenceToken) {
 	request.Header.Set("X-Kube-OVN-Fence-Epoch", strconv.FormatInt(int64(token.Epoch), 10))
 }
 
+// IsolateAt suspends the exact native member processes selected by the
+// sidecar's shared runtime identity. The sidecar compares token and process
+// state synchronously before returning.
+func (c *FenceHTTPClient) IsolateAt(ctx context.Context, namespace, endpoint, node, container string, token lease.FenceToken) error {
+	return c.processFenceAt(ctx, namespace, endpoint, node, container, fencing.IsolationPath, token)
+}
+
+func (c *FenceHTTPClient) CheckIsolationAt(ctx context.Context, namespace, endpoint, node, container string, token lease.FenceToken) error {
+	return c.processFenceAt(ctx, namespace, endpoint, node, container, fencing.CheckPath, token)
+}
+
+func (c *FenceHTTPClient) ReleaseAt(ctx context.Context, namespace, endpoint, node, container string, token lease.FenceToken) error {
+	return c.processFenceAt(ctx, namespace, endpoint, node, container, fencing.ReleasePath, token)
+}
+
+func (c *FenceHTTPClient) processFenceAt(ctx context.Context, namespace, endpoint, node, container, path string, token lease.FenceToken) error {
+	if err := validateFenceToken(token); err != nil {
+		return err
+	}
+	if c == nil || c.client == nil {
+		return errors.New("fence HTTP client is not configured")
+	}
+	if strings.TrimSpace(endpoint) == "" {
+		return errors.New("fence endpoint is required")
+	}
+	if namespace == "" {
+		namespace = "kube-ovn-operator-system"
+	}
+	if container == "" {
+		container = "ovn-central"
+	}
+	requestURL, err := c.endpointURLForAt(namespace, endpoint, node, container, path)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, nil)
+	if err != nil {
+		return fmt.Errorf("create process fence request: %w", err)
+	}
+	setFenceHeaders(request, token)
+	response, err := c.client.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("send process fence request: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	_, err = decodeFenceResponse(response, "process fence")
+	return err
+}
+
 func (c *FenceHTTPClient) do(ctx context.Context, endpoint, namespace, container string, command []string, token *lease.FenceToken) ([]byte, error) {
 	return c.doAt(ctx, endpoint, namespace, "", container, command, token)
 }

@@ -55,11 +55,12 @@ type RestoreExecutor func(context.Context, string, io.Reader) error
 // endpoint: only the trusted Lease controller that owns the process may call
 // Gate.Arm and Gate.Disarm.
 type Handler struct {
-	Gate     *Gate
-	Execute  CommandExecutor
-	Restore  RestoreExecutor
-	Validate func([]string) error
-	Timeout  time.Duration
+	Gate      *Gate
+	Execute   CommandExecutor
+	Restore   RestoreExecutor
+	Isolation ProcessController
+	Validate  func([]string) error
+	Timeout   time.Duration
 	// restoreLimit is an internal test seam; production handlers use the
 	// fixed maxRestoreBytes limit and cannot loosen it through the wire.
 	restoreLimit int64
@@ -102,6 +103,19 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		}
 		writeHealthResponse(writer, http.StatusOK)
 		return
+	}
+	if request.Method == http.MethodPost {
+		switch request.URL.Path {
+		case IsolationPath:
+			h.serveIsolation(writer, request, "isolate")
+			return
+		case CheckPath:
+			h.serveIsolation(writer, request, "check")
+			return
+		case ReleasePath:
+			h.serveIsolation(writer, request, "release")
+			return
+		}
 	}
 	if request.Method == http.MethodPost && request.URL.Path == RestorePath {
 		h.serveRestore(writer, request)
@@ -166,6 +180,48 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeResponse(writer, http.StatusOK, Response{Output: string(output)})
+}
+
+func (h *Handler) serveIsolation(writer http.ResponseWriter, request *http.Request, action string) {
+	if h == nil || h.Gate == nil || h.Isolation == nil {
+		writeResponse(writer, http.StatusServiceUnavailable, Response{Code: "fence_not_armed", Message: "process fence is not configured"})
+		return
+	}
+	token, err := tokenFromHeaders(request)
+	if err != nil {
+		writeResponse(writer, http.StatusBadRequest, Response{Code: "invalid_fence", Message: err.Error()})
+		return
+	}
+	ctx := request.Context()
+	if h.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.Timeout)
+		defer cancel()
+	}
+	_, err = h.Gate.Execute(ctx, token, func(ctx context.Context) ([]byte, error) {
+		switch action {
+		case "isolate":
+			return nil, h.Isolation.Isolate(ctx, token)
+		case "check":
+			return nil, h.Isolation.Check(ctx, token)
+		case "release":
+			return nil, h.Isolation.Release(ctx, token)
+		default:
+			return nil, errors.New("unsupported process fence action")
+		}
+	})
+	if err != nil {
+		code, message := wrapCode(err)
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrNotArmed) || errors.Is(err, ErrStale) {
+			status = http.StatusConflict
+		} else if errors.Is(err, ErrInvalid) || errors.Is(err, ErrNoCommand) {
+			status = http.StatusBadRequest
+		}
+		writeResponse(writer, status, Response{Code: code, Message: message})
+		return
+	}
+	writeResponse(writer, http.StatusOK, Response{})
 }
 
 func (h *Handler) serveRestore(writer http.ResponseWriter, request *http.Request) {
