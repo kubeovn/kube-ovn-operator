@@ -26,7 +26,7 @@ type KubernetesStorageOwnershipVerifier struct {
 
 func (v *KubernetesStorageOwnershipVerifier) Verify(ctx context.Context, member Member, root string) error {
 	if v == nil || v.Reader == nil {
-		return errors.New("Kubernetes storage verifier requires a live client")
+		return errors.New("kubernetes storage verifier requires a live client")
 	}
 	if err := validateStorage(member.Storage); err != nil {
 		return fmt.Errorf("validate target storage identity: %w", err)
