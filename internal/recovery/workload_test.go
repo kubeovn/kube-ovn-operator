@@ -82,3 +82,55 @@ func TestIsolationProofBindsCanonicalPlan(t *testing.T) {
 		t.Fatal("proof with a different plan digest was accepted")
 	}
 }
+
+func TestIsolationProofRejectsOldVerification(t *testing.T) {
+	plan := validPlan()
+	_, digest, err := plan.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := IsolationProof{PlanDigest: digest, OperationID: plan.OperationID, RetainedMembers: []string{"old"}, VerifiedAt: time.Now().Add(-time.Hour)}
+	if err := proof.Validate(plan); err == nil {
+		t.Fatal("expired isolation metadata was accepted")
+	}
+}
+
+func TestIsolationProofAcceptsUnsortedPlan(t *testing.T) {
+	plan := validPlan()
+	plan.RetainedMembers = append(plan.RetainedMembers, member("earlier", "2", "b", "c", "d", "e"))
+	_, digest, err := plan.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := IsolationProof{PlanDigest: digest, OperationID: plan.OperationID, RetainedMembers: []string{"old", "earlier"}, VerifiedAt: time.Now()}
+	if err := proof.Validate(plan); err != nil {
+		t.Fatalf("canonical-equivalent plan rejected: %v", err)
+	}
+}
+
+func TestIsolationProofTimestampWindow(t *testing.T) {
+	plan := validPlan()
+	_, digest, err := plan.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.November, 9, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name      string
+		timestamp time.Time
+		valid     bool
+	}{
+		{"missing", time.Time{}, false},
+		{"old boundary", now.Add(-5 * time.Minute), true},
+		{"expired", now.Add(-5*time.Minute - time.Nanosecond), false},
+		{"future boundary", now.Add(time.Minute), true},
+		{"future", now.Add(time.Minute + time.Nanosecond), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proof := IsolationProof{PlanDigest: digest, OperationID: plan.OperationID, RetainedMembers: []string{"old"}, VerifiedAt: tc.timestamp}
+			if err := proof.validateAt(plan, now); (err == nil) != tc.valid {
+				t.Fatalf("valid=%v err=%v", tc.valid, err)
+			}
+		})
+	}
+}

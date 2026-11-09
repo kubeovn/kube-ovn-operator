@@ -2,10 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json/v2"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/kubeovn/kube-ovn-operator/internal/recovery"
 )
 
 const testClusterID = "cccc0000-1111-2222-3333-444444444444"
@@ -86,4 +92,59 @@ func fakeTool(t *testing.T, script string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestWorkloadRejectsMetadataWithoutEnforcedIsolation(t *testing.T) {
+	root := t.TempDir()
+	refs := map[string]string{"OVN_Northbound": "sha256:" + strings.Repeat("a", 64), "OVN_Southbound": "sha256:" + strings.Repeat("b", 64)}
+	pair, err := json.Marshal(refs, json.Deterministic(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := func(name, node string) recovery.Member {
+		return recovery.Member{Name: name, NodeName: "node-" + node,
+			Storage:               recovery.StorageIdentity{NodeUID: "node-" + node, WorkloadUID: "workload-" + node, PodUID: "pod-" + node, ContainerID: "container-" + node, VolumeUID: "volume-" + node},
+			NorthboundRAFTAddress: "tcp:192.0.2." + node + ":6643", SouthboundRAFTAddress: "tcp:192.0.2." + node + ":6644",
+			NorthboundClient: "tcp:192.0.2." + node + ":6641", SouthboundClient: "tcp:192.0.2." + node + ":6642"}
+	}
+	plan := recovery.Plan{FormatVersion: recovery.FormatVersion, InstallationUID: "installation", OperationID: "eeee0000-1111-2222-3333-444444444444",
+		SourceVersion: "v1.16.13", TargetVersion: "v1.16.13", BackupPairID: fmt.Sprintf("sha256:%x", sha256.Sum256(pair)),
+		Approval:        recovery.Approval{Name: "approval", UID: "approval-uid", DecisionDigest: "sha256:" + strings.Repeat("c", 64)},
+		RetainedMembers: []recovery.Member{member("old", "1")}, TargetMembers: []recovery.Member{member("new", "2")},
+		Databases: []recovery.Database{
+			{Name: "OVN_Northbound", BackupRef: refs["OVN_Northbound"], SourceClusterID: "aaaa0000-1111-2222-3333-444444444444", TargetClusterID: testClusterID},
+			{Name: "OVN_Southbound", BackupRef: refs["OVN_Southbound"], SourceClusterID: "bbbb0000-1111-2222-3333-444444444444", TargetClusterID: "dddd0000-1111-2222-3333-444444444444"},
+		},
+	}
+	_, digest, err := plan.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := recovery.IsolationProof{PlanDigest: digest, OperationID: plan.OperationID, RetainedMembers: []string{"old"}, VerifiedAt: time.Now()}
+	write := func(name string, value any) string {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	planPath, proofPath := write("plan.json", plan), write("proof.json", proof)
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// The retained member is remote; an empty local process table proves nothing.
+	err = runWorkload(t.Context(), []string{"--workload-plan=" + planPath, "--isolation-proof=" + proofPath, "--target-root=" + target, "--proc-root=" + root, "--backup-dir=" + root, "--member=new"})
+	if err == nil || !strings.Contains(err.Error(), "enforced isolation") {
+		t.Fatalf("missing isolation capability: %v", err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("disabled workload modified target: %v, %v", entries, err)
+	}
 }
