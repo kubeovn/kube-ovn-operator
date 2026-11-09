@@ -72,6 +72,14 @@ check, and never releases fencing with a token that has been taken over. The
 repository does not provide a default controller or PVC verifier; readiness,
 `/proc` scans, and marker files cannot satisfy these interfaces.
 
+`internal/recovery.KubernetesStorageOwnershipVerifier` is the first live
+ownership adapter. It resolves the target Pod and PVC by immutable UID, checks
+the controller workload UID, node UID, `ovn-central` container ID, namespace
+and PVC mount, and requires the PVC to remain Bound while the target root is an
+existing directory. It does not infer ownership from names or marker files. A
+real retained-member fence controller is still required before the executor
+can be enabled by the controller.
+
 The operation directory is journaled before the first native write. A retry
 revalidates the exact canonical plan and target member, reuses only private
 single-link backup files whose bytes still match the authenticated record,
