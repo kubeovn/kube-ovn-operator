@@ -22,11 +22,27 @@ import (
 // before native files are created and that the target root belongs to the
 // selected target member. Isolation must remain enforced throughout the call;
 // repeated checks cannot make a transient observation into a fence.
-// A Kubernetes adapter may implement this interface,
-// but this package never performs those mutations itself.
+// A Kubernetes adapter may implement this interface for the checks used by a
+// guard, but this package never performs those mutations itself.
 type Isolation interface {
 	OldProcessesIsolated(context.Context, Plan) error
 	TargetStorageOwned(context.Context, Member, string) error
+}
+
+// IsolationGuard is the lifetime capability for an offline rebuild. Begin
+// must establish enforced fencing and target ownership; Check must verify that
+// the same enforcement is still active, and Close must release it. A sequence
+// of independent observations is not a substitute for this capability.
+type IsolationGuard interface {
+	Check(context.Context) error
+	Close(context.Context) error
+}
+
+// IsolationSession is implemented by providers that can hold fencing for the
+// complete native write window. The executor refuses providers that only
+// implement the legacy point-in-time Isolation checks.
+type IsolationSession interface {
+	Begin(context.Context, Plan, Member, string) (IsolationGuard, error)
 }
 
 // Native creates one fresh clustered database from a verified standalone
@@ -91,9 +107,22 @@ func (e *Executor) Rebuild(ctx context.Context, plan Plan, memberName string) (R
 	if !ok {
 		return Result{}, fmt.Errorf("offline rebuild target member %q is not in the plan", memberName)
 	}
-	if err := e.checkCapabilities(ctx, canonical, member); err != nil {
-		return Result{}, err
+	session, ok := e.Isolation.(IsolationSession)
+	if !ok {
+		return Result{}, errors.New("offline rebuild requires a continuous isolation session")
 	}
+	guard, err := session.Begin(ctx, canonical, member, e.Root)
+	if err != nil {
+		return Result{}, fmt.Errorf("begin offline rebuild isolation: %w", err)
+	}
+	if guard == nil {
+		return Result{}, errors.New("offline rebuild isolation session returned no guard")
+	}
+	defer func() {
+		if guard != nil {
+			_ = guard.Close(context.Background())
+		}
+	}()
 	root, lock, err := openRoot(e.Root)
 	if err != nil {
 		return Result{}, err
@@ -110,8 +139,13 @@ func (e *Executor) Rebuild(ctx context.Context, plan Plan, memberName string) (R
 	if result, err := e.readResult(ctx, operation, canonical, digest, member); err != nil {
 		return Result{}, err
 	} else if result != nil {
-		if err := e.checkCapabilities(ctx, canonical, member); err != nil {
+		if err := e.checkCapabilities(ctx, canonical, member, guard); err != nil {
 			return Result{}, err
+		}
+		closeErr := guard.Close(ctx)
+		guard = nil
+		if closeErr != nil {
+			return Result{}, fmt.Errorf("close offline rebuild isolation: %w", closeErr)
 		}
 		return *result, nil
 	}
@@ -129,7 +163,7 @@ func (e *Executor) Rebuild(ctx context.Context, plan Plan, memberName string) (R
 	}
 	result := Result{PlanDigest: digest, MemberName: member.Name, Databases: make([]NativeDatabase, 0, len(canonical.Databases))}
 	for _, database := range canonical.Databases {
-		if err := e.checkCapabilities(ctx, canonical, member); err != nil {
+		if err := e.checkCapabilities(ctx, canonical, member, guard); err != nil {
 			return Result{}, err
 		}
 		dbPath := filepath.Join(operation.Name(), databaseFile(database.Name))
@@ -153,18 +187,29 @@ func (e *Executor) Rebuild(ctx context.Context, plan Plan, memberName string) (R
 		}
 		result.Databases = append(result.Databases, observed)
 	}
-	if err := e.checkCapabilities(ctx, canonical, member); err != nil {
+	if err := e.checkCapabilities(ctx, canonical, member, guard); err != nil {
 		return Result{}, err
 	}
 	if err := writeJSON(operation, resultFile, result); err != nil {
 		return Result{}, fmt.Errorf("publish offline rebuild result: %w", err)
 	}
+	closeErr := guard.Close(ctx)
+	guard = nil
+	if closeErr != nil {
+		return Result{}, fmt.Errorf("close offline rebuild isolation: %w", closeErr)
+	}
 	return result, nil
 }
 
-func (e *Executor) checkCapabilities(ctx context.Context, plan Plan, member Member) error {
+func (e *Executor) checkCapabilities(ctx context.Context, plan Plan, member Member, guard IsolationGuard) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if guard != nil {
+		if err := guard.Check(ctx); err != nil {
+			return fmt.Errorf("verify continuous offline rebuild isolation: %w", err)
+		}
+		return nil
 	}
 	if err := e.Isolation.OldProcessesIsolated(ctx, plan); err != nil {
 		return fmt.Errorf("prove retained process isolation: %w", err)
