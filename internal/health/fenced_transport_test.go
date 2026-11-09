@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -123,6 +124,36 @@ func TestFenceHTTPClientSendsExactTokenAndCommand(t *testing.T) {
 	}
 	if string(output) != "accepted" {
 		t.Fatalf("unexpected output %q", output)
+	}
+}
+
+func TestFenceHTTPClientSendsProcessFenceToken(t *testing.T) {
+	token := lease.FenceToken{InstallationUID: "installation", LeaseUID: "lease", Scope: lease.Central, Holder: "holder", Epoch: 4}
+	seen := make([]string, 0, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		seen = append(seen, request.URL.Path)
+		if request.Header.Get("X-Kube-OVN-Fence-Epoch") != "4" || request.Header.Get("X-Kube-OVN-Fence-Holder") != "holder" {
+			t.Fatal("process fence request lost its Lease token")
+		}
+		_, _ = writer.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	client, err := NewFenceHTTPClient(server.URL+"/fence/{pod}", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.IsolateAt(t.Context(), "default", "central-0", "", "ovn-central", token); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CheckIsolationAt(t.Context(), "default", "central-0", "", "ovn-central", token); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ReleaseAt(t.Context(), "default", "central-0", "", "ovn-central", token); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/fence/central-0" + fencing.IsolationPath, "/fence/central-0" + fencing.CheckPath, "/fence/central-0" + fencing.ReleasePath}
+	if !slices.Equal(seen, want) {
+		t.Fatalf("process fence paths = %v, want %v", seen, want)
 	}
 }
 

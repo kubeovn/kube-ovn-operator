@@ -123,6 +123,10 @@ func Inject(object *unstructured.Unstructured, config Config, installation, name
 		"livenessProbe":  map[string]any{"tcpSocket": map[string]any{"port": port}, "periodSeconds": int64(10), "timeoutSeconds": int64(3), "successThreshold": int64(1), "failureThreshold": int64(3)},
 	}
 	templateSpec["containers"] = append(containers, sidecar)
+	// The sidecar must see the member-run children whose PID files it fences.
+	// It still runs as the same non-root UID as the native member processes and
+	// signals only the exact PID-file identities from the shared runtime volume.
+	templateSpec["shareProcessNamespace"] = true
 	volumes, _, err := unstructured.NestedSlice(templateSpec, "volumes")
 	if err != nil {
 		return fmt.Errorf("read ovn-central volumes: %w", err)

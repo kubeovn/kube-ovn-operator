@@ -80,6 +80,15 @@ existing directory. It does not infer ownership from names or marker files. A
 real retained-member fence controller is still required before the executor
 can be enabled by the controller.
 
+The fence-agent now exposes `/v1/fence/isolate`, `/v1/fence/check` and
+`/v1/fence/release` over the same mTLS channel. It requires the current Lease
+token at the HTTP gate, shares the member PID namespace, and suspends the
+`ovsdb-server` and `ovn-northd` processes named by private runtime PID files.
+Each check re-reads the PID files and `/proc` command line/state before native
+writes. The sidecar remains fail-closed when the Lease expires; it does not
+resume a process from a stale token. `RemoteFenceController` adapts this
+protocol, but controller wiring and a live endpoint resolver are still pending.
+
 The operation directory is journaled before the first native write. A retry
 revalidates the exact canonical plan and target member, reuses only private
 single-link backup files whose bytes still match the authenticated record,
