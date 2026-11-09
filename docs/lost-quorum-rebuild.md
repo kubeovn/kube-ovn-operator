@@ -61,6 +61,17 @@ backup is staged. This seam is intentionally injectable so a future provider
 can hold the fence-agent Lease token and verify the target PVC identity for the
 whole operation.
 
+`recovery.FencedIsolationSession` is the fail-closed provider skeleton for
+that seam. It requires three injected capabilities: a central Lease token
+source, a `FenceController` that isolates/checks/releases every retained
+member through an atomic server-side fence, and a live
+`StorageOwnershipVerifier` for the target root. It refreshes and compares the
+Lease token before each retained-member action, rolls back partial fencing on
+begin failure, checks all retained members and target storage for every guard
+check, and never releases fencing with a token that has been taken over. The
+repository does not provide a default controller or PVC verifier; readiness,
+`/proc` scans, and marker files cannot satisfy these interfaces.
+
 The operation directory is journaled before the first native write. A retry
 revalidates the exact canonical plan and target member, reuses only private
 single-link backup files whose bytes still match the authenticated record,
