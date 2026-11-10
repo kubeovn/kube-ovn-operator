@@ -24,6 +24,12 @@ type OfflineRebuildWorkloadBuilder interface {
 	Build(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error)
 }
 
+// ErrRecoveryWorkloadNotReady means the admitted plan is intact but an
+// external workload artifact has not become available yet. The request
+// controller must keep the request Executing and retry instead of converting
+// this transient readiness gap into a terminal failure.
+var ErrRecoveryWorkloadNotReady = errors.New("offline recovery workload is not ready")
+
 // RecoveryJobExecutor creates and observes one immutable offline rebuild Job.
 // It intentionally does not discover storage identities or backup PVCs. Until
 // a production builder can provide those values, execution remains blocked
@@ -104,6 +110,9 @@ func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, re
 	} {
 		configMap := new(corev1.ConfigMap)
 		if err := e.Client.Get(ctx, client.ObjectKey{Namespace: spec.Namespace, Name: name}, configMap); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("%w: offline rebuild ConfigMap %q is not available", ErrRecoveryWorkloadNotReady, name)
+			}
 			return fmt.Errorf("read offline rebuild %s ConfigMap %q: %w", artifact.annotation, name, err)
 		}
 		if configMap.Annotations[artifact.annotation] != spec.PlanDigest || strings.TrimSpace(configMap.Data[artifact.key]) == "" {

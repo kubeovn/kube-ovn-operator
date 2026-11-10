@@ -454,6 +454,40 @@ func TestRecoveryRequestKeepsExecutingWhileLifecycleConverges(t *testing.T) {
 	}
 }
 
+func TestRecoveryRequestKeepsExecutingWhileWorkloadArtifactsAreNotReady(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	scheme := controllerScheme(t)
+	installation := recoveryInstallation()
+	request := recoveryRequest(now)
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
+	reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }, Executor: recoveryExecutorFunc(func(context.Context, RecoveryPlan) error { return ErrRecoveryWorkloadNotReady })}
+	key := client.ObjectKeyFromObject(request)
+	if _, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatalf("workload readiness gap was not requeued: %+v", result)
+	}
+	got := new(operatorv1alpha1.KubeOVNRecoveryRequest)
+	if err := kube.Get(t.Context(), key, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != operatorv1alpha1.RecoveryPhaseExecuting {
+		t.Fatalf("workload readiness gap became terminal: %s", got.Status.Phase)
+	}
+	condition := findCondition(got.Status.Conditions, "ExecutionReady")
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "WorkloadNotReady" {
+		t.Fatalf("workload readiness condition was not persisted: %+v", got.Status.Conditions)
+	}
+	if got.Status.CompletedAt != nil {
+		t.Fatal("workload readiness gap recorded a completion timestamp")
+	}
+}
+
 func TestDestructiveRecoveryPersistsRestartableExecutionPhases(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	scheme := controllerScheme(t)

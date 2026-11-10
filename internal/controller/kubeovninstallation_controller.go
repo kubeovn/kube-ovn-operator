@@ -2561,6 +2561,12 @@ func (r *RecoveryRequestReconciler) Reconcile(ctx context.Context, req reconcile
 			}
 			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
 		}
+		if errors.Is(err, ErrRecoveryWorkloadNotReady) {
+			if progressErr := r.setRecoveryWorkloadNotReady(ctx, request, now); progressErr != nil {
+				return reconcile.Result{}, progressErr
+			}
+			return reconcile.Result{RequeueAfter: 10 * time.Second}, nil
+		}
 		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "ExecutionFailed", err.Error(), now, false)
 	}
 	latest := new(operatorv1alpha1.KubeOVNRecoveryRequest)
@@ -2871,6 +2877,13 @@ func (r *RecoveryRequestReconciler) setRecoveryInProgress(ctx context.Context, r
 	request.Status.Phase = operatorv1alpha1.RecoveryPhaseExecuting
 	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; approvedBy is self-reported and does not authorize execution", now))
 	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionTrue, "ExecutionInProgress", "the durable rejoin operation is advancing and will be retried until both databases and the workload converge", now))
+	return r.updateRecoveryStatus(ctx, request)
+}
+
+func (r *RecoveryRequestReconciler) setRecoveryWorkloadNotReady(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, now time.Time) error {
+	request.Status.Phase = operatorv1alpha1.RecoveryPhaseExecuting
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; approvedBy is self-reported and does not authorize execution", now))
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionFalse, "WorkloadNotReady", "recovery artifacts are not available yet; no database or storage mutation was attempted", now))
 	return r.updateRecoveryStatus(ctx, request)
 }
 
