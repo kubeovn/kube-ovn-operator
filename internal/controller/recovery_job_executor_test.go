@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,37 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestRecoveryJobExecutorTreatsMissingArtifactsAsNotReady(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	request := recoveryRequest(time.Unix(100, 0).UTC())
+	request.Spec.Mode = operatorv1alpha1.RecoveryModeFreshBootstrap
+	planDigest := "sha256:" + strings.Repeat("e", 64)
+	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: planDigest, InstallationUID: "installation-uid", RequestGeneration: request.Generation}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(request).WithObjects(request).Build()
+	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: "installation-uid", Mode: request.Spec.Mode, Digest: planDigest}
+	builder := offlineRebuildWorkloadBuilderFunc(func(_ context.Context, _ RecoveryPlan) (recovery.WorkloadSpec, error) {
+		return recovery.WorkloadSpec{Namespace: request.Namespace, Name: "rebuild-member-recovery", InstallationUID: "installation-uid", OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: planDigest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("f", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", IsolationProofConfigMap: "rebuild-proof", BackupClaim: "backup", Target: recovery.WorkloadVolume{Name: "target", Claim: "target"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ReadOnly: true}}}, nil
+	})
+	executor := &RecoveryJobExecutor{Client: kube, Builder: builder}
+	err := executor.Execute(t.Context(), plan)
+	if !errors.Is(err, ErrRecoveryWorkloadNotReady) {
+		t.Fatalf("missing recovery artifact was not retryable: %v", err)
+	}
+	job := new(batchv1.Job)
+	if err := kube.Get(t.Context(), client.ObjectKey{Namespace: request.Namespace, Name: "rebuild-member-recovery"}, job); err == nil {
+		t.Fatal("executor created a Job before recovery artifacts were ready")
+	}
+}
 
 func TestRecoveryJobExecutorCreatesAndObservesOnePinnedJob(t *testing.T) {
 	scheme := runtime.NewScheme()
