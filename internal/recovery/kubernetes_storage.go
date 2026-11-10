@@ -76,6 +76,13 @@ func (v *KubernetesStorageOwnershipVerifier) Verify(ctx context.Context, member 
 	if pvc.Status.Phase != corev1.ClaimBound || strings.TrimSpace(pvc.Spec.VolumeName) == "" {
 		return errors.New("target PVC is not currently bound")
 	}
+	volume := new(corev1.PersistentVolume)
+	if err := v.Reader.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, volume); err != nil {
+		return fmt.Errorf("read target PV ownership: %w", err)
+	}
+	if volume.Status.Phase != corev1.VolumeBound || volume.Spec.ClaimRef == nil || volume.Spec.ClaimRef.Name != pvc.Name || volume.Spec.ClaimRef.Namespace != pvc.Namespace || volume.Spec.ClaimRef.UID != pvc.UID {
+		return errors.New("target PV claim binding does not match the recovery PVC")
+	}
 	return nil
 }
 
@@ -140,7 +147,7 @@ func verifyControllerOwner(pod *corev1.Pod, workloadUID string) error {
 
 func containerIDFor(pod *corev1.Pod, name string) (string, bool) {
 	for _, status := range pod.Status.ContainerStatuses {
-		if status.Name == name && strings.TrimSpace(status.ContainerID) != "" {
+		if status.Name == name && status.State.Running != nil && strings.TrimSpace(status.ContainerID) != "" {
 			return status.ContainerID, true
 		}
 	}
