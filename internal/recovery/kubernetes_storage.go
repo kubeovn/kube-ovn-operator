@@ -104,7 +104,7 @@ func (v *KubernetesStorageOwnershipVerifier) targetPVC(ctx context.Context, pod 
 
 func podByUID(ctx context.Context, reader client.Reader, namespace, uid string) (*corev1.Pod, error) {
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(uid) == "" {
-		return nil, errors.New("Pod ownership lookup requires namespace and UID")
+		return nil, errors.New("pod ownership lookup requires namespace and UID")
 	}
 	// Kubernetes does not support metadata.uid as a field selector. Restrict
 	// the list to the installation namespace, then compare immutable UIDs.
