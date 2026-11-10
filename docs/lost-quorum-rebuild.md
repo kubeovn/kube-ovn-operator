@@ -73,7 +73,11 @@ repository does not provide a default controller or PVC verifier; readiness,
 `/proc` scans, and marker files cannot satisfy these interfaces.
 
 `internal/recovery.KubernetesStorageOwnershipVerifier` is the first live
-ownership adapter. It resolves the target Pod and PVC by immutable UID, checks
+ownership adapter. It requires an explicit installation namespace, lists Pods
+within that namespace and compares their immutable UIDs locally (the Kubernetes
+API does not support a `metadata.uid` field selector). It reads PVCs by the
+claim names referenced by the Pod, then verifies the planned PVC UID and rejects
+a deleting claim. It checks
 the controller workload UID, node UID, `ovn-central` container ID, namespace
 and PVC mount, and requires the PVC to remain Bound while the target root is an
 existing directory. It does not infer ownership from names or marker files. A

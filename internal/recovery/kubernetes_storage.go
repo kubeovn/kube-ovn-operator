@@ -21,7 +21,8 @@ import (
 // Names can be reused after deletion, while the plan binds the identities that
 // were admitted for this recovery operation.
 type KubernetesStorageOwnershipVerifier struct {
-	Reader client.Reader
+	Reader    client.Reader
+	Namespace string
 }
 
 func (v *KubernetesStorageOwnershipVerifier) Verify(ctx context.Context, member Member, root string) error {
@@ -45,7 +46,7 @@ func (v *KubernetesStorageOwnershipVerifier) Verify(ctx context.Context, member 
 		return errors.New("target storage root must not be a symlink")
 	}
 
-	pod, err := podByUID(ctx, v.Reader, member.Storage.PodUID)
+	pod, err := podByUID(ctx, v.Reader, v.Namespace, member.Storage.PodUID)
 	if err != nil {
 		return fmt.Errorf("read target Pod ownership: %w", err)
 	}
@@ -79,81 +80,53 @@ func (v *KubernetesStorageOwnershipVerifier) Verify(ctx context.Context, member 
 }
 
 func (v *KubernetesStorageOwnershipVerifier) targetPVC(ctx context.Context, pod *corev1.Pod, volumeUID string) (*corev1.PersistentVolumeClaim, error) {
-	pvc, err := pvcByUID(ctx, v.Reader, volumeUID)
-	if err != nil {
-		return nil, fmt.Errorf("read target PVC ownership: %w", err)
-	}
-	if pvc.Namespace != pod.Namespace {
-		return nil, errors.New("target PVC is in a different namespace from the target Pod")
+	if strings.TrimSpace(volumeUID) == "" {
+		return nil, errors.New("target PVC UID is required")
 	}
 	for _, volume := range pod.Spec.Volumes {
-		if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == pvc.Name {
+		if volume.PersistentVolumeClaim == nil {
+			continue
+		}
+		pvc := new(corev1.PersistentVolumeClaim)
+		key := client.ObjectKey{Namespace: pod.Namespace, Name: volume.PersistentVolumeClaim.ClaimName}
+		if err := v.Reader.Get(ctx, key, pvc); err != nil {
+			return nil, fmt.Errorf("read target Pod PVC %s: %w", key, err)
+		}
+		if string(pvc.UID) == volumeUID {
+			if pvc.DeletionTimestamp != nil {
+				return nil, errors.New("target PVC is being deleted")
+			}
 			return pvc, nil
 		}
 	}
-	return nil, errors.New("target PVC is not mounted by the target Pod")
+	return nil, errors.New("target Pod has no PVC matching the recovery plan UID")
 }
 
-func podByUID(ctx context.Context, reader client.Reader, uid string) (*corev1.Pod, error) {
+func podByUID(ctx context.Context, reader client.Reader, namespace, uid string) (*corev1.Pod, error) {
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(uid) == "" {
+		return nil, errors.New("pod ownership lookup requires namespace and UID")
+	}
+	// Kubernetes does not support metadata.uid as a field selector. Restrict
+	// the list to the installation namespace, then compare immutable UIDs.
 	list := new(corev1.PodList)
-	object, err := objectByUID(ctx, reader, uid, list)
-	if err != nil {
+	if err := reader.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return nil, err
 	}
-	pod, ok := object.(*corev1.Pod)
-	if !ok {
-		return nil, fmt.Errorf("ownership lookup returned %T instead of Pod", object)
-	}
-	return pod, nil
-}
-
-func pvcByUID(ctx context.Context, reader client.Reader, uid string) (*corev1.PersistentVolumeClaim, error) {
-	list := new(corev1.PersistentVolumeClaimList)
-	object, err := objectByUID(ctx, reader, uid, list)
-	if err != nil {
-		return nil, err
-	}
-	pvc, ok := object.(*corev1.PersistentVolumeClaim)
-	if !ok {
-		return nil, fmt.Errorf("ownership lookup returned %T instead of PersistentVolumeClaim", object)
-	}
-	return pvc, nil
-}
-
-func objectByUID(ctx context.Context, reader client.Reader, uid string, list client.ObjectList) (client.Object, error) {
-	if strings.TrimSpace(uid) == "" {
-		return nil, errors.New("object UID is required")
-	}
-	if err := reader.List(ctx, list, client.MatchingFields{"metadata.uid": uid}); err != nil {
-		return nil, err
-	}
-	objects, err := listItems(list)
-	if err != nil {
-		return nil, err
-	}
-	if len(objects) != 1 {
-		return nil, fmt.Errorf("expected one object with UID %q, found %d", uid, len(objects))
-	}
-	return objects[0], nil
-}
-
-func listItems(list client.ObjectList) ([]client.Object, error) {
-	switch list := list.(type) {
-	case *corev1.PodList:
-		items := make([]client.Object, len(list.Items))
-		for index := range list.Items {
-			items[index] = &list.Items[index]
+	var match *corev1.Pod
+	for index := range list.Items {
+		pod := &list.Items[index]
+		if string(pod.UID) != uid {
+			continue
 		}
-		return items, nil
-	case *corev1.PersistentVolumeClaimList:
-		items := make([]client.Object, len(list.Items))
-		for index := range list.Items {
-			items[index] = &list.Items[index]
+		if match != nil {
+			return nil, fmt.Errorf("multiple Pods with UID %q", uid)
 		}
-		return items, nil
-	default:
-		return nil, fmt.Errorf("unsupported ownership list type %T", list)
+		match = pod
 	}
+	if match == nil {
+		return nil, fmt.Errorf("no Pod with UID %q in namespace %q", uid, namespace)
+	}
+	return match, nil
 }
 
 func verifyControllerOwner(pod *corev1.Pod, workloadUID string) error {

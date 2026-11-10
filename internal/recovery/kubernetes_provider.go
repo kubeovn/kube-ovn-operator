@@ -26,7 +26,7 @@ func (r *KubernetesFenceEndpointResolver) Resolve(ctx context.Context, member Me
 	if r == nil || r.Reader == nil {
 		return FenceEndpoint{}, errors.New("kubernetes fence endpoint resolver requires a live client")
 	}
-	pod, err := podByUID(ctx, r.Reader, member.Storage.PodUID)
+	pod, err := podByUID(ctx, r.Reader, r.Namespace, member.Storage.PodUID)
 	if err != nil {
 		return FenceEndpoint{}, fmt.Errorf("read retained member Pod: %w", err)
 	}
@@ -73,7 +73,7 @@ func NewKubernetesFencedIsolationSession(reader client.Reader, remote *health.Fe
 	return &FencedIsolationSession{
 		Token:   token,
 		Fence:   &RemoteFenceController{Remote: remote, Resolve: resolver.Resolve},
-		Storage: &KubernetesStorageOwnershipVerifier{Reader: reader},
+		Storage: &KubernetesStorageOwnershipVerifier{Reader: reader, Namespace: namespace},
 	}, nil
 }
 
