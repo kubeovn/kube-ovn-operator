@@ -87,7 +87,10 @@ token at the HTTP gate, shares the member PID namespace, and suspends the
 Each check re-reads the PID files and `/proc` command line/state before native
 writes. The sidecar remains fail-closed when the Lease expires; it does not
 resume a process from a stale token. `RemoteFenceController` adapts this
-protocol, but controller wiring and a live endpoint resolver are still pending.
+protocol, and `NewKubernetesFencedIsolationSession` composes the live Lease,
+endpoint and storage ownership providers. The dedicated rebuild Job still
+requires an explicit workload builder before the production controller can
+enable it.
 
 The operation directory is journaled before the first native write. A retry
 revalidates the exact canonical plan and target member, reuses only private
@@ -147,9 +150,17 @@ isolation audit metadata, then fails closed with an unavailable-provider error
 before opening the target root or backup store. It does not invoke the native
 adapter or write a completion receipt. A real provider must enforce isolation
 for every retained process and verify live target storage ownership before this
-entry point can be enabled. The controller does not create these rebuild Jobs.
-The standalone native create/inspect adapter remains available to callers that
-provide the required execution boundary.
+entry point can be enabled. The controller now has a restart-safe
+`RecoveryJobExecutor` handoff boundary. When an explicitly injected workload
+builder can provide every immutable identity, it creates exactly one Job and
+records its name, UID and plan digest on
+`KubeOVNRecoveryRequest.status.execution`. Subsequent reconciles observe that
+exact Job and reject deletion/recreation, metadata drift, or a changed plan.
+The production controller is still fail-closed until a builder can derive a
+backup PVC and complete target/retained storage identities from live
+Kubernetes objects; the existing file/S3 backup path is not converted into a
+PVC by inference. The standalone native create/inspect adapter remains
+available to callers that provide the required execution boundary.
 
 `IsolationProof` is audit metadata, not an isolation capability. It binds the
 canonical plan digest, operation ID and complete retained member set. Validation

@@ -502,6 +502,14 @@ type RecoveryExecutionStatus struct {
 	RTOSeconds  int64                      `json:"rtoSeconds,omitzero"`
 	Reason      string                     `json:"reason,omitempty"`
 	Operation   *CentralOperationReference `json:"operation,omitempty"`
+	// JobName and JobUID pin a dedicated offline rebuild Job after admission.
+	// The controller must reject a deleted/recreated Job or a changed plan
+	// digest instead of silently attaching execution to a different workload.
+	JobName       string    `json:"jobName,omitempty"`
+	JobUID        types.UID `json:"jobUID,omitempty"`
+	JobPlanDigest string    `json:"jobPlanDigest,omitempty"`
+	JobPhase      string    `json:"jobPhase,omitempty"`
+	JobReason     string    `json:"jobReason,omitempty"`
 }
 
 // +kubebuilder:object:root=true

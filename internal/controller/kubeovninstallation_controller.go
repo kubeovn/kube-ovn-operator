@@ -25,6 +25,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/upgrade"
 	"github.com/prometheus/client_golang/prometheus"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -2478,7 +2479,7 @@ type RecoveryRequestReconciler struct {
 }
 
 func (r *RecoveryRequestReconciler) SetupWithManager(mgr manager.Manager) error {
-	return builder.ControllerManagedBy(mgr).For(&operatorv1alpha1.KubeOVNRecoveryRequest{}).Complete(r)
+	return builder.ControllerManagedBy(mgr).For(&operatorv1alpha1.KubeOVNRecoveryRequest{}).Owns(&batchv1.Job{}).Complete(r)
 }
 
 func (r *RecoveryRequestReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
