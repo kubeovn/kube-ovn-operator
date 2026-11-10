@@ -79,9 +79,9 @@ API does not support a `metadata.uid` field selector). It reads PVCs by the
 claim names referenced by the Pod, then verifies the planned PVC UID and rejects
 a deleting claim. It checks
 the controller workload UID, node UID, a running `ovn-central` container ID,
-the namespace and PVC mount, and requires the PVC and its PV to remain Bound
-with a bidirectional claim reference while the target root is an existing
-directory. It does not infer ownership from names or marker files. A
+the namespace and PVC mount. The PVC must be mounted writable by the
+`ovn-central` container, and the PVC and its PV must remain Bound with a
+bidirectional claim reference while the target root is an existing directory. It does not infer ownership from names or marker files. A
 real retained-member fence controller is still required before the executor
 can be enabled by the controller.
 
