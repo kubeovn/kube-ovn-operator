@@ -168,20 +168,23 @@ func pinRecoveryJobStatus(ctx context.Context, kube client.Client, request *oper
 		request.Status.Execution = new(operatorv1alpha1.RecoveryExecutionStatus)
 	}
 	execution := request.Status.Execution
-	execution.JobName = job.Name
-	execution.JobUID = job.UID
-	execution.JobPlanDigest = job.Annotations[recovery.RebuildPlanDigestAnnotation]
+	jobPhase := "Running"
 	switch {
 	case jobConditionPresent(job, batchv1.JobComplete):
-		execution.JobPhase = string(batchv1.JobComplete)
+		jobPhase = string(batchv1.JobComplete)
 	case jobConditionPresent(job, batchv1.JobFailed):
-		execution.JobPhase = string(batchv1.JobFailed)
-	default:
-		execution.JobPhase = "Running"
+		jobPhase = string(batchv1.JobFailed)
 	}
+	jobReason := ""
 	if condition, ok := jobCondition(job, batchv1.JobFailed); ok {
-		execution.JobReason = strings.TrimSpace(condition.Message)
+		jobReason = strings.TrimSpace(condition.Message)
 	}
+	jobDigest := job.Annotations[recovery.RebuildPlanDigestAnnotation]
+	if execution.JobName == job.Name && execution.JobUID == job.UID && execution.JobPlanDigest == jobDigest && execution.JobPhase == jobPhase && execution.JobReason == jobReason {
+		return nil
+	}
+	execution.JobName, execution.JobUID, execution.JobPlanDigest = job.Name, job.UID, jobDigest
+	execution.JobPhase, execution.JobReason = jobPhase, jobReason
 	if err := kube.Status().Update(ctx, request); err != nil && !apierrors.IsConflict(err) {
 		return fmt.Errorf("persist offline rebuild Job identity: %w", err)
 	}
