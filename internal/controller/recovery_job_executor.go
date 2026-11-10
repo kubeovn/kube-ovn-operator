@@ -58,6 +58,9 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 		return errors.New("offline rebuild workload is bound to a different installation or plan")
 	}
 	owner := recoveryRequestOwner(request)
+	if err := e.validateRecoveryConfigMaps(ctx, request, spec); err != nil {
+		return err
+	}
 	desired, err := spec.Job(&owner)
 	if err != nil {
 		return fmt.Errorf("render offline rebuild Job: %w", err)
@@ -89,6 +92,37 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 		return nil
 	}
 	return ErrRecoveryInProgress
+}
+
+func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, spec recovery.WorkloadSpec) error {
+	for name, artifact := range map[string]struct {
+		key        string
+		annotation string
+	}{
+		spec.PlanConfigMapName:       {key: "plan.json", annotation: recovery.RebuildPlanDigestAnnotation},
+		spec.IsolationProofConfigMap: {key: "proof.json", annotation: recovery.RebuildPlanDigestAnnotation},
+	} {
+		configMap := new(corev1.ConfigMap)
+		if err := e.Client.Get(ctx, client.ObjectKey{Namespace: spec.Namespace, Name: name}, configMap); err != nil {
+			return fmt.Errorf("read offline rebuild %s ConfigMap %q: %w", artifact.annotation, name, err)
+		}
+		if configMap.Annotations[artifact.annotation] != spec.PlanDigest || strings.TrimSpace(configMap.Data[artifact.key]) == "" {
+			return fmt.Errorf("offline rebuild ConfigMap %q is not bound to plan %s", name, spec.PlanDigest)
+		}
+		if !hasRecoveryRequestOwnerConfigMap(configMap, request) {
+			return fmt.Errorf("offline rebuild ConfigMap %q owner identity does not match the recovery request", name)
+		}
+	}
+	return nil
+}
+
+func hasRecoveryRequestOwnerConfigMap(configMap *corev1.ConfigMap, request *operatorv1alpha1.KubeOVNRecoveryRequest) bool {
+	for _, owner := range configMap.OwnerReferences {
+		if owner.APIVersion == operatorv1alpha1.GroupVersion.String() && owner.Kind == "KubeOVNRecoveryRequest" && owner.Name == request.Name && owner.UID == request.UID && owner.Controller != nil && *owner.Controller {
+			return true
+		}
+	}
+	return false
 }
 
 func recoveryRequestOwner(request *operatorv1alpha1.KubeOVNRecoveryRequest) metav1.OwnerReference {

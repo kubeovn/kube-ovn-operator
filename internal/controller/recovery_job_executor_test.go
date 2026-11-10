@@ -10,6 +10,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/recovery"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,12 +25,16 @@ func TestRecoveryJobExecutorCreatesAndObservesOnePinnedJob(t *testing.T) {
 	if err := batchv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	installation := recoveryInstallation()
 	request := recoveryRequest(time.Unix(100, 0).UTC())
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeFreshBootstrap
 	planDigest := "sha256:" + strings.Repeat("a", 64)
 	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: planDigest, InstallationUID: installation.UID, RequestGeneration: request.Generation}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(request).WithObjects(request).Build()
+	planConfigMap, proofConfigMap := recoveryArtifactConfigMaps(request, planDigest)
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(request).WithObjects(request, planConfigMap, proofConfigMap).Build()
 	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: installation.UID, Mode: request.Spec.Mode, Digest: planDigest}
 	builder := offlineRebuildWorkloadBuilderFunc(func(_ context.Context, _ RecoveryPlan) (recovery.WorkloadSpec, error) {
 		return recovery.WorkloadSpec{Namespace: request.Namespace, Name: "rebuild-member-recovery", InstallationUID: string(installation.UID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: planDigest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", IsolationProofConfigMap: "rebuild-proof", BackupClaim: "backup", Target: recovery.WorkloadVolume{Name: "target", Claim: "target"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ReadOnly: true}}}, nil
@@ -74,11 +79,15 @@ func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
 	if err := batchv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	request := recoveryRequest(time.Unix(100, 0).UTC())
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeFreshBootstrap
 	planDigest := "sha256:" + strings.Repeat("c", 64)
 	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: planDigest, InstallationUID: "installation-uid", RequestGeneration: request.Generation}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(request).WithObjects(request).Build()
+	planConfigMap, proofConfigMap := recoveryArtifactConfigMaps(request, planDigest)
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(request).WithObjects(request, planConfigMap, proofConfigMap).Build()
 	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: "installation-uid", Mode: request.Spec.Mode, Digest: planDigest}
 	builder := offlineRebuildWorkloadBuilderFunc(func(_ context.Context, _ RecoveryPlan) (recovery.WorkloadSpec, error) {
 		return recovery.WorkloadSpec{Namespace: request.Namespace, Name: "rebuild-member-recovery", InstallationUID: "installation-uid", OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: planDigest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("d", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", IsolationProofConfigMap: "rebuild-proof", BackupClaim: "backup", Target: recovery.WorkloadVolume{Name: "target", Claim: "target"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ReadOnly: true}}}, nil
@@ -110,4 +119,10 @@ func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
 	if err := executor.Execute(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "UID changed") {
 		t.Fatalf("recreated Job was not rejected: %v", err)
 	}
+}
+
+func recoveryArtifactConfigMaps(request *operatorv1alpha1.KubeOVNRecoveryRequest, digest string) (*corev1.ConfigMap, *corev1.ConfigMap) {
+	controller := true
+	owner := metav1.OwnerReference{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNRecoveryRequest", Name: request.Name, UID: request.UID, Controller: &controller}
+	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-plan", Namespace: request.Namespace, OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Data: map[string]string{"plan.json": "{}"}}, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-proof", Namespace: request.Namespace, OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Data: map[string]string{"proof.json": "{}"}}
 }
