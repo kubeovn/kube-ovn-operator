@@ -28,8 +28,9 @@ func TestKubernetesStorageOwnershipVerifierBindsLiveIdentities(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "central-0", Namespace: "ovn", UID: types.UID("pod-uid"), OwnerReferences: []metav1.OwnerReference{{UID: types.UID("workload-uid"), Controller: &controller}}},
 		Spec: corev1.PodSpec{
-			NodeName: "node-0",
-			Volumes:  []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "central-data"}}}},
+			NodeName:   "node-0",
+			Volumes:    []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "central-data"}}}},
+			Containers: []corev1.Container{{Name: "ovn-central", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/work"}}}},
 		},
 		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "ovn-central", ContainerID: "containerd://target", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}},
 	}
@@ -58,8 +59,9 @@ func TestKubernetesStorageOwnershipVerifierRejectsIdentityDrift(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "central-0", Namespace: "ovn", UID: types.UID("pod-uid"), OwnerReferences: []metav1.OwnerReference{{UID: types.UID("wrong-workload"), Controller: &controller}}},
 		Spec: corev1.PodSpec{
-			NodeName: "node-0",
-			Volumes:  []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "central-data"}}}},
+			NodeName:   "node-0",
+			Volumes:    []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "central-data"}}}},
+			Containers: []corev1.Container{{Name: "ovn-central", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/work"}}}},
 		},
 		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "ovn-central", ContainerID: "containerd://target", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}},
 	}
@@ -125,7 +127,7 @@ func TestKubernetesStorageOwnershipVerifierRejectsPVBindingDrift(t *testing.T) {
 	controller := true
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ovn", UID: "pod-uid", OwnerReferences: []metav1.OwnerReference{{UID: "workload-uid", Controller: &controller}}},
-		Spec:       corev1.PodSpec{NodeName: "node-0", Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "central-data"}}}}},
+		Spec:       corev1.PodSpec{NodeName: "node-0", Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "central-data"}}}}, Containers: []corev1.Container{{Name: "ovn-central", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/work"}}}}},
 		Status:     corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "ovn-central", ContainerID: "containerd://target", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}},
 	}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-0", UID: "node-uid"}}
@@ -147,7 +149,7 @@ func TestKubernetesStorageOwnershipVerifierRejectsStoppedContainer(t *testing.T)
 	controller := true
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ovn", UID: "pod-uid", OwnerReferences: []metav1.OwnerReference{{UID: "workload-uid", Controller: &controller}}},
-		Spec:       corev1.PodSpec{NodeName: "node-0", Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "central-data"}}}}},
+		Spec:       corev1.PodSpec{NodeName: "node-0", Volumes: []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "central-data"}}}}, Containers: []corev1.Container{{Name: "ovn-central", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/work"}}}}},
 		Status:     corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "ovn-central", ContainerID: "containerd://target", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}}}},
 	}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-0", UID: "node-uid"}}
@@ -161,5 +163,25 @@ func TestKubernetesStorageOwnershipVerifierRejectsStoppedContainer(t *testing.T)
 	}
 	if err := (&KubernetesStorageOwnershipVerifier{Reader: kube, Namespace: "ovn"}).Verify(t.Context(), member, target); err == nil {
 		t.Fatal("stopped container was accepted")
+	}
+}
+
+func TestPodMountsWritableVolumeRequiresTheCentralContainer(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mount corev1.VolumeMount
+		want  bool
+	}{
+		{name: "missing", mount: corev1.VolumeMount{Name: "other", MountPath: "/work"}},
+		{name: "read-only", mount: corev1.VolumeMount{Name: "data", MountPath: "/work", ReadOnly: true}},
+		{name: "empty path", mount: corev1.VolumeMount{Name: "data"}},
+		{name: "writable", mount: corev1.VolumeMount{Name: "data", MountPath: "/work"}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "ovn-central", VolumeMounts: []corev1.VolumeMount{tc.mount}}, {Name: "sidecar", VolumeMounts: []corev1.VolumeMount{{Name: "data", MountPath: "/sidecar"}}}}}}
+			if got := podMountsWritableVolume(pod, "data"); got != tc.want {
+				t.Fatalf("podMountsWritableVolume() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

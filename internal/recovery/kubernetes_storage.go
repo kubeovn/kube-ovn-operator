@@ -103,10 +103,27 @@ func (v *KubernetesStorageOwnershipVerifier) targetPVC(ctx context.Context, pod 
 			if pvc.DeletionTimestamp != nil {
 				return nil, errors.New("target PVC is being deleted")
 			}
+			if !podMountsWritableVolume(pod, volume.Name) {
+				return nil, errors.New("target PVC is not mounted writable by the ovn-central container")
+			}
 			return pvc, nil
 		}
 	}
 	return nil, errors.New("target Pod has no PVC matching the recovery plan UID")
+}
+
+func podMountsWritableVolume(pod *corev1.Pod, volumeName string) bool {
+	for _, container := range pod.Spec.Containers {
+		if container.Name != "ovn-central" {
+			continue
+		}
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == volumeName && strings.TrimSpace(mount.MountPath) != "" && !mount.ReadOnly {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func podByUID(ctx context.Context, reader client.Reader, namespace, uid string) (*corev1.Pod, error) {
