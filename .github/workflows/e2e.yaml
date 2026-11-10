@@ -61,6 +61,10 @@ jobs:
           go run ./test/e2e/network-smoke
       - name: Verify durable joint NB/SB replacement and workload retirement
         run: bash test/e2e/member-image.sh kube-ovn-operator-e2e
+      - name: Verify recovery identity lookups against the live API
+        env:
+          RECOVERY_TEST_NAMESPACE: kube-ovn-operator-system
+        run: go test ./internal/recovery -run TestLiveKubernetesRecoveryIdentityLookups -count=1 -v
       - name: Diagnose member provisioning failure
         if: failure()
         run: |
