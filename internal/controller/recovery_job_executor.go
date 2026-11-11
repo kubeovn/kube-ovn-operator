@@ -10,6 +10,7 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/recovery"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,6 +36,7 @@ var ErrRecoveryWorkloadNotReady = errors.New("offline recovery workload is not r
 // a production builder can provide those values, execution remains blocked
 // before any Job is created.
 type RecoveryJobExecutor struct {
+	// Client must read directly from the API server for request and Job identity checks.
 	Client  client.Client
 	Builder OfflineRebuildWorkloadBuilder
 }
@@ -50,7 +52,7 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if err := e.Client.Get(ctx, client.ObjectKey{Namespace: plan.RequestNamespace, Name: plan.RequestName}, request); err != nil {
 		return fmt.Errorf("read offline rebuild request: %w", err)
 	}
-	if request.UID != plan.RequestUID || request.Generation != plan.RequestGeneration || request.Status.Plan == nil || request.Status.Plan.Digest != plan.Digest {
+	if request.DeletionTimestamp != nil || request.UID != plan.RequestUID || request.Generation != plan.RequestGeneration || request.Status.Plan == nil || request.Status.Plan.Digest != plan.Digest {
 		return errors.New("offline rebuild request identity or immutable plan changed")
 	}
 	spec, err := e.Builder.Build(ctx, plan)
@@ -60,8 +62,8 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if err := spec.Validate(); err != nil {
 		return fmt.Errorf("validate offline rebuild workload: %w", err)
 	}
-	if spec.PlanDigest != plan.Digest || spec.InstallationUID != string(plan.InstallationUID) {
-		return errors.New("offline rebuild workload is bound to a different installation or plan")
+	if spec.Namespace != request.Namespace || spec.PlanDigest != plan.Digest || spec.InstallationUID != string(plan.InstallationUID) {
+		return errors.New("offline rebuild workload is bound to a different namespace, installation or plan")
 	}
 	owner := recoveryRequestOwner(request)
 	if err := e.validateRecoveryConfigMaps(ctx, request, spec); err != nil {
@@ -71,16 +73,30 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if err != nil {
 		return fmt.Errorf("render offline rebuild Job: %w", err)
 	}
+	execution := request.Status.Execution
+	if execution != nil {
+		if execution.JobName != "" && execution.JobName != desired.Name {
+			return errors.New("offline rebuild Job name changed after admission")
+		}
+		if execution.JobPlanDigest != "" && execution.JobPlanDigest != spec.PlanDigest {
+			return errors.New("offline rebuild Job plan digest changed after admission")
+		}
+	}
 	key := client.ObjectKeyFromObject(desired)
 	current := new(batchv1.Job)
 	err = e.Client.Get(ctx, key, current)
 	switch {
 	case apierrors.IsNotFound(err):
-		if err := e.Client.Create(ctx, desired); err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create offline rebuild Job: %w", err)
+		if execution != nil && (execution.JobName != "" || execution.JobUID != "") {
+			return errors.New("pinned offline rebuild Job no longer exists")
 		}
-		if err := e.Client.Get(ctx, key, current); err != nil {
-			return fmt.Errorf("read created offline rebuild Job: %w", err)
+		current = desired.DeepCopy()
+		current.Spec.Suspend = new(true)
+		if err := e.Client.Create(ctx, current); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				return ErrRecoveryInProgress
+			}
+			return fmt.Errorf("create offline rebuild Job: %w", err)
 		}
 	case err != nil:
 		return fmt.Errorf("read offline rebuild Job: %w", err)
@@ -90,6 +106,17 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	}
 	if err := pinRecoveryJobStatus(ctx, e.Client, request, current); err != nil {
 		return err
+	}
+	if recoveryJobSuspended(current) {
+		// An optimistic update prevents activating a replacement or a Job
+		// that changed since its spec and UID were checked.
+		current.Spec.Suspend = new(false)
+		if err := e.Client.Update(ctx, current); err != nil {
+			// A lost response may mean activation already succeeded. Read
+			// the pinned Job again instead of declaring recovery failed.
+			return fmt.Errorf("%w: activate pinned offline rebuild Job: %w", ErrRecoveryInProgress, err)
+		}
+		return ErrRecoveryInProgress
 	}
 	if condition, ok := jobCondition(current, batchv1.JobFailed); ok {
 		return fmt.Errorf("offline rebuild Job failed: %s", strings.TrimSpace(condition.Message))
@@ -114,6 +141,9 @@ func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, re
 				return fmt.Errorf("%w: offline rebuild ConfigMap %q is not available", ErrRecoveryWorkloadNotReady, name)
 			}
 			return fmt.Errorf("read offline rebuild %s ConfigMap %q: %w", artifact.annotation, name, err)
+		}
+		if configMap.DeletionTimestamp != nil || configMap.Immutable == nil || !*configMap.Immutable {
+			return fmt.Errorf("offline rebuild ConfigMap %q must be immutable and not deleting", name)
 		}
 		if configMap.Annotations[artifact.annotation] != spec.PlanDigest || strings.TrimSpace(configMap.Data[artifact.key]) == "" {
 			return fmt.Errorf("offline rebuild ConfigMap %q is not bound to plan %s", name, spec.PlanDigest)
@@ -143,24 +173,73 @@ func validateRecoveryJob(current, desired *batchv1.Job, execution *operatorv1alp
 	if current == nil || desired == nil || current.Namespace != desired.Namespace || current.Name != desired.Name {
 		return errors.New("offline rebuild Job identity is invalid")
 	}
-	if current.Labels[recovery.RebuildWorkloadLabel] != "true" || current.Annotations[recovery.RebuildPlanDigestAnnotation] != desired.Annotations[recovery.RebuildPlanDigestAnnotation] || current.Annotations[recovery.RebuildOperationAnnotation] != desired.Annotations[recovery.RebuildOperationAnnotation] {
-		return errors.New("offline rebuild Job metadata does not match the admitted workload")
+	for k, v := range desired.Labels {
+		if current.Labels[k] != v {
+			return errors.New("offline rebuild Job labels do not match the admitted workload")
+		}
+	}
+	for k, v := range desired.Annotations {
+		if current.Annotations[k] != v {
+			return errors.New("offline rebuild Job annotations do not match the admitted workload")
+		}
 	}
 	if len(desired.OwnerReferences) != 1 || !hasRecoveryRequestOwner(current, desired.OwnerReferences[0]) {
 		return errors.New("offline rebuild Job owner identity does not match the recovery request")
 	}
-	if execution != nil {
-		if execution.JobName != "" && execution.JobName != current.Name {
-			return errors.New("offline rebuild Job name changed after admission")
-		}
-		if execution.JobUID != "" && execution.JobUID != current.UID {
-			return errors.New("offline rebuild Job UID changed after admission")
-		}
-		if execution.JobPlanDigest != "" && execution.JobPlanDigest != desired.Annotations[recovery.RebuildPlanDigestAnnotation] {
-			return errors.New("offline rebuild Job plan digest changed after admission")
-		}
+	if current.UID == "" {
+		return errors.New("offline rebuild Job is missing its API-assigned UID")
+	}
+	pinned := execution != nil && execution.JobUID != ""
+	if pinned && execution.JobUID != current.UID {
+		return errors.New("offline rebuild Job UID changed after admission")
+	}
+	if recoveryJobSuspended(current) {
+		desired = desired.DeepCopy()
+		desired.Spec.Suspend = new(true)
+	} else if !pinned {
+		return errors.New("offline rebuild Job is already active without a pinned UID")
+	}
+	if current.DeletionTimestamp != nil || !matchesRecoveryJobSpec(desired, current) {
+		return errors.New("offline rebuild Job is deleting or its spec differs from the admitted workload")
 	}
 	return nil
+}
+
+// Accept only Kubernetes' Job defaults and generated selector/labels. The
+// rest of the spec, including the Pod template, must match the builder output.
+func matchesRecoveryJobSpec(desired, current *batchv1.Job) bool {
+	expected := desired.Spec.DeepCopy()
+	actual := &current.Spec
+	if expected.CompletionMode == nil && actual.CompletionMode != nil && *actual.CompletionMode == batchv1.NonIndexedCompletion {
+		expected.CompletionMode = actual.CompletionMode
+	}
+	if expected.Suspend == nil && actual.Suspend != nil && !*actual.Suspend {
+		expected.Suspend = actual.Suspend
+	}
+	if expected.ManualSelector == nil && actual.ManualSelector != nil && !*actual.ManualSelector {
+		expected.ManualSelector = actual.ManualSelector
+	}
+	if expected.PodReplacementPolicy == nil && actual.PodReplacementPolicy != nil && *actual.PodReplacementPolicy == batchv1.TerminatingOrFailed {
+		expected.PodReplacementPolicy = actual.PodReplacementPolicy
+	}
+	if expected.Template.Spec.SchedulerName == "" && actual.Template.Spec.SchedulerName == corev1.DefaultSchedulerName {
+		expected.Template.Spec.SchedulerName = corev1.DefaultSchedulerName
+	}
+	// The API converts the deprecated serviceAccount field to and from
+	// serviceAccountName when serializing PodSpecs.
+	if expected.Template.Spec.DeprecatedServiceAccount == "" && actual.Template.Spec.DeprecatedServiceAccount == expected.Template.Spec.ServiceAccountName {
+		expected.Template.Spec.DeprecatedServiceAccount = expected.Template.Spec.ServiceAccountName
+	}
+	if expected.Selector == nil && actual.Selector != nil && current.UID != "" {
+		expected.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{batchv1.ControllerUidLabel: string(current.UID)}}
+		for key, value := range map[string]string{
+			batchv1.ControllerUidLabel: string(current.UID), "controller-uid": string(current.UID),
+			batchv1.JobNameLabel: current.Name, "job-name": current.Name,
+		} {
+			expected.Template.Labels[key] = value
+		}
+	}
+	return apiequality.Semantic.DeepEqual(expected, actual)
 }
 
 func hasRecoveryRequestOwner(job *batchv1.Job, expected metav1.OwnerReference) bool {
@@ -172,6 +251,10 @@ func hasRecoveryRequestOwner(job *batchv1.Job, expected metav1.OwnerReference) b
 	return false
 }
 
+func recoveryJobSuspended(job *batchv1.Job) bool {
+	return job.Spec.Suspend != nil && *job.Spec.Suspend
+}
+
 func pinRecoveryJobStatus(ctx context.Context, kube client.Client, request *operatorv1alpha1.KubeOVNRecoveryRequest, job *batchv1.Job) error {
 	if request.Status.Execution == nil {
 		request.Status.Execution = new(operatorv1alpha1.RecoveryExecutionStatus)
@@ -179,6 +262,8 @@ func pinRecoveryJobStatus(ctx context.Context, kube client.Client, request *oper
 	execution := request.Status.Execution
 	jobPhase := "Running"
 	switch {
+	case recoveryJobSuspended(job):
+		jobPhase = "Suspended"
 	case jobConditionPresent(job, batchv1.JobComplete):
 		jobPhase = string(batchv1.JobComplete)
 	case jobConditionPresent(job, batchv1.JobFailed):
@@ -194,7 +279,10 @@ func pinRecoveryJobStatus(ctx context.Context, kube client.Client, request *oper
 	}
 	execution.JobName, execution.JobUID, execution.JobPlanDigest = job.Name, job.UID, jobDigest
 	execution.JobPhase, execution.JobReason = jobPhase, jobReason
-	if err := kube.Status().Update(ctx, request); err != nil && !apierrors.IsConflict(err) {
+	if err := kube.Status().Update(ctx, request); err != nil {
+		if apierrors.IsConflict(err) {
+			return fmt.Errorf("%w: persist offline rebuild Job identity: %w", ErrRecoveryInProgress, err)
+		}
 		return fmt.Errorf("persist offline rebuild Job identity: %w", err)
 	}
 	return nil

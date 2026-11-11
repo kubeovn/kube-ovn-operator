@@ -65,6 +65,10 @@ jobs:
         env:
           RECOVERY_TEST_NAMESPACE: kube-ovn-operator-system
         run: go test ./internal/recovery -run TestLiveKubernetesRecoveryIdentityLookups -count=1 -v
+      - name: Verify recovery Job defaults with API dry-run
+        env:
+          RECOVERY_TEST_NAMESPACE: kube-ovn-operator-system
+        run: go test ./internal/controller -run '^TestLiveRecoveryJobAdmission$' -count=1 -v
       - name: Diagnose member provisioning failure
         if: failure()
         run: |

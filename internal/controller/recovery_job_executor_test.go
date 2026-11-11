@@ -11,14 +11,16 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/recovery"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-func TestRecoveryJobExecutorTreatsMissingArtifactsAsNotReady(t *testing.T) {
+func recoveryJobTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -29,15 +31,13 @@ func TestRecoveryJobExecutorTreatsMissingArtifactsAsNotReady(t *testing.T) {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	request := recoveryRequest(time.Unix(100, 0).UTC())
-	request.Spec.Mode = operatorv1alpha1.RecoveryModeFreshBootstrap
-	planDigest := "sha256:" + strings.Repeat("e", 64)
-	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: planDigest, InstallationUID: "installation-uid", RequestGeneration: request.Generation}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(request).WithObjects(request).Build()
-	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: "installation-uid", Mode: request.Spec.Mode, Digest: planDigest}
-	builder := offlineRebuildWorkloadBuilderFunc(func(_ context.Context, _ RecoveryPlan) (recovery.WorkloadSpec, error) {
-		return recovery.WorkloadSpec{Namespace: request.Namespace, Name: "rebuild-member-recovery", InstallationUID: "installation-uid", OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: planDigest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("f", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", IsolationProofConfigMap: "rebuild-proof", BackupClaim: "backup", Target: recovery.WorkloadVolume{Name: "target", Claim: "target"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ReadOnly: true}}}, nil
-	})
+	return scheme
+}
+
+func TestRecoveryJobExecutorTreatsMissingArtifactsAsNotReady(t *testing.T) {
+	request, plan, spec := recoveryJobFixture()
+	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).WithObjects(request).Build()
+	builder := offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) { return spec, nil })
 	executor := &RecoveryJobExecutor{Client: kube, Builder: builder}
 	err := executor.Execute(t.Context(), plan)
 	if !errors.Is(err, ErrRecoveryWorkloadNotReady) {
@@ -50,27 +50,10 @@ func TestRecoveryJobExecutorTreatsMissingArtifactsAsNotReady(t *testing.T) {
 }
 
 func TestRecoveryJobExecutorCreatesAndObservesOnePinnedJob(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	if err := batchv1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	installation := recoveryInstallation()
-	request := recoveryRequest(time.Unix(100, 0).UTC())
-	request.Spec.Mode = operatorv1alpha1.RecoveryModeFreshBootstrap
-	planDigest := "sha256:" + strings.Repeat("a", 64)
-	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: planDigest, InstallationUID: installation.UID, RequestGeneration: request.Generation}
-	planConfigMap, proofConfigMap := recoveryArtifactConfigMaps(request, planDigest)
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(request).WithObjects(request, planConfigMap, proofConfigMap).Build()
-	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: installation.UID, Mode: request.Spec.Mode, Digest: planDigest}
-	builder := offlineRebuildWorkloadBuilderFunc(func(_ context.Context, _ RecoveryPlan) (recovery.WorkloadSpec, error) {
-		return recovery.WorkloadSpec{Namespace: request.Namespace, Name: "rebuild-member-recovery", InstallationUID: string(installation.UID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: planDigest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", IsolationProofConfigMap: "rebuild-proof", BackupClaim: "backup", Target: recovery.WorkloadVolume{Name: "target", Claim: "target"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ReadOnly: true}}}, nil
-	})
+	request, plan, spec := recoveryJobFixture()
+	planConfigMap, proofConfigMap := recoveryArtifactConfigMaps(request, plan.Digest)
+	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).WithObjects(request, planConfigMap, proofConfigMap).WithInterceptorFuncs(interceptor.Funcs{Create: assignRecoveryJobUID}).Build()
+	builder := offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) { return spec, nil })
 	executor := &RecoveryJobExecutor{Client: kube, Builder: builder}
 	if err := executor.Execute(t.Context(), plan); err != ErrRecoveryInProgress {
 		t.Fatalf("new Job did not remain in progress: %v", err)
@@ -80,10 +63,6 @@ func TestRecoveryJobExecutorCreatesAndObservesOnePinnedJob(t *testing.T) {
 	if err := kube.Get(t.Context(), jobKey, job); err != nil {
 		t.Fatal(err)
 	}
-	job.UID = types.UID("job-uid")
-	if err := kube.Update(t.Context(), job); err != nil {
-		t.Fatal(err)
-	}
 	if err := executor.Execute(t.Context(), plan); err != ErrRecoveryInProgress {
 		t.Fatalf("active Job did not remain in progress: %v", err)
 	}
@@ -91,7 +70,7 @@ func TestRecoveryJobExecutorCreatesAndObservesOnePinnedJob(t *testing.T) {
 	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(request), stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored.Status.Execution == nil || stored.Status.Execution.JobName != job.Name || stored.Status.Execution.JobUID != job.UID || stored.Status.Execution.JobPlanDigest != planDigest {
+	if stored.Status.Execution == nil || stored.Status.Execution.JobName != job.Name || stored.Status.Execution.JobUID != job.UID || stored.Status.Execution.JobPlanDigest != plan.Digest {
 		t.Fatalf("Job identity was not durably pinned: %+v", stored.Status.Execution)
 	}
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
@@ -104,26 +83,10 @@ func TestRecoveryJobExecutorCreatesAndObservesOnePinnedJob(t *testing.T) {
 }
 
 func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	if err := batchv1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	request := recoveryRequest(time.Unix(100, 0).UTC())
-	request.Spec.Mode = operatorv1alpha1.RecoveryModeFreshBootstrap
-	planDigest := "sha256:" + strings.Repeat("c", 64)
-	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: planDigest, InstallationUID: "installation-uid", RequestGeneration: request.Generation}
-	planConfigMap, proofConfigMap := recoveryArtifactConfigMaps(request, planDigest)
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(request).WithObjects(request, planConfigMap, proofConfigMap).Build()
-	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: "installation-uid", Mode: request.Spec.Mode, Digest: planDigest}
-	builder := offlineRebuildWorkloadBuilderFunc(func(_ context.Context, _ RecoveryPlan) (recovery.WorkloadSpec, error) {
-		return recovery.WorkloadSpec{Namespace: request.Namespace, Name: "rebuild-member-recovery", InstallationUID: "installation-uid", OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: planDigest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("d", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", IsolationProofConfigMap: "rebuild-proof", BackupClaim: "backup", Target: recovery.WorkloadVolume{Name: "target", Claim: "target"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ReadOnly: true}}}, nil
-	})
+	request, plan, spec := recoveryJobFixture()
+	planConfigMap, proofConfigMap := recoveryArtifactConfigMaps(request, plan.Digest)
+	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).WithObjects(request, planConfigMap, proofConfigMap).WithInterceptorFuncs(interceptor.Funcs{Create: assignRecoveryJobUID}).Build()
+	builder := offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) { return spec, nil })
 	executor := &RecoveryJobExecutor{Client: kube, Builder: builder}
 	if err := executor.Execute(t.Context(), plan); err != ErrRecoveryInProgress {
 		t.Fatal(err)
@@ -132,19 +95,34 @@ func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
 	if err := kube.Get(t.Context(), client.ObjectKey{Namespace: request.Namespace, Name: "rebuild-member-recovery"}, job); err != nil {
 		t.Fatal(err)
 	}
-	job.UID = types.UID("original-job")
-	if err := kube.Update(t.Context(), job); err != nil {
-		t.Fatal(err)
-	}
 	if err := executor.Execute(t.Context(), plan); err != ErrRecoveryInProgress {
 		t.Fatal(err)
 	}
+	// A different builder result must be rejected before it creates a second Job.
+	executor.Builder = offlineRebuildWorkloadBuilderFunc(func(ctx context.Context, plan RecoveryPlan) (recovery.WorkloadSpec, error) {
+		spec, err := builder.Build(ctx, plan)
+		spec.Name += "-new"
+		return spec, err
+	})
+	if err := executor.Execute(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "name changed") {
+		t.Fatalf("changed Job name was not rejected: %v", err)
+	}
+	if err := kube.Get(t.Context(), client.ObjectKey{Namespace: job.Namespace, Name: job.Name + "-new"}, new(batchv1.Job)); !apierrors.IsNotFound(err) {
+		t.Fatalf("changed builder output created a second Job: %v", err)
+	}
+	executor.Builder = builder
 	if err := kube.Delete(t.Context(), job); err != nil {
 		t.Fatal(err)
 	}
+	if err := executor.Execute(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "no longer exists") {
+		t.Fatalf("missing pinned Job was not rejected: %v", err)
+	}
+	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(job), new(batchv1.Job)); !apierrors.IsNotFound(err) {
+		t.Fatalf("executor recreated the missing pinned Job: %v", err)
+	}
 	recreated := job.DeepCopy()
 	recreated.ResourceVersion = ""
-	recreated.UID = types.UID("replacement-job")
+	recreated.UID = "replacement-job"
 	if err := kube.Create(t.Context(), recreated); err != nil {
 		t.Fatal(err)
 	}
@@ -156,5 +134,158 @@ func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
 func recoveryArtifactConfigMaps(request *operatorv1alpha1.KubeOVNRecoveryRequest, digest string) (*corev1.ConfigMap, *corev1.ConfigMap) {
 	controller := true
 	owner := metav1.OwnerReference{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNRecoveryRequest", Name: request.Name, UID: request.UID, Controller: &controller}
-	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-plan", Namespace: request.Namespace, OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Data: map[string]string{"plan.json": "{}"}}, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-proof", Namespace: request.Namespace, OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Data: map[string]string{"proof.json": "{}"}}
+	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-plan", Namespace: request.Namespace, OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Immutable: new(true), Data: map[string]string{"plan.json": "{}"}}, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-proof", Namespace: request.Namespace, OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Immutable: new(true), Data: map[string]string{"proof.json": "{}"}}
+}
+
+func TestRecoveryJobExecutorRejectsUnsafeHandoff(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*corev1.ConfigMap, *batchv1.Job) []client.Object
+		want string
+	}{
+		{name: "mutable plan", edit: func(plan *corev1.ConfigMap, _ *batchv1.Job) []client.Object {
+			plan.Immutable = new(false)
+			return nil
+		}, want: "must be immutable"},
+		{name: "wrong image", edit: func(_ *corev1.ConfigMap, job *batchv1.Job) []client.Object {
+			job.Spec.Template.Spec.Containers[0].Image = "other:latest"
+			return []client.Object{job}
+		}, want: "spec differs"},
+		{name: "wrong PVC", edit: func(_ *corev1.ConfigMap, job *batchv1.Job) []client.Object {
+			job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "other-pvc"
+			return []client.Object{job}
+		}, want: "spec differs"},
+		{name: "extra sidecar", edit: func(_ *corev1.ConfigMap, job *batchv1.Job) []client.Object {
+			job.Spec.Template.Spec.Containers = append(job.Spec.Template.Spec.Containers, corev1.Container{Name: "other", Image: "other:latest"})
+			return []client.Object{job}
+		}, want: "spec differs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, plan, spec := recoveryJobFixture()
+			planConfigMap, proof := recoveryArtifactConfigMaps(request, plan.Digest)
+			job, err := spec.Job(new(recoveryRequestOwner(request)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			job.UID = "existing-job"
+			job.Spec.Suspend = new(true)
+			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+			extra := tc.edit(planConfigMap, job)
+			kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).
+				WithObjects(append([]client.Object{request, planConfigMap, proof}, extra...)...).Build()
+			executor := &RecoveryJobExecutor{Client: kube, Builder: offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) {
+				return spec, nil
+			})}
+			if err := executor.Execute(t.Context(), plan); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("unsafe handoff was not rejected: %v", err)
+			}
+			jobs := new(batchv1.JobList)
+			if err := kube.List(t.Context(), jobs); err != nil || len(jobs.Items) != len(extra) {
+				t.Fatalf("unexpected Jobs after rejection: %d, %v", len(jobs.Items), err)
+			}
+			if err := kube.Get(t.Context(), client.ObjectKeyFromObject(request), request); err != nil || request.Status.Execution != nil {
+				t.Fatalf("unsafe Job was pinned: %+v, %v", request.Status.Execution, err)
+			}
+		})
+	}
+}
+
+func TestRecoveryJobExecutorWaitsForTerminalJobIdentityToBePersisted(t *testing.T) {
+	request, plan, spec := recoveryJobFixture()
+	planConfigMap, proof := recoveryArtifactConfigMaps(request, plan.Digest)
+	job, err := spec.Job(new(recoveryRequestOwner(request)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.UID = "completed-job"
+	request.Status.Execution = &operatorv1alpha1.RecoveryExecutionStatus{JobName: job.Name, JobUID: job.UID, JobPlanDigest: plan.Digest}
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	conflict := true
+	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).WithObjects(request, planConfigMap, proof, job).
+		WithInterceptorFuncs(interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, kube client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if conflict {
+				conflict = false
+				return apierrors.NewConflict(operatorv1alpha1.GroupVersion.WithResource("kubeovnrecoveryrequests").GroupResource(), obj.GetName(), errors.New("concurrent status change"))
+			}
+			return kube.SubResource(sub).Update(ctx, obj, opts...)
+		}}).Build()
+	executor := &RecoveryJobExecutor{Client: kube, Builder: offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) {
+		return spec, nil
+	})}
+	if err := executor.Execute(t.Context(), plan); !errors.Is(err, ErrRecoveryInProgress) {
+		t.Fatalf("terminal Job was accepted before pinning its identity: %v", err)
+	}
+	if err := executor.Execute(t.Context(), plan); err != nil {
+		t.Fatalf("terminal Job was not accepted after retry: %v", err)
+	}
+	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(request), request); err != nil || request.Status.Execution == nil || request.Status.Execution.JobUID != job.UID {
+		t.Fatalf("terminal Job UID was not persisted: %+v, %v", request.Status.Execution, err)
+	}
+}
+
+func recoveryJobFixture() (*operatorv1alpha1.KubeOVNRecoveryRequest, RecoveryPlan, recovery.WorkloadSpec) {
+	request := recoveryRequest(time.Unix(100, 0).UTC())
+	request.Spec.Mode = operatorv1alpha1.RecoveryModeFreshBootstrap
+	digest := "sha256:" + strings.Repeat("a", 64)
+	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: digest, InstallationUID: "installation-uid", RequestGeneration: request.Generation}
+	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: "installation-uid", Mode: request.Spec.Mode, Digest: digest}
+	spec := recovery.WorkloadSpec{Namespace: request.Namespace, Name: "rebuild-member-recovery", InstallationUID: string(plan.InstallationUID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: digest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", IsolationProofConfigMap: "rebuild-proof", BackupClaim: "backup", Target: recovery.WorkloadVolume{Name: "target", Claim: "target"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ReadOnly: true}}}
+	return request, plan, spec
+}
+
+func assignRecoveryJobUID(ctx context.Context, kube client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+	if job, ok := obj.(*batchv1.Job); ok && job.UID == "" {
+		job.UID = "job-uid"
+	}
+	return kube.Create(ctx, obj, opts...)
+}
+
+func TestRecoveryJobExecutorActivatesOnlyAfterPin(t *testing.T) {
+	request, plan, spec := recoveryJobFixture()
+	planConfigMap, proof := recoveryArtifactConfigMaps(request, plan.Digest)
+	conflict := true
+	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).
+		WithObjects(request, planConfigMap, proof).WithInterceptorFuncs(interceptor.Funcs{
+		Create: assignRecoveryJobUID,
+		SubResourceUpdate: func(ctx context.Context, kube client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if conflict {
+				conflict = false
+				return apierrors.NewConflict(operatorv1alpha1.GroupVersion.WithResource("kubeovnrecoveryrequests").GroupResource(), obj.GetName(), errors.New("concurrent status change"))
+			}
+			return kube.SubResource(sub).Update(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, kube client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if job, ok := obj.(*batchv1.Job); ok && !recoveryJobSuspended(job) {
+				stored := new(operatorv1alpha1.KubeOVNRecoveryRequest)
+				if err := kube.Get(ctx, client.ObjectKeyFromObject(request), stored); err != nil {
+					t.Fatal(err)
+				}
+				if stored.Status.Execution == nil || stored.Status.Execution.JobUID != job.UID {
+					t.Fatal("Job was activated before its UID was persisted")
+				}
+			}
+			if err := kube.Update(ctx, obj, opts...); err != nil {
+				return err
+			}
+			return apierrors.NewTimeoutError("activation response lost", 0)
+		},
+	}).Build()
+	executor := &RecoveryJobExecutor{Client: kube, Builder: offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) {
+		return spec, nil
+	})}
+	key := client.ObjectKey{Namespace: spec.Namespace, Name: spec.Name}
+	if err := executor.Execute(t.Context(), plan); !errors.Is(err, ErrRecoveryInProgress) {
+		t.Fatalf("status conflict did not leave the operation in progress: %v", err)
+	}
+	job := new(batchv1.Job)
+	if err := kube.Get(t.Context(), key, job); err != nil || !recoveryJobSuspended(job) {
+		t.Fatalf("Job did not remain suspended across conflict: %v", err)
+	}
+	uid := job.UID
+	if err := executor.Execute(t.Context(), plan); !errors.Is(err, ErrRecoveryInProgress) {
+		t.Fatalf("retry did not activate the pinned Job: %v", err)
+	}
+	if err := kube.Get(t.Context(), key, job); err != nil || job.UID != uid || recoveryJobSuspended(job) {
+		t.Fatalf("retry did not resume the same Job: %v", err)
+	}
 }
