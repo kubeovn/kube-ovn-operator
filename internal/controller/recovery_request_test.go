@@ -344,7 +344,7 @@ func TestRecoveryRequestRejectsExpiredAndRecreatedInstallation(t *testing.T) {
 	}
 }
 
-func TestRecoveryRequestSuspendsPinnedJobWhenApprovalExpires(t *testing.T) {
+func TestRecoveryRequestSuspendsPinnedJobWhenRequestExpires(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	scheme := controllerScheme(t)
 	installation := recoveryInstallation()
