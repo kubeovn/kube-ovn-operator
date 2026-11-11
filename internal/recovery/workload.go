@@ -63,6 +63,18 @@ type WorkloadSpec struct {
 	Helper                     string
 }
 
+// DeterministicRebuildJobName derives the sole Job name for an admitted plan.
+// The digest is already immutable and plan-bound, so a retry after a lost
+// create response addresses the same API object instead of generating a new
+// workload name.
+func DeterministicRebuildJobName(planDigest string) string {
+	digest, ok := strings.CutPrefix(strings.TrimSpace(planDigest), "sha256:")
+	if !ok || len(digest) < 16 {
+		return ""
+	}
+	return "rebuild-" + digest[:16]
+}
+
 // Validate checks the privileged workload boundary before a Job is created.
 // In particular, it rejects a writable retained volume, mutable image, or
 // ambiguous PVC mapping.
@@ -97,6 +109,9 @@ func (s WorkloadSpec) Validate() error {
 	}
 	if !validSHA256(s.PlanDigest) {
 		return errors.New("offline rebuild workload plan digest must be a SHA-256 value")
+	}
+	if s.Name != DeterministicRebuildJobName(s.PlanDigest) {
+		return errors.New("offline rebuild workload name must be derived from the plan digest")
 	}
 	if !membership.ValidID(s.OperationID) {
 		return errors.New("offline rebuild workload operation ID must be a UUID")

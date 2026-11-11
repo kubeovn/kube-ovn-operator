@@ -10,7 +10,7 @@ import (
 
 func rebuildWorkloadFixture() WorkloadSpec {
 	return WorkloadSpec{
-		Namespace: "ovn-system", Name: "rebuild-11111111", InstallationUID: "installation-uid",
+		Namespace: "ovn-system", Name: DeterministicRebuildJobName("sha256:" + strings.Repeat("a", 64)), InstallationUID: "installation-uid",
 		OperationID: "11111111-1111-1111-1111-111111111111", PlanDigest: "sha256:" + strings.Repeat("a", 64), MemberName: "member-new", NodeName: "node-new",
 		Image: "ghcr.io/kubeovn/kube-ovn-operator@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "rebuild-agent",
 		PlanConfigMapName: "rebuild-plan", PlanConfigMapUID: "plan-uid", IsolationProofConfigMap: "rebuild-proof", IsolationProofConfigMapUID: "proof-uid", BackupClaim: "ovn-backups", BackupClaimUID: "backup-uid", BackupPVUID: "backup-pv-uid",
@@ -53,6 +53,7 @@ func TestWorkloadRendersDedicatedPrivilegedJob(t *testing.T) {
 func TestWorkloadRejectsUnsafeStorageAndImage(t *testing.T) {
 	for name, mutate := range map[string]func(*WorkloadSpec){
 		"mutable image":            func(spec *WorkloadSpec) { spec.Image = "ghcr.io/kubeovn/operator:latest" },
+		"nondeterministic name":    func(spec *WorkloadSpec) { spec.Name = "rebuild-random" },
 		"writable retained volume": func(spec *WorkloadSpec) { spec.Retained[0].ReadOnly = false },
 		"shared target and backup": func(spec *WorkloadSpec) { spec.BackupClaim = spec.Target.Claim },
 		"invalid helper":           func(spec *WorkloadSpec) { spec.Helper = "/bin/sh" },
