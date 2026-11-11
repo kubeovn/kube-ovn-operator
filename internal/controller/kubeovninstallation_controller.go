@@ -2889,6 +2889,9 @@ func (r *RecoveryRequestReconciler) setRecoveryWorkloadNotReady(ctx context.Cont
 
 func (r *RecoveryRequestReconciler) setRecoveryFailure(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, reason, message string, now time.Time, expired bool) error {
 	if expired {
+		if err := r.suspendExpiredRecoveryJob(ctx, request); err != nil {
+			return err
+		}
 		request.Status.Phase = operatorv1alpha1.RecoveryPhaseExpired
 	} else {
 		request.Status.Phase = operatorv1alpha1.RecoveryPhaseFailed
@@ -2896,6 +2899,31 @@ func (r *RecoveryRequestReconciler) setRecoveryFailure(ctx context.Context, requ
 	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionFalse, reason, message, now))
 	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionFalse, reason, message, now))
 	return r.updateRecoveryStatus(ctx, request)
+}
+
+func (r *RecoveryRequestReconciler) suspendExpiredRecoveryJob(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest) error {
+	if request == nil || request.Status.Execution == nil || request.Status.Execution.JobName == "" || request.Status.Execution.JobUID == "" {
+		return nil
+	}
+	job := new(batchv1.Job)
+	key := client.ObjectKey{Namespace: request.Namespace, Name: request.Status.Execution.JobName}
+	if err := r.Get(ctx, key, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("read expired recovery Job: %w", err)
+	}
+	if job.UID != request.Status.Execution.JobUID {
+		return errors.New("expired recovery Job identity changed")
+	}
+	if job.DeletionTimestamp != nil || jobConditionPresent(job, batchv1.JobComplete) || jobConditionPresent(job, batchv1.JobFailed) || recoveryJobSuspended(job) {
+		return nil
+	}
+	job.Spec.Suspend = new(true)
+	if err := r.Update(ctx, job); err != nil {
+		return fmt.Errorf("suspend expired recovery Job: %w", err)
+	}
+	return nil
 }
 
 func (r *RecoveryRequestReconciler) updateRecoveryStatus(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest) error {
