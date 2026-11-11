@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -41,10 +43,44 @@ func TestStaticOfflineRebuildWorkloadBuilderBindsCanonicalAndAdmissionDigests(t 
 	if err := spec.Validate(); err != nil {
 		t.Fatalf("builder returned an invalid workload: %v", err)
 	}
+	resolving := &ResolvingOfflineRebuildWorkloadBuilder{Resolver: offlineRebuildInputResolverFunc(func(context.Context, RecoveryPlan) (OfflineRebuildWorkloadInputs, error) {
+		return inputs, nil
+	})}
+	resolvedSpec, err := resolving.Build(t.Context(), plan)
+	if err != nil || resolvedSpec.CanonicalPlanDigest != spec.CanonicalPlanDigest {
+		t.Fatalf("resolver adapter did not use the validated builder: spec=%+v err=%v", resolvedSpec, err)
+	}
 	inputs.PlanConfigMapData = "tampered"
 	if _, err := NewStaticOfflineRebuildWorkloadBuilder(inputs); err == nil || !strings.Contains(err.Error(), "content does not match") {
 		t.Fatalf("plan ConfigMap content drift was accepted: %v", err)
 	}
+}
+
+func TestResolvingOfflineRebuildWorkloadBuilderPreservesReadinessErrors(t *testing.T) {
+	want := ErrRecoveryWorkloadNotReady
+	builder := &ResolvingOfflineRebuildWorkloadBuilder{Resolver: offlineRebuildInputResolverFunc(func(context.Context, RecoveryPlan) (OfflineRebuildWorkloadInputs, error) {
+		return OfflineRebuildWorkloadInputs{}, want
+	})}
+	if _, err := builder.Build(t.Context(), RecoveryPlan{}); !errors.Is(err, want) {
+		t.Fatalf("resolver readiness error was not preserved: %v", err)
+	}
+	if _, err := (&ResolvingOfflineRebuildWorkloadBuilder{}).Build(t.Context(), RecoveryPlan{}); err == nil {
+		t.Fatal("unconfigured resolver was accepted")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	cancelled := &ResolvingOfflineRebuildWorkloadBuilder{Resolver: offlineRebuildInputResolverFunc(func(ctx context.Context, _ RecoveryPlan) (OfflineRebuildWorkloadInputs, error) {
+		return OfflineRebuildWorkloadInputs{}, ctx.Err()
+	})}
+	if _, err := cancelled.Build(ctx, RecoveryPlan{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolver context cancellation was not preserved: %v", err)
+	}
+}
+
+type offlineRebuildInputResolverFunc func(context.Context, RecoveryPlan) (OfflineRebuildWorkloadInputs, error)
+
+func (f offlineRebuildInputResolverFunc) Resolve(ctx context.Context, plan RecoveryPlan) (OfflineRebuildWorkloadInputs, error) {
+	return f(ctx, plan)
 }
 
 func TestStaticOfflineRebuildWorkloadBuilderRejectsStorageDrift(t *testing.T) {
