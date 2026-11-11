@@ -401,6 +401,16 @@ func TestRecoveryJobExecutorDoesNotRetryDeterministicActivationRejection(t *test
 		{name: "invalid", err: func(name string) error {
 			return apierrors.NewInvalid(batchv1.SchemeGroupVersion.WithKind("Job").GroupKind(), name, nil)
 		}},
+		{name: "bad request", err: func(string) error { return apierrors.NewBadRequest("job suspend update is malformed") }},
+		{name: "not acceptable", err: func(name string) error {
+			return apierrors.NewGenericServerResponse(406, "update", batchv1.SchemeGroupVersion.WithResource("jobs").GroupResource(), name, "not acceptable", 0, false)
+		}},
+		{name: "unsupported media type", err: func(name string) error {
+			return apierrors.NewGenericServerResponse(415, "update", batchv1.SchemeGroupVersion.WithResource("jobs").GroupResource(), name, "unsupported media type", 0, false)
+		}},
+		{name: "request entity too large", err: func(string) error {
+			return apierrors.NewRequestEntityTooLargeError("request entity too large")
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request, plan, spec := recoveryJobFixture()

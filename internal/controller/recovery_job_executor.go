@@ -136,7 +136,7 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 }
 
 func recoveryJobActivationError(err error) error {
-	if apierrors.IsForbidden(err) || apierrors.IsInvalid(err) || apierrors.IsUnauthorized(err) || apierrors.IsMethodNotSupported(err) {
+	if apierrors.IsForbidden(err) || apierrors.IsInvalid(err) || apierrors.IsUnauthorized(err) || apierrors.IsMethodNotSupported(err) || apierrors.IsBadRequest(err) || apierrors.IsNotAcceptable(err) || apierrors.IsUnsupportedMediaType(err) || apierrors.IsRequestEntityTooLargeError(err) {
 		return fmt.Errorf("activate pinned offline rebuild Job was rejected: %w", err)
 	}
 	// A lost response, conflict, throttling, or transport failure may mean
