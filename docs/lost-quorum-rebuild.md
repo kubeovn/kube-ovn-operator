@@ -163,7 +163,10 @@ validates the API response, and records its name, UID and plan digest on
 leaves the Job suspended so the controller can retry the identity write. A
 missing or renamed pinned Job is rejected before creation. The executor rejects
 mutable or deleting input ConfigMaps and a Job whose spec differs from the
-builder output after accounting for API server defaults.
+builder output after accounting for API server defaults. Each ConfigMap UID and
+every backup, target, and retained PVC/PV identity is also pinned in the
+execution status digest; PVC/PV binding, Bound phases, deletion state, and
+exact owner references are checked on every retry.
 The production controller is still fail-closed until a builder can derive a
 backup PVC and complete target/retained storage identities from live
 Kubernetes objects; the existing file/S3 backup path is not converted into a
