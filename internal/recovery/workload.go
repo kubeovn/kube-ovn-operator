@@ -69,10 +69,10 @@ type WorkloadSpec struct {
 // workload name.
 func DeterministicRebuildJobName(planDigest string) string {
 	digest, ok := strings.CutPrefix(strings.TrimSpace(planDigest), "sha256:")
-	if !ok || len(digest) < 16 {
+	if !ok || len(digest) < 32 {
 		return ""
 	}
-	return "rebuild-" + digest[:16]
+	return "rebuild-" + digest[:32]
 }
 
 // Validate checks the privileged workload boundary before a Job is created.
