@@ -149,9 +149,10 @@ func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, re
 		key        string
 		annotation string
 		uid        types.UID
+		dataDigest string
 	}{
-		spec.PlanConfigMapName:       {key: "plan.json", annotation: recovery.RebuildPlanDigestAnnotation, uid: spec.PlanConfigMapUID},
-		spec.IsolationProofConfigMap: {key: "proof.json", annotation: recovery.RebuildPlanDigestAnnotation, uid: spec.IsolationProofConfigMapUID},
+		spec.PlanConfigMapName:       {key: "plan.json", annotation: recovery.RebuildPlanDigestAnnotation, uid: spec.PlanConfigMapUID, dataDigest: spec.PlanConfigMapDataDigest},
+		spec.IsolationProofConfigMap: {key: "proof.json", annotation: recovery.RebuildPlanDigestAnnotation, uid: spec.IsolationProofConfigMapUID, dataDigest: spec.IsolationProofDataDigest},
 	} {
 		configMap := new(corev1.ConfigMap)
 		if err := e.Client.Get(ctx, client.ObjectKey{Namespace: spec.Namespace, Name: name}, configMap); err != nil {
@@ -163,7 +164,7 @@ func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, re
 		if configMap.DeletionTimestamp != nil || configMap.UID != artifact.uid || configMap.Immutable == nil || !*configMap.Immutable {
 			return fmt.Errorf("offline rebuild ConfigMap %q must be immutable and not deleting", name)
 		}
-		if configMap.Annotations[artifact.annotation] != spec.PlanDigest || strings.TrimSpace(configMap.Data[artifact.key]) == "" {
+		if configMap.Annotations[artifact.annotation] != spec.PlanDigest || strings.TrimSpace(configMap.Data[artifact.key]) == "" || recovery.ConfigMapDataDigest(configMap.Data[artifact.key]) != artifact.dataDigest {
 			return fmt.Errorf("offline rebuild ConfigMap %q is not bound to plan %s", name, spec.PlanDigest)
 		}
 		if !hasRecoveryRequestOwnerConfigMap(configMap, request) {
