@@ -13,6 +13,7 @@ import (
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -340,6 +341,35 @@ func TestRecoveryRequestRejectsExpiredAndRecreatedInstallation(t *testing.T) {
 	}
 	if changed.Status.Phase != operatorv1alpha1.RecoveryPhaseFailed || findCondition(changed.Status.Conditions, "Accepted").Reason != "PlanChanged" {
 		t.Fatalf("recreated installation was not fenced: %+v", changed.Status)
+	}
+}
+
+func TestRecoveryRequestSuspendsPinnedJobWhenApprovalExpires(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	scheme := controllerScheme(t)
+	installation := recoveryInstallation()
+	request := recoveryRequest(now)
+	request.Spec.ExpiresAt = metav1.NewTime(now.Add(-time.Second))
+	request.Status.Execution = &operatorv1alpha1.RecoveryExecutionStatus{JobName: "expired-rebuild", JobUID: types.UID("expired-job")}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "expired-rebuild", Namespace: request.Namespace, UID: types.UID("expired-job")}}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request, job).Build()
+	reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }}
+	if _, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)}); err != nil {
+		t.Fatal(err)
+	}
+	gotJob := new(batchv1.Job)
+	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(job), gotJob); err != nil {
+		t.Fatal(err)
+	}
+	if !recoveryJobSuspended(gotJob) {
+		t.Fatal("expired recovery Job remained active")
+	}
+	gotRequest := new(operatorv1alpha1.KubeOVNRecoveryRequest)
+	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(request), gotRequest); err != nil {
+		t.Fatal(err)
+	}
+	if gotRequest.Status.Phase != operatorv1alpha1.RecoveryPhaseExpired {
+		t.Fatalf("expired request was not recorded: %s", gotRequest.Status.Phase)
 	}
 }
 
