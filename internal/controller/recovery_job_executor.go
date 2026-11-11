@@ -342,7 +342,9 @@ func pinRecoveryJobStatus(ctx context.Context, kube client.Client, request *oper
 func recoveryWorkloadInputIdentityDigest(spec recovery.WorkloadSpec) string {
 	identities := []string{
 		"configmap/plan=" + string(spec.PlanConfigMapUID),
+		"configmap/plan-data=" + spec.PlanConfigMapDataDigest,
 		"configmap/proof=" + string(spec.IsolationProofConfigMapUID),
+		"configmap/proof-data=" + spec.IsolationProofDataDigest,
 		"pvc/backup=" + string(spec.BackupClaimUID),
 		"pv/backup=" + string(spec.BackupPVUID),
 		"pvc/target=" + string(spec.Target.ClaimUID),
