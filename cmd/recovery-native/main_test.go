@@ -108,7 +108,7 @@ func TestWorkloadRejectsMetadataWithoutEnforcedIsolation(t *testing.T) {
 			NorthboundClient: "tcp:192.0.2." + node + ":6641", SouthboundClient: "tcp:192.0.2." + node + ":6642"}
 	}
 	plan := recovery.Plan{FormatVersion: recovery.FormatVersion, InstallationUID: "installation", OperationID: "eeee0000-1111-2222-3333-444444444444",
-		SourceVersion: "v1.16.13", TargetVersion: "v1.16.13", BackupPairID: fmt.Sprintf("sha256:%x", sha256.Sum256(pair)),
+		SourceVersion: "v1.16.13", TargetVersion: "v1.16.13", TopologyDigest: "sha256:" + strings.Repeat("d", 64), BackupPairID: fmt.Sprintf("sha256:%x", sha256.Sum256(pair)),
 		Approval:        recovery.Approval{Name: "approval", UID: "approval-uid", DecisionDigest: "sha256:" + strings.Repeat("c", 64)},
 		RetainedMembers: []recovery.Member{member("old", "1")}, TargetMembers: []recovery.Member{member("new", "2")},
 		Databases: []recovery.Database{

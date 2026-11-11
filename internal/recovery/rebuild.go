@@ -59,6 +59,7 @@ type Plan struct {
 	OperationID     string     `json:"operationID"`
 	SourceVersion   string     `json:"sourceVersion"`
 	TargetVersion   string     `json:"targetVersion"`
+	TopologyDigest  string     `json:"topologyDigest"`
 	BackupPairID    string     `json:"backupPairID"`
 	Approval        Approval   `json:"approval"`
 	RetainedMembers []Member   `json:"retainedMembers"`
@@ -81,6 +82,9 @@ func (p Plan) Canonical() (Plan, string, error) {
 	}
 	if strings.TrimSpace(p.SourceVersion) == "" || strings.TrimSpace(p.TargetVersion) == "" {
 		return Plan{}, "", errors.New("offline recovery requires source and target versions")
+	}
+	if !validSHA256(p.TopologyDigest) {
+		return Plan{}, "", errors.New("offline recovery requires a topology digest")
 	}
 	if err := validateApproval(p.Approval); err != nil {
 		return Plan{}, "", err

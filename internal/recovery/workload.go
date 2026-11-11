@@ -22,6 +22,7 @@ const (
 	RebuildCanonicalPlanDigestAnnotation = "operator.kubeovn.io/recovery-canonical-plan-digest"
 	RebuildOperationAnnotation           = "operator.kubeovn.io/recovery-operation-id"
 	RebuildInstallationAnnotation        = "operator.kubeovn.io/recovery-installation-uid"
+	BackupPairAnnotation                 = "operator.kubeovn.io/recovery-backup-pair-id"
 	rebuildTargetRoot                    = "/var/lib/ovn-rebuild-target"
 	rebuildRetainedRoot                  = "/var/lib/ovn-rebuild-retained"
 	rebuildBackupRoot                    = "/var/lib/ovn-backups"

@@ -21,10 +21,13 @@ type IsolationProof struct {
 const isolationProofMaxAge = 5 * time.Minute
 
 func (p IsolationProof) Validate(plan Plan) error {
-	return p.validateAt(plan, time.Now().UTC())
+	return p.ValidateAt(plan, time.Now().UTC())
 }
 
-func (p IsolationProof) validateAt(plan Plan, now time.Time) error {
+// ValidateAt checks the proof against a caller-supplied clock. Production
+// callers normally use Validate; artifact renderers and tests can bind the
+// freshness decision to an explicit observation time.
+func (p IsolationProof) ValidateAt(plan Plan, now time.Time) error {
 	canonical, digest, err := plan.Canonical()
 	if err != nil {
 		return err
@@ -45,4 +48,8 @@ func (p IsolationProof) validateAt(plan Plan, now time.Time) error {
 		return fmt.Errorf("isolation proof does not cover all retained members")
 	}
 	return nil
+}
+
+func (p IsolationProof) validateAt(plan Plan, now time.Time) error {
+	return p.ValidateAt(plan, now)
 }
