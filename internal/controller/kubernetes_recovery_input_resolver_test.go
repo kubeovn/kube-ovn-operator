@@ -19,11 +19,12 @@ func TestKubernetesOfflineRebuildWorkloadResolverResolvesExplicitIdentities(t *t
 	canonical := builderTestPlan()
 	canonicalJSON, canonicalDigest := builderCanonicalData(t, canonical)
 	const admissionDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-	plan := RecoveryPlan{RequestNamespace: "ovn-system", RequestName: "recover", RequestUID: "request-uid", InstallationNamespace: "ovn-system", InstallationName: "installation", InstallationUID: "installation-uid", SourceVersion: canonical.SourceVersion, TargetVersion: canonical.TargetVersion, ApprovalRef: &operatorv1alpha1.RecoveryApprovalReference{Name: canonical.Approval.Name, UID: types.UID(canonical.Approval.UID)}, Digest: admissionDigest, BackupRef: canonical.BackupPairID, DatabaseRefs: map[string]string{"OVN_Northbound": canonical.Databases[0].BackupRef, "OVN_Southbound": canonical.Databases[1].BackupRef}}
+	plan := RecoveryPlan{RequestNamespace: "ovn-system", RequestName: "recover", RequestUID: "request-uid", InstallationNamespace: "ovn-system", InstallationName: "installation", InstallationUID: "installation-uid", OperationID: canonical.OperationID, TopologyDigest: canonical.TopologyDigest, SourceVersion: canonical.SourceVersion, TargetVersion: canonical.TargetVersion, ApprovalRef: &operatorv1alpha1.RecoveryApprovalReference{Name: canonical.Approval.Name, UID: types.UID(canonical.Approval.UID)}, Digest: admissionDigest, BackupRef: canonical.BackupPairID, DatabaseRefs: map[string]string{"OVN_Northbound": canonical.Databases[0].BackupRef, "OVN_Southbound": canonical.Databases[1].BackupRef}}
 	request := &operatorv1alpha1.KubeOVNRecoveryRequest{ObjectMeta: metav1.ObjectMeta{Name: plan.RequestName, Namespace: plan.RequestNamespace, UID: plan.RequestUID}}
 	owner := recoveryRequestOwner(request)
 	planConfigMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "plan", Namespace: plan.RequestNamespace, UID: "plan-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: admissionDigest, recovery.RebuildCanonicalPlanDigestAnnotation: canonicalDigest}}, Immutable: new(true), Data: map[string]string{"plan.json": canonicalJSON}}
 	proofConfigMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "proof", Namespace: plan.RequestNamespace, UID: "proof-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: admissionDigest, recovery.RebuildCanonicalPlanDigestAnnotation: canonicalDigest}}, Immutable: new(true), Data: map[string]string{"proof.json": "proof"}}
+	approval := resolverApproval(plan, canonical)
 	backupPVC, backupPV := resolverPVC("backup", "backup-uid", "backup-pv-uid", "backup-pv")
 	backupPVC.Annotations = map[string]string{RecoveryBackupPairAnnotation: canonical.BackupPairID}
 	targetPVC, targetPV := resolverPVC("target", "volume-uid-6", "target-pv-uid", "target-pv")
@@ -32,7 +33,7 @@ func TestKubernetesOfflineRebuildWorkloadResolverResolvesExplicitIdentities(t *t
 	node1 := resolverNode("node-1", "node-uid-1")
 	targetPod := resolverPod("pod-uid-6", "node-6", "workload-uid-6", "container-6", "target")
 	retainedPod := resolverPod("pod-uid-1", "node-1", "workload-uid-1", "container-1", "old")
-	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithObjects(planConfigMap, proofConfigMap, backupPVC, backupPV, targetPVC, targetPV, retainedPVC, retainedPV, node6, node1, targetPod, retainedPod).Build()
+	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithObjects(planConfigMap, proofConfigMap, approval, backupPVC, backupPV, targetPVC, targetPV, retainedPVC, retainedPV, node6, node1, targetPod, retainedPod).Build()
 	resolver := &KubernetesOfflineRebuildWorkloadResolver{Reader: kube, Namespace: plan.RequestNamespace, PlanConfigMapName: "plan", ProofConfigMapName: "proof", BackupClaimName: "backup", TargetMemberName: "new", TargetClaimName: "target", RetainedClaimNames: map[string]string{"old": "old"}, Image: "example/recovery@sha256:" + strings.Repeat("f", 64), ServiceAccountName: "recovery"}
 	inputs, err := resolver.Resolve(t.Context(), plan)
 	if err != nil {
@@ -50,23 +51,24 @@ func TestKubernetesOfflineRebuildWorkloadResolverRejectsReadinessAndDrift(t *tes
 	canonical := builderTestPlan()
 	canonicalJSON, canonicalDigest := builderCanonicalData(t, canonical)
 	const admissionDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-	plan := RecoveryPlan{RequestNamespace: "ovn-system", RequestName: "recover", RequestUID: "request-uid", InstallationNamespace: "ovn-system", InstallationName: "installation", InstallationUID: "installation-uid", SourceVersion: canonical.SourceVersion, TargetVersion: canonical.TargetVersion, ApprovalRef: &operatorv1alpha1.RecoveryApprovalReference{Name: canonical.Approval.Name, UID: types.UID(canonical.Approval.UID)}, Digest: admissionDigest, BackupRef: canonical.BackupPairID, DatabaseRefs: map[string]string{"OVN_Northbound": canonical.Databases[0].BackupRef, "OVN_Southbound": canonical.Databases[1].BackupRef}}
+	plan := RecoveryPlan{RequestNamespace: "ovn-system", RequestName: "recover", RequestUID: "request-uid", InstallationNamespace: "ovn-system", InstallationName: "installation", InstallationUID: "installation-uid", OperationID: canonical.OperationID, TopologyDigest: canonical.TopologyDigest, SourceVersion: canonical.SourceVersion, TargetVersion: canonical.TargetVersion, ApprovalRef: &operatorv1alpha1.RecoveryApprovalReference{Name: canonical.Approval.Name, UID: types.UID(canonical.Approval.UID)}, Digest: admissionDigest, BackupRef: canonical.BackupPairID, DatabaseRefs: map[string]string{"OVN_Northbound": canonical.Databases[0].BackupRef, "OVN_Southbound": canonical.Databases[1].BackupRef}}
 	request := &operatorv1alpha1.KubeOVNRecoveryRequest{ObjectMeta: metav1.ObjectMeta{Name: plan.RequestName, Namespace: plan.RequestNamespace, UID: plan.RequestUID}}
 	owner := recoveryRequestOwner(request)
 	planConfigMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "plan", Namespace: plan.RequestNamespace, UID: "plan-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: admissionDigest, recovery.RebuildCanonicalPlanDigestAnnotation: canonicalDigest}}, Immutable: new(true), Data: map[string]string{"plan.json": canonicalJSON}}
 	proofConfigMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "proof", Namespace: plan.RequestNamespace, UID: "proof-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: admissionDigest, recovery.RebuildCanonicalPlanDigestAnnotation: canonicalDigest}}, Immutable: new(true), Data: map[string]string{"proof.json": "proof"}}
+	approval := resolverApproval(plan, canonical)
 	backupPVC, backupPV := resolverPVC("backup", "backup-uid", "backup-pv-uid", "backup-pv")
 	backupPVC.Annotations = map[string]string{RecoveryBackupPairAnnotation: canonical.BackupPairID}
 	targetPVC, targetPV := resolverPVC("target", "volume-uid-6", "target-pv-uid", "target-pv")
 	retainedPVC, retainedPV := resolverPVC("old", "volume-uid-1", "retained-pv-uid", "retained-pv")
-	objects := []client.Object{planConfigMap, proofConfigMap, backupPVC, backupPV, targetPVC, targetPV, retainedPVC, retainedPV, resolverNode("node-6", "node-uid-6"), resolverNode("node-1", "node-uid-1"), resolverPod("pod-uid-6", "node-6", "workload-uid-6", "container-6", "target"), resolverPod("pod-uid-1", "node-1", "workload-uid-1", "container-1", "old")}
+	objects := []client.Object{planConfigMap, proofConfigMap, approval, backupPVC, backupPV, targetPVC, targetPV, retainedPVC, retainedPV, resolverNode("node-6", "node-uid-6"), resolverNode("node-1", "node-uid-1"), resolverPod("pod-uid-6", "node-6", "workload-uid-6", "container-6", "target"), resolverPod("pod-uid-1", "node-1", "workload-uid-1", "container-1", "old")}
 	resolver := &KubernetesOfflineRebuildWorkloadResolver{Namespace: plan.RequestNamespace, PlanConfigMapName: "plan", ProofConfigMapName: "proof", BackupClaimName: "backup", TargetMemberName: "new", TargetClaimName: "target", RetainedClaimNames: map[string]string{"old": "old"}, Image: "example/recovery@sha256:" + strings.Repeat("f", 64), ServiceAccountName: "recovery"}
 	missing := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithObjects(objects[1:]...).Build()
 	resolver.Reader = missing
 	if _, err := resolver.Resolve(t.Context(), plan); !errors.Is(err, ErrRecoveryWorkloadNotReady) {
 		t.Fatalf("missing plan ConfigMap did not remain not ready: %v", err)
 	}
-	for _, missingName := range []string{"target-pv", "pod-uid-6", "node-6"} {
+	for _, missingName := range []string{"approval", "target-pv", "pod-uid-6", "node-6"} {
 		filtered := make([]client.Object, 0, len(objects)-1)
 		for _, object := range objects {
 			if object.GetName() != missingName {
@@ -92,6 +94,11 @@ func TestKubernetesOfflineRebuildWorkloadResolverRejectsReadinessAndDrift(t *tes
 	if _, err := resolver.Resolve(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "identity or binding") {
 		t.Fatalf("PVC UID drift was accepted: %v", err)
 	}
+	approval.Status.DecisionDigest = "sha256:" + strings.Repeat("f", 64)
+	resolver.Reader = fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithObjects(append([]client.Object{}, objects...)...).Build()
+	if _, err := resolver.Resolve(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "approval decision digest") {
+		t.Fatalf("approval decision digest drift was accepted: %v", err)
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := resolver.Resolve(ctx, plan); !errors.Is(err, context.Canceled) {
@@ -103,6 +110,13 @@ func resolverPVC(name string, uid types.UID, pvUID types.UID, pvName string) (*c
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ovn-system", UID: uid}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: pvName}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
 	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: pvName, UID: pvUID}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Name: name, Namespace: "ovn-system", UID: uid}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}}
 	return pvc, pv
+}
+
+func resolverApproval(plan RecoveryPlan, canonical recovery.Plan) *operatorv1alpha1.KubeOVNRecoveryApproval {
+	return &operatorv1alpha1.KubeOVNRecoveryApproval{
+		ObjectMeta: metav1.ObjectMeta{Name: canonical.Approval.Name, Namespace: plan.RequestNamespace, UID: types.UID(canonical.Approval.UID), Generation: 1},
+		Status:     operatorv1alpha1.RecoveryApprovalStatus{Phase: operatorv1alpha1.RecoveryApprovalReserved, DecisionDigest: canonical.Approval.DecisionDigest},
+	}
 }
 
 func resolverNode(name string, uid types.UID) *corev1.Node {

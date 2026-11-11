@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"uuid"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
 	"github.com/kubeovn/kube-ovn-operator/internal/apply"
@@ -2448,6 +2449,7 @@ type RecoveryPlan struct {
 	InstallationGeneration int64
 	RequestGeneration      int64
 	Reason                 string
+	OperationID            string
 	Mode                   operatorv1alpha1.RecoveryMode
 	SourceVersion          string
 	TargetVersion          string
@@ -2646,7 +2648,7 @@ func buildRecoveryPlan(request *operatorv1alpha1.KubeOVNRecoveryRequest, install
 		RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID,
 		InstallationNamespace: installation.Namespace, InstallationName: installation.Name, InstallationUID: installation.UID,
 		InstallationGeneration: installation.Generation, RequestGeneration: request.Generation,
-		Reason: reason, Mode: request.Spec.Mode, SourceVersion: installation.Status.ObservedVersion, TargetVersion: installation.Spec.Version,
+		Reason: reason, OperationID: recoveryOperationID(request), Mode: request.Spec.Mode, SourceVersion: installation.Status.ObservedVersion, TargetVersion: installation.Spec.Version,
 		ChartDigest: installation.Spec.Chart.Digest, TargetMemberRef: targetMemberRef, TargetMemberDigest: targetMemberDigest,
 		TopologyDigest: topologyDigest, BackupRef: backupRef, ApprovalRef: request.Spec.ApprovalRef, Approver: approver, ExpiresAt: expiresAt,
 	}
@@ -2655,6 +2657,21 @@ func buildRecoveryPlan(request *operatorv1alpha1.KubeOVNRecoveryRequest, install
 	}
 	plan.Digest = recoveryPlanDigest(plan)
 	return plan, "", nil
+}
+
+// recoveryOperationID derives one stable operation identity from the
+// immutable RecoveryRequest identity. It remains unchanged across retries and
+// cannot be redirected by edits to the request's mutable fields.
+func recoveryOperationID(request *operatorv1alpha1.KubeOVNRecoveryRequest) string {
+	if request == nil || request.UID == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(string(request.UID)))
+	var operationID uuid.UUID
+	copy(operationID[:], digest[:16])
+	operationID[6] = operationID[6]&0x0f | 0x50
+	operationID[8] = operationID[8]&0x3f | 0x80
+	return operationID.String()
 }
 
 // recoveryTarget resolves the explicit member slot at admission time. A
@@ -2807,6 +2824,7 @@ func recoveryPlanDigest(plan RecoveryPlan) string {
 		InstallationGeneration int64
 		RequestGeneration      int64
 		Reason                 string
+		OperationID            string
 		Mode                   operatorv1alpha1.RecoveryMode
 		SourceVersion          string
 		TargetVersion          string
@@ -2823,7 +2841,7 @@ func recoveryPlanDigest(plan RecoveryPlan) string {
 		RequestNamespace: plan.RequestNamespace, RequestName: plan.RequestName, RequestUID: plan.RequestUID,
 		InstallationNamespace: plan.InstallationNamespace, InstallationName: plan.InstallationName, InstallationUID: plan.InstallationUID,
 		InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration,
-		Reason: plan.Reason, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest,
+		Reason: plan.Reason, OperationID: plan.OperationID, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest,
 		TargetMemberRef: plan.TargetMemberRef, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest,
 		BackupRef: plan.BackupRef, DatabaseRefs: plan.DatabaseRefs, ApprovalRef: plan.ApprovalRef, Approver: plan.Approver,
 		ExpiresAt: plan.ExpiresAt.UTC().Format(time.RFC3339Nano),

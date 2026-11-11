@@ -24,7 +24,7 @@ func validPlan() Plan {
 	data, _ := json.Marshal(refs, json.Deterministic(true))
 	return Plan{
 		FormatVersion: FormatVersion, InstallationUID: "installation-uid", OperationID: operationID,
-		SourceVersion: "v1.16.13", TargetVersion: "v1.16.13", BackupPairID: "sha256:" + stringHash(data),
+		SourceVersion: "v1.16.13", TargetVersion: "v1.16.13", TopologyDigest: "sha256:" + strings.Repeat("d", 64), BackupPairID: "sha256:" + stringHash(data),
 		Approval:        Approval{Name: "lost-quorum-approval", UID: "approval-uid", DecisionDigest: "sha256:" + strings.Repeat("c", 64)},
 		RetainedMembers: []Member{member("old", "1", "2", "3", "4", "5")},
 		TargetMembers:   []Member{member("new", "6", "7", "8", "9", "a")},

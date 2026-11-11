@@ -19,7 +19,7 @@ import (
 // RecoveryBackupPairAnnotation binds an explicitly selected backup PVC to the
 // authenticated pair recorded in the recovery plan. A resolver must never
 // infer a backup PVC from a file or object-storage reference.
-const RecoveryBackupPairAnnotation = "operator.kubeovn.io/recovery-backup-pair-id"
+const RecoveryBackupPairAnnotation = recovery.BackupPairAnnotation
 
 // KubernetesOfflineRebuildWorkloadResolver resolves one read-only Kubernetes
 // snapshot for a destructive rebuild. Every selector is explicit: this type
@@ -166,10 +166,36 @@ func (r *KubernetesOfflineRebuildWorkloadResolver) resolvePlanConfigMap(ctx cont
 	if object.Annotations[recovery.RebuildPlanDigestAnnotation] != plan.Digest || object.Annotations[recovery.RebuildCanonicalPlanDigestAnnotation] != digest || recovery.ConfigMapDataDigest(data) != digest {
 		return recovery.Plan{}, "", "", nil, errors.New("offline rebuild plan ConfigMap content or digest is not bound to the admitted plan")
 	}
-	if canonical.InstallationUID != string(plan.InstallationUID) || canonical.SourceVersion != plan.SourceVersion || canonical.TargetVersion != plan.TargetVersion || canonical.BackupPairID != plan.BackupRef || !databaseRefsMatch(canonical.Databases, plan.DatabaseRefs) || plan.ApprovalRef == nil || canonical.Approval.Name != plan.ApprovalRef.Name || types.UID(canonical.Approval.UID) != plan.ApprovalRef.UID {
+	if canonical.InstallationUID != string(plan.InstallationUID) || canonical.OperationID != plan.OperationID || canonical.TopologyDigest != plan.TopologyDigest || canonical.SourceVersion != plan.SourceVersion || canonical.TargetVersion != plan.TargetVersion || canonical.BackupPairID != plan.BackupRef || !databaseRefsMatch(canonical.Databases, plan.DatabaseRefs) || plan.ApprovalRef == nil || canonical.Approval.Name != plan.ApprovalRef.Name || types.UID(canonical.Approval.UID) != plan.ApprovalRef.UID {
 		return recovery.Plan{}, "", "", nil, errors.New("offline rebuild canonical plan is not bound to the admitted plan")
 	}
+	if err := r.resolveApproval(ctx, plan, canonical); err != nil {
+		return recovery.Plan{}, "", "", nil, err
+	}
 	return canonical, digest, data, object, nil
+}
+
+func (r *KubernetesOfflineRebuildWorkloadResolver) resolveApproval(ctx context.Context, plan RecoveryPlan, canonical recovery.Plan) error {
+	if plan.ApprovalRef == nil || strings.TrimSpace(plan.ApprovalRef.Name) == "" || plan.ApprovalRef.UID == "" {
+		return errors.New("offline rebuild recovery approval binding is missing")
+	}
+	approval := new(operatorv1alpha1.KubeOVNRecoveryApproval)
+	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: r.Namespace, Name: plan.ApprovalRef.Name}, approval); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: offline rebuild recovery approval %q is not available", ErrRecoveryWorkloadNotReady, plan.ApprovalRef.Name)
+		}
+		return fmt.Errorf("read offline rebuild recovery approval %q: %w", plan.ApprovalRef.Name, err)
+	}
+	if approval.UID != plan.ApprovalRef.UID || approval.DeletionTimestamp != nil {
+		return errors.New("offline rebuild recovery approval identity changed or is being deleted")
+	}
+	if approval.Status.Phase != operatorv1alpha1.RecoveryApprovalReserved && approval.Status.Phase != operatorv1alpha1.RecoveryApprovalCompleted {
+		return errors.New("offline rebuild recovery approval is not reserved or completed")
+	}
+	if !validRecoverySHA256(approval.Status.DecisionDigest) || approval.Status.DecisionDigest != canonical.Approval.DecisionDigest {
+		return errors.New("offline rebuild recovery approval decision digest does not match the canonical plan")
+	}
+	return nil
 }
 
 func (r *KubernetesOfflineRebuildWorkloadResolver) resolveProofConfigMap(ctx context.Context, plan RecoveryPlan, request *operatorv1alpha1.KubeOVNRecoveryRequest, canonicalDigest string) (string, *corev1.ConfigMap, error) {
