@@ -177,7 +177,7 @@ func (e *RecoveryJobExecutor) validateRecoveryStorage(ctx context.Context, spec 
 			}
 			return fmt.Errorf("read offline rebuild PVC %q: %w", volume.Claim, err)
 		}
-		if pvc.UID != volume.ClaimUID || pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
+		if pvc.DeletionTimestamp != nil || pvc.UID != volume.ClaimUID || pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
 			return fmt.Errorf("offline rebuild PVC %q identity or binding changed", volume.Claim)
 		}
 		pv := new(corev1.PersistentVolume)
@@ -187,7 +187,7 @@ func (e *RecoveryJobExecutor) validateRecoveryStorage(ctx context.Context, spec 
 			}
 			return fmt.Errorf("read offline rebuild PV %q: %w", pvc.Spec.VolumeName, err)
 		}
-		if pv.UID != volume.PVUID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != spec.Namespace || pv.Spec.ClaimRef.Name != volume.Claim || pv.Spec.ClaimRef.UID != pvc.UID {
+		if pv.DeletionTimestamp != nil || pv.UID != volume.PVUID || pv.Status.Phase != corev1.VolumeBound || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != spec.Namespace || pv.Spec.ClaimRef.Name != volume.Claim || pv.Spec.ClaimRef.UID != pvc.UID {
 			return fmt.Errorf("offline rebuild PV %q identity or claim binding changed", pv.Name)
 		}
 	}
@@ -195,12 +195,10 @@ func (e *RecoveryJobExecutor) validateRecoveryStorage(ctx context.Context, spec 
 }
 
 func hasRecoveryRequestOwnerConfigMap(configMap *corev1.ConfigMap, request *operatorv1alpha1.KubeOVNRecoveryRequest) bool {
-	for _, owner := range configMap.OwnerReferences {
-		if owner.APIVersion == operatorv1alpha1.GroupVersion.String() && owner.Kind == "KubeOVNRecoveryRequest" && owner.Name == request.Name && owner.UID == request.UID && owner.Controller != nil && *owner.Controller {
-			return true
-		}
+	if len(configMap.OwnerReferences) != 1 {
+		return false
 	}
-	return false
+	return ownerReferenceEqual(configMap.OwnerReferences[0], recoveryRequestOwner(request))
 }
 
 func recoveryRequestOwner(request *operatorv1alpha1.KubeOVNRecoveryRequest) metav1.OwnerReference {
@@ -222,7 +220,7 @@ func validateRecoveryJob(current, desired *batchv1.Job, execution *operatorv1alp
 			return errors.New("offline rebuild Job annotations do not match the admitted workload")
 		}
 	}
-	if len(desired.OwnerReferences) != 1 || len(current.OwnerReferences) != 1 || !hasRecoveryRequestOwner(current, desired.OwnerReferences[0]) {
+	if len(desired.OwnerReferences) != 1 || len(current.OwnerReferences) != 1 || !ownerReferenceEqual(current.OwnerReferences[0], desired.OwnerReferences[0]) {
 		return errors.New("offline rebuild Job owner identity does not match the recovery request")
 	}
 	if current.UID == "" {
@@ -242,6 +240,20 @@ func validateRecoveryJob(current, desired *batchv1.Job, execution *operatorv1alp
 		return errors.New("offline rebuild Job is deleting or its spec differs from the admitted workload")
 	}
 	return nil
+}
+
+func ownerReferenceEqual(actual, expected metav1.OwnerReference) bool {
+	if actual.APIVersion != expected.APIVersion || actual.Kind != expected.Kind || actual.Name != expected.Name || actual.UID != expected.UID {
+		return false
+	}
+	return boolPointerEqual(actual.Controller, expected.Controller) && boolPointerEqual(actual.BlockOwnerDeletion, expected.BlockOwnerDeletion)
+}
+
+func boolPointerEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // Accept only Kubernetes' Job defaults and generated selector/labels. The

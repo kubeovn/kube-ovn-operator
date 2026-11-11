@@ -70,7 +70,7 @@ func TestRecoveryJobExecutorCreatesAndObservesOnePinnedJob(t *testing.T) {
 	if err := kube.Get(t.Context(), client.ObjectKeyFromObject(request), stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored.Status.Execution == nil || stored.Status.Execution.JobName != job.Name || stored.Status.Execution.JobUID != job.UID || stored.Status.Execution.JobPlanDigest != plan.Digest {
+	if stored.Status.Execution == nil || stored.Status.Execution.JobName != job.Name || stored.Status.Execution.JobUID != job.UID || stored.Status.Execution.JobPlanDigest != plan.Digest || stored.Status.Execution.JobInputIdentityDigest != recoveryWorkloadInputIdentityDigest(spec) {
 		t.Fatalf("Job identity was not durably pinned: %+v", stored.Status.Execution)
 	}
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
@@ -132,8 +132,7 @@ func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
 }
 
 func recoveryArtifactConfigMaps(request *operatorv1alpha1.KubeOVNRecoveryRequest, digest string) (*corev1.ConfigMap, *corev1.ConfigMap) {
-	controller := true
-	owner := metav1.OwnerReference{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNRecoveryRequest", Name: request.Name, UID: request.UID, Controller: &controller}
+	owner := recoveryRequestOwner(request)
 	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-plan", Namespace: request.Namespace, UID: "plan-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Immutable: new(true), Data: map[string]string{"plan.json": "{}"}}, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-proof", Namespace: request.Namespace, UID: "proof-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Immutable: new(true), Data: map[string]string{"proof.json": "{}"}}
 }
 
@@ -144,7 +143,7 @@ func recoveryStorageObjects(spec recovery.WorkloadSpec) []client.Object {
 	for _, volume := range volumes {
 		pvName := "pv-" + volume.Claim
 		objects = append(objects,
-			&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: pvName, UID: volume.PVUID}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: spec.Namespace, Name: volume.Claim, UID: volume.ClaimUID}}},
+			&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: pvName, UID: volume.PVUID}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: spec.Namespace, Name: volume.Claim, UID: volume.ClaimUID}}, Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound}},
 			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: volume.Claim, Namespace: spec.Namespace, UID: volume.ClaimUID}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: pvName}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
 		)
 	}
@@ -161,6 +160,10 @@ func TestRecoveryJobExecutorRejectsUnsafeHandoff(t *testing.T) {
 			plan.Immutable = new(false)
 			return nil
 		}, want: "must be immutable"},
+		{name: "foreign ConfigMap owner", edit: func(plan *corev1.ConfigMap, _ *batchv1.Job) []client.Object {
+			plan.OwnerReferences = append(plan.OwnerReferences, metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "foreign", UID: "foreign"})
+			return nil
+		}, want: "owner identity"},
 		{name: "wrong image", edit: func(_ *corev1.ConfigMap, job *batchv1.Job) []client.Object {
 			job.Spec.Template.Spec.Containers[0].Image = "other:latest"
 			return []client.Object{job}
@@ -253,6 +256,37 @@ func TestRecoveryJobExecutorRejectsReplacedInputIdentity(t *testing.T) {
 	}
 	if err := executor.Execute(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "identity or binding changed") {
 		t.Fatalf("replaced PVC was accepted: %v", err)
+	}
+}
+
+func TestRecoveryJobExecutorRejectsUnboundOrDeletingStorage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*corev1.PersistentVolumeClaim, *corev1.PersistentVolume)
+	}{
+		{name: "deleting PVC", edit: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.PersistentVolume) {
+			now := metav1.Now()
+			pvc.DeletionTimestamp = &now
+			pvc.Finalizers = []string{"test.kubeovn.io/hold"}
+		}},
+		{name: "unbound PV", edit: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+			pv.Status.Phase = corev1.VolumeReleased
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, plan, spec := recoveryJobFixture()
+			planConfigMap, proof := recoveryArtifactConfigMaps(request, plan.Digest)
+			storage := recoveryStorageObjects(spec)
+			pvc := storage[3].(*corev1.PersistentVolumeClaim)
+			pv := storage[2].(*corev1.PersistentVolume)
+			tc.edit(pvc, pv)
+			kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).
+				WithObjects(append([]client.Object{request, planConfigMap, proof}, storage...)...).Build()
+			executor := &RecoveryJobExecutor{Client: kube, Builder: offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) { return spec, nil })}
+			if err := executor.Execute(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "changed") {
+				t.Fatalf("unsafe storage was accepted: %v", err)
+			}
+		})
 	}
 }
 
