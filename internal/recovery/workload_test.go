@@ -13,8 +13,8 @@ func rebuildWorkloadFixture() WorkloadSpec {
 		Namespace: "ovn-system", Name: "rebuild-11111111", InstallationUID: "installation-uid",
 		OperationID: "11111111-1111-1111-1111-111111111111", PlanDigest: "sha256:" + strings.Repeat("a", 64), MemberName: "member-new", NodeName: "node-new",
 		Image: "ghcr.io/kubeovn/kube-ovn-operator@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "rebuild-agent",
-		PlanConfigMapName: "rebuild-plan", IsolationProofConfigMap: "rebuild-proof", BackupClaim: "ovn-backups",
-		Target: WorkloadVolume{Name: "target", Claim: "ovn-target"}, Retained: []WorkloadVolume{{Name: "member-old", Claim: "ovn-old", ReadOnly: true}},
+		PlanConfigMapName: "rebuild-plan", PlanConfigMapUID: "plan-uid", IsolationProofConfigMap: "rebuild-proof", IsolationProofConfigMapUID: "proof-uid", BackupClaim: "ovn-backups", BackupClaimUID: "backup-uid", BackupPVUID: "backup-pv-uid",
+		Target: WorkloadVolume{Name: "target", Claim: "ovn-target", ClaimUID: "target-uid", PVUID: "target-pv-uid"}, Retained: []WorkloadVolume{{Name: "member-old", Claim: "ovn-old", ClaimUID: "retained-uid", PVUID: "retained-pv-uid", ReadOnly: true}},
 	}
 }
 

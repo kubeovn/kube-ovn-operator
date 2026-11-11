@@ -508,8 +508,11 @@ type RecoveryExecutionStatus struct {
 	JobName       string    `json:"jobName,omitempty"`
 	JobUID        types.UID `json:"jobUID,omitempty"`
 	JobPlanDigest string    `json:"jobPlanDigest,omitempty"`
-	JobPhase      string    `json:"jobPhase,omitempty"`
-	JobReason     string    `json:"jobReason,omitempty"`
+	// JobInputIdentityDigest pins the PVC/PV and ConfigMap UIDs used by the
+	// admitted Job so same-name replacements cannot change its inputs.
+	JobInputIdentityDigest string `json:"jobInputIdentityDigest,omitempty"`
+	JobPhase               string `json:"jobPhase,omitempty"`
+	JobReason              string `json:"jobReason,omitempty"`
 }
 
 // +kubebuilder:object:root=true

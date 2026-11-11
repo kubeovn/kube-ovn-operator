@@ -82,6 +82,7 @@ spec:
                     jobName: {type: string}
                     jobUID: {type: string}
                     jobPlanDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+                    jobInputIdentityDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
                     jobPhase: {type: string}
                     jobReason: {type: string}
                 conditions:

@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
@@ -13,6 +15,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -69,6 +72,10 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if err := e.validateRecoveryConfigMaps(ctx, request, spec); err != nil {
 		return err
 	}
+	if err := e.validateRecoveryStorage(ctx, spec); err != nil {
+		return err
+	}
+	inputDigest := recoveryWorkloadInputIdentityDigest(spec)
 	desired, err := spec.Job(&owner)
 	if err != nil {
 		return fmt.Errorf("render offline rebuild Job: %w", err)
@@ -80,6 +87,9 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 		}
 		if execution.JobPlanDigest != "" && execution.JobPlanDigest != spec.PlanDigest {
 			return errors.New("offline rebuild Job plan digest changed after admission")
+		}
+		if execution.JobInputIdentityDigest != "" && execution.JobInputIdentityDigest != inputDigest {
+			return errors.New("offline rebuild Job storage or artifact identity changed after admission")
 		}
 	}
 	key := client.ObjectKeyFromObject(desired)
@@ -104,7 +114,7 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if err := validateRecoveryJob(current, desired, request.Status.Execution); err != nil {
 		return err
 	}
-	if err := pinRecoveryJobStatus(ctx, e.Client, request, current); err != nil {
+	if err := pinRecoveryJobStatus(ctx, e.Client, request, current, inputDigest); err != nil {
 		return err
 	}
 	if recoveryJobSuspended(current) {
@@ -131,9 +141,10 @@ func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, re
 	for name, artifact := range map[string]struct {
 		key        string
 		annotation string
+		uid        types.UID
 	}{
-		spec.PlanConfigMapName:       {key: "plan.json", annotation: recovery.RebuildPlanDigestAnnotation},
-		spec.IsolationProofConfigMap: {key: "proof.json", annotation: recovery.RebuildPlanDigestAnnotation},
+		spec.PlanConfigMapName:       {key: "plan.json", annotation: recovery.RebuildPlanDigestAnnotation, uid: spec.PlanConfigMapUID},
+		spec.IsolationProofConfigMap: {key: "proof.json", annotation: recovery.RebuildPlanDigestAnnotation, uid: spec.IsolationProofConfigMapUID},
 	} {
 		configMap := new(corev1.ConfigMap)
 		if err := e.Client.Get(ctx, client.ObjectKey{Namespace: spec.Namespace, Name: name}, configMap); err != nil {
@@ -142,7 +153,7 @@ func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, re
 			}
 			return fmt.Errorf("read offline rebuild %s ConfigMap %q: %w", artifact.annotation, name, err)
 		}
-		if configMap.DeletionTimestamp != nil || configMap.Immutable == nil || !*configMap.Immutable {
+		if configMap.DeletionTimestamp != nil || configMap.UID != artifact.uid || configMap.Immutable == nil || !*configMap.Immutable {
 			return fmt.Errorf("offline rebuild ConfigMap %q must be immutable and not deleting", name)
 		}
 		if configMap.Annotations[artifact.annotation] != spec.PlanDigest || strings.TrimSpace(configMap.Data[artifact.key]) == "" {
@@ -150,6 +161,34 @@ func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, re
 		}
 		if !hasRecoveryRequestOwnerConfigMap(configMap, request) {
 			return fmt.Errorf("offline rebuild ConfigMap %q owner identity does not match the recovery request", name)
+		}
+	}
+	return nil
+}
+
+func (e *RecoveryJobExecutor) validateRecoveryStorage(ctx context.Context, spec recovery.WorkloadSpec) error {
+	volumes := append([]recovery.WorkloadVolume{{Name: "backup", Claim: spec.BackupClaim, ClaimUID: spec.BackupClaimUID, PVUID: spec.BackupPVUID}}, spec.Target)
+	volumes = append(volumes, spec.Retained...)
+	for _, volume := range volumes {
+		pvc := new(corev1.PersistentVolumeClaim)
+		if err := e.Client.Get(ctx, client.ObjectKey{Namespace: spec.Namespace, Name: volume.Claim}, pvc); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("%w: offline rebuild PVC %q is not available", ErrRecoveryWorkloadNotReady, volume.Claim)
+			}
+			return fmt.Errorf("read offline rebuild PVC %q: %w", volume.Claim, err)
+		}
+		if pvc.UID != volume.ClaimUID || pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
+			return fmt.Errorf("offline rebuild PVC %q identity or binding changed", volume.Claim)
+		}
+		pv := new(corev1.PersistentVolume)
+		if err := e.Client.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("%w: offline rebuild PV %q is not available", ErrRecoveryWorkloadNotReady, pvc.Spec.VolumeName)
+			}
+			return fmt.Errorf("read offline rebuild PV %q: %w", pvc.Spec.VolumeName, err)
+		}
+		if pv.UID != volume.PVUID || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != spec.Namespace || pv.Spec.ClaimRef.Name != volume.Claim || pv.Spec.ClaimRef.UID != pvc.UID {
+			return fmt.Errorf("offline rebuild PV %q identity or claim binding changed", pv.Name)
 		}
 	}
 	return nil
@@ -183,7 +222,7 @@ func validateRecoveryJob(current, desired *batchv1.Job, execution *operatorv1alp
 			return errors.New("offline rebuild Job annotations do not match the admitted workload")
 		}
 	}
-	if len(desired.OwnerReferences) != 1 || !hasRecoveryRequestOwner(current, desired.OwnerReferences[0]) {
+	if len(desired.OwnerReferences) != 1 || len(current.OwnerReferences) != 1 || !hasRecoveryRequestOwner(current, desired.OwnerReferences[0]) {
 		return errors.New("offline rebuild Job owner identity does not match the recovery request")
 	}
 	if current.UID == "" {
@@ -255,7 +294,7 @@ func recoveryJobSuspended(job *batchv1.Job) bool {
 	return job.Spec.Suspend != nil && *job.Spec.Suspend
 }
 
-func pinRecoveryJobStatus(ctx context.Context, kube client.Client, request *operatorv1alpha1.KubeOVNRecoveryRequest, job *batchv1.Job) error {
+func pinRecoveryJobStatus(ctx context.Context, kube client.Client, request *operatorv1alpha1.KubeOVNRecoveryRequest, job *batchv1.Job, inputDigest string) error {
 	if request.Status.Execution == nil {
 		request.Status.Execution = new(operatorv1alpha1.RecoveryExecutionStatus)
 	}
@@ -274,10 +313,11 @@ func pinRecoveryJobStatus(ctx context.Context, kube client.Client, request *oper
 		jobReason = strings.TrimSpace(condition.Message)
 	}
 	jobDigest := job.Annotations[recovery.RebuildPlanDigestAnnotation]
-	if execution.JobName == job.Name && execution.JobUID == job.UID && execution.JobPlanDigest == jobDigest && execution.JobPhase == jobPhase && execution.JobReason == jobReason {
+	if execution.JobName == job.Name && execution.JobUID == job.UID && execution.JobPlanDigest == jobDigest && execution.JobInputIdentityDigest == inputDigest && execution.JobPhase == jobPhase && execution.JobReason == jobReason {
 		return nil
 	}
 	execution.JobName, execution.JobUID, execution.JobPlanDigest = job.Name, job.UID, jobDigest
+	execution.JobInputIdentityDigest = inputDigest
 	execution.JobPhase, execution.JobReason = jobPhase, jobReason
 	if err := kube.Status().Update(ctx, request); err != nil {
 		if apierrors.IsConflict(err) {
@@ -286,6 +326,23 @@ func pinRecoveryJobStatus(ctx context.Context, kube client.Client, request *oper
 		return fmt.Errorf("persist offline rebuild Job identity: %w", err)
 	}
 	return nil
+}
+
+func recoveryWorkloadInputIdentityDigest(spec recovery.WorkloadSpec) string {
+	identities := []string{
+		"configmap/plan=" + string(spec.PlanConfigMapUID),
+		"configmap/proof=" + string(spec.IsolationProofConfigMapUID),
+		"pvc/backup=" + string(spec.BackupClaimUID),
+		"pv/backup=" + string(spec.BackupPVUID),
+		"pvc/target=" + string(spec.Target.ClaimUID),
+		"pv/target=" + string(spec.Target.PVUID),
+	}
+	for _, volume := range spec.Retained {
+		identities = append(identities, "pvc/retained/"+volume.Name+"="+string(volume.ClaimUID), "pv/retained/"+volume.Name+"="+string(volume.PVUID))
+	}
+	sort.Strings(identities)
+	hash := sha256.Sum256([]byte(strings.Join(identities, "\n")))
+	return fmt.Sprintf("sha256:%x", hash[:])
 }
 
 func jobConditionPresent(job *batchv1.Job, conditionType batchv1.JobConditionType) bool {

@@ -10,6 +10,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -32,6 +33,8 @@ const (
 type WorkloadVolume struct {
 	Name     string
 	Claim    string
+	ClaimUID types.UID
+	PVUID    types.UID
 	ReadOnly bool
 }
 
@@ -39,21 +42,25 @@ type WorkloadVolume struct {
 // It deliberately contains references and digests only. Backup bytes,
 // credentials and approval material never enter the Job manifest.
 type WorkloadSpec struct {
-	Namespace               string
-	Name                    string
-	InstallationUID         string
-	OperationID             string
-	PlanDigest              string
-	MemberName              string
-	NodeName                string
-	Image                   string
-	ServiceAccountName      string
-	PlanConfigMapName       string
-	IsolationProofConfigMap string
-	BackupClaim             string
-	Target                  WorkloadVolume
-	Retained                []WorkloadVolume
-	Helper                  string
+	Namespace                  string
+	Name                       string
+	InstallationUID            string
+	OperationID                string
+	PlanDigest                 string
+	MemberName                 string
+	NodeName                   string
+	Image                      string
+	ServiceAccountName         string
+	PlanConfigMapName          string
+	PlanConfigMapUID           types.UID
+	IsolationProofConfigMap    string
+	IsolationProofConfigMapUID types.UID
+	BackupClaim                string
+	BackupClaimUID             types.UID
+	BackupPVUID                types.UID
+	Target                     WorkloadVolume
+	Retained                   []WorkloadVolume
+	Helper                     string
 }
 
 // Validate checks the privileged workload boundary before a Job is created.
@@ -67,6 +74,15 @@ func (s WorkloadSpec) Validate() error {
 		"isolation proof ConfigMap": s.IsolationProofConfigMap, "backup PVC": s.BackupClaim,
 	} {
 		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("offline rebuild workload requires %s", field)
+		}
+	}
+	for field, value := range map[string]types.UID{
+		"plan ConfigMap UID": s.PlanConfigMapUID, "isolation proof ConfigMap UID": s.IsolationProofConfigMapUID,
+		"backup PVC UID": s.BackupClaimUID, "backup PV UID": s.BackupPVUID,
+		"target PVC UID": s.Target.ClaimUID, "target PV UID": s.Target.PVUID,
+	} {
+		if value == "" {
 			return fmt.Errorf("offline rebuild workload requires %s", field)
 		}
 	}
@@ -108,7 +124,7 @@ func (s WorkloadSpec) Validate() error {
 	}
 	seen := map[string]struct{}{s.BackupClaim: {}, s.Target.Claim: {}}
 	for _, volume := range s.Retained {
-		if volume.Name == "" || volume.Claim == "" || volume.Name == "target" || !volume.ReadOnly {
+		if volume.Name == "" || volume.Claim == "" || volume.ClaimUID == "" || volume.PVUID == "" || volume.Name == "target" || !volume.ReadOnly {
 			return errors.New("offline rebuild retained volumes must be named, read-only and distinct from target")
 		}
 		if len(validation.IsDNS1123Label(volume.Name)) != 0 || len(validation.IsDNS1123Subdomain(volume.Claim)) != 0 {

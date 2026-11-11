@@ -52,7 +52,7 @@ func TestRecoveryJobExecutorTreatsMissingArtifactsAsNotReady(t *testing.T) {
 func TestRecoveryJobExecutorCreatesAndObservesOnePinnedJob(t *testing.T) {
 	request, plan, spec := recoveryJobFixture()
 	planConfigMap, proofConfigMap := recoveryArtifactConfigMaps(request, plan.Digest)
-	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).WithObjects(request, planConfigMap, proofConfigMap).WithInterceptorFuncs(interceptor.Funcs{Create: assignRecoveryJobUID}).Build()
+	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).WithObjects(append([]client.Object{request, planConfigMap, proofConfigMap}, recoveryStorageObjects(spec)...)...).WithInterceptorFuncs(interceptor.Funcs{Create: assignRecoveryJobUID}).Build()
 	builder := offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) { return spec, nil })
 	executor := &RecoveryJobExecutor{Client: kube, Builder: builder}
 	if err := executor.Execute(t.Context(), plan); err != ErrRecoveryInProgress {
@@ -85,7 +85,7 @@ func TestRecoveryJobExecutorCreatesAndObservesOnePinnedJob(t *testing.T) {
 func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
 	request, plan, spec := recoveryJobFixture()
 	planConfigMap, proofConfigMap := recoveryArtifactConfigMaps(request, plan.Digest)
-	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).WithObjects(request, planConfigMap, proofConfigMap).WithInterceptorFuncs(interceptor.Funcs{Create: assignRecoveryJobUID}).Build()
+	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).WithObjects(append([]client.Object{request, planConfigMap, proofConfigMap}, recoveryStorageObjects(spec)...)...).WithInterceptorFuncs(interceptor.Funcs{Create: assignRecoveryJobUID}).Build()
 	builder := offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) { return spec, nil })
 	executor := &RecoveryJobExecutor{Client: kube, Builder: builder}
 	if err := executor.Execute(t.Context(), plan); err != ErrRecoveryInProgress {
@@ -134,7 +134,21 @@ func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
 func recoveryArtifactConfigMaps(request *operatorv1alpha1.KubeOVNRecoveryRequest, digest string) (*corev1.ConfigMap, *corev1.ConfigMap) {
 	controller := true
 	owner := metav1.OwnerReference{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNRecoveryRequest", Name: request.Name, UID: request.UID, Controller: &controller}
-	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-plan", Namespace: request.Namespace, OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Immutable: new(true), Data: map[string]string{"plan.json": "{}"}}, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-proof", Namespace: request.Namespace, OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Immutable: new(true), Data: map[string]string{"proof.json": "{}"}}
+	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-plan", Namespace: request.Namespace, UID: "plan-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Immutable: new(true), Data: map[string]string{"plan.json": "{}"}}, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-proof", Namespace: request.Namespace, UID: "proof-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Immutable: new(true), Data: map[string]string{"proof.json": "{}"}}
+}
+
+func recoveryStorageObjects(spec recovery.WorkloadSpec) []client.Object {
+	volumes := append([]recovery.WorkloadVolume{{Name: "backup", Claim: spec.BackupClaim, ClaimUID: spec.BackupClaimUID, PVUID: spec.BackupPVUID}}, spec.Target)
+	volumes = append(volumes, spec.Retained...)
+	objects := make([]client.Object, 0, len(volumes)*2)
+	for _, volume := range volumes {
+		pvName := "pv-" + volume.Claim
+		objects = append(objects,
+			&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: pvName, UID: volume.PVUID}, Spec: corev1.PersistentVolumeSpec{ClaimRef: &corev1.ObjectReference{Namespace: spec.Namespace, Name: volume.Claim, UID: volume.ClaimUID}}},
+			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: volume.Claim, Namespace: spec.Namespace, UID: volume.ClaimUID}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: pvName}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}},
+		)
+	}
+	return objects
 }
 
 func TestRecoveryJobExecutorRejectsUnsafeHandoff(t *testing.T) {
@@ -159,6 +173,10 @@ func TestRecoveryJobExecutorRejectsUnsafeHandoff(t *testing.T) {
 			job.Spec.Template.Spec.Containers = append(job.Spec.Template.Spec.Containers, corev1.Container{Name: "other", Image: "other:latest"})
 			return []client.Object{job}
 		}, want: "spec differs"},
+		{name: "foreign owner", edit: func(_ *corev1.ConfigMap, job *batchv1.Job) []client.Object {
+			job.OwnerReferences = append(job.OwnerReferences, metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "foreign", UID: "foreign"})
+			return []client.Object{job}
+		}, want: "owner identity"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			request, plan, spec := recoveryJobFixture()
@@ -172,7 +190,7 @@ func TestRecoveryJobExecutorRejectsUnsafeHandoff(t *testing.T) {
 			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 			extra := tc.edit(planConfigMap, job)
 			kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).
-				WithObjects(append([]client.Object{request, planConfigMap, proof}, extra...)...).Build()
+				WithObjects(append(append([]client.Object{request, planConfigMap, proof}, recoveryStorageObjects(spec)...), extra...)...).Build()
 			executor := &RecoveryJobExecutor{Client: kube, Builder: offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) {
 				return spec, nil
 			})}
@@ -190,6 +208,54 @@ func TestRecoveryJobExecutorRejectsUnsafeHandoff(t *testing.T) {
 	}
 }
 
+func TestRecoveryJobExecutorRejectsReplacedInputIdentity(t *testing.T) {
+	request, plan, spec := recoveryJobFixture()
+	planConfigMap, proof := recoveryArtifactConfigMaps(request, plan.Digest)
+	objects := append([]client.Object{request, planConfigMap, proof}, recoveryStorageObjects(spec)...)
+	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).
+		WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{Create: assignRecoveryJobUID}).Build()
+	executor := &RecoveryJobExecutor{Client: kube, Builder: offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) { return spec, nil })}
+	if err := executor.Execute(t.Context(), plan); err != ErrRecoveryInProgress {
+		t.Fatal(err)
+	}
+	if err := kube.Delete(t.Context(), planConfigMap); err != nil {
+		t.Fatal(err)
+	}
+	replacedPlan := planConfigMap.DeepCopy()
+	replacedPlan.ResourceVersion = ""
+	replacedPlan.UID = "replacement-plan"
+	if err := kube.Create(t.Context(), replacedPlan); err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.Execute(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "must be immutable") {
+		t.Fatalf("replaced ConfigMap was accepted: %v", err)
+	}
+	if err := kube.Delete(t.Context(), replacedPlan); err != nil {
+		t.Fatal(err)
+	}
+	originalPlan := planConfigMap.DeepCopy()
+	originalPlan.ResourceVersion = ""
+	if err := kube.Create(t.Context(), originalPlan); err != nil {
+		t.Fatal(err)
+	}
+	pvc := new(corev1.PersistentVolumeClaim)
+	if err := kube.Get(t.Context(), client.ObjectKey{Namespace: spec.Namespace, Name: spec.Target.Claim}, pvc); err != nil {
+		t.Fatal(err)
+	}
+	if err := kube.Delete(t.Context(), pvc); err != nil {
+		t.Fatal(err)
+	}
+	replacedPVC := pvc.DeepCopy()
+	replacedPVC.ResourceVersion = ""
+	replacedPVC.UID = "replacement-target"
+	if err := kube.Create(t.Context(), replacedPVC); err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.Execute(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "identity or binding changed") {
+		t.Fatalf("replaced PVC was accepted: %v", err)
+	}
+}
+
 func TestRecoveryJobExecutorWaitsForTerminalJobIdentityToBePersisted(t *testing.T) {
 	request, plan, spec := recoveryJobFixture()
 	planConfigMap, proof := recoveryArtifactConfigMaps(request, plan.Digest)
@@ -201,7 +267,7 @@ func TestRecoveryJobExecutorWaitsForTerminalJobIdentityToBePersisted(t *testing.
 	request.Status.Execution = &operatorv1alpha1.RecoveryExecutionStatus{JobName: job.Name, JobUID: job.UID, JobPlanDigest: plan.Digest}
 	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
 	conflict := true
-	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).WithObjects(request, planConfigMap, proof, job).
+	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).WithObjects(append([]client.Object{request, planConfigMap, proof, job}, recoveryStorageObjects(spec)...)...).
 		WithInterceptorFuncs(interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, kube client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 			if conflict {
 				conflict = false
@@ -229,7 +295,7 @@ func recoveryJobFixture() (*operatorv1alpha1.KubeOVNRecoveryRequest, RecoveryPla
 	digest := "sha256:" + strings.Repeat("a", 64)
 	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: digest, InstallationUID: "installation-uid", RequestGeneration: request.Generation}
 	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: "installation-uid", Mode: request.Spec.Mode, Digest: digest}
-	spec := recovery.WorkloadSpec{Namespace: request.Namespace, Name: "rebuild-member-recovery", InstallationUID: string(plan.InstallationUID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: digest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", IsolationProofConfigMap: "rebuild-proof", BackupClaim: "backup", Target: recovery.WorkloadVolume{Name: "target", Claim: "target"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ReadOnly: true}}}
+	spec := recovery.WorkloadSpec{Namespace: request.Namespace, Name: "rebuild-member-recovery", InstallationUID: string(plan.InstallationUID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: digest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", PlanConfigMapUID: "plan-uid", IsolationProofConfigMap: "rebuild-proof", IsolationProofConfigMapUID: "proof-uid", BackupClaim: "backup", BackupClaimUID: "backup-uid", BackupPVUID: "backup-pv-uid", Target: recovery.WorkloadVolume{Name: "target", Claim: "target", ClaimUID: "target-uid", PVUID: "target-pv-uid"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ClaimUID: "retained-uid", PVUID: "retained-pv-uid", ReadOnly: true}}}
 	return request, plan, spec
 }
 
@@ -245,7 +311,7 @@ func TestRecoveryJobExecutorActivatesOnlyAfterPin(t *testing.T) {
 	planConfigMap, proof := recoveryArtifactConfigMaps(request, plan.Digest)
 	conflict := true
 	kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).
-		WithObjects(request, planConfigMap, proof).WithInterceptorFuncs(interceptor.Funcs{
+		WithObjects(append([]client.Object{request, planConfigMap, proof}, recoveryStorageObjects(spec)...)...).WithInterceptorFuncs(interceptor.Funcs{
 		Create: assignRecoveryJobUID,
 		SubResourceUpdate: func(ctx context.Context, kube client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 			if conflict {
