@@ -389,3 +389,45 @@ func TestRecoveryJobExecutorActivatesOnlyAfterPin(t *testing.T) {
 		t.Fatalf("retry did not resume the same Job: %v", err)
 	}
 }
+
+func TestRecoveryJobExecutorDoesNotRetryDeterministicActivationRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  func(string) error
+	}{
+		{name: "forbidden", err: func(name string) error {
+			return apierrors.NewForbidden(batchv1.Resource("jobs"), name, errors.New("admission policy denied suspended Job update"))
+		}},
+		{name: "invalid", err: func(name string) error {
+			return apierrors.NewInvalid(batchv1.SchemeGroupVersion.WithKind("Job").GroupKind(), name, nil)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, plan, spec := recoveryJobFixture()
+			planConfigMap, proof := recoveryArtifactConfigMaps(request, plan.Digest)
+			kube := fake.NewClientBuilder().WithScheme(recoveryJobTestScheme(t)).WithStatusSubresource(request).
+				WithObjects(append([]client.Object{request, planConfigMap, proof}, recoveryStorageObjects(spec)...)...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Create: assignRecoveryJobUID,
+					Update: func(ctx context.Context, kube client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						if job, ok := obj.(*batchv1.Job); ok && !recoveryJobSuspended(job) {
+							return tc.err(job.Name)
+						}
+						return kube.Update(ctx, obj, opts...)
+					},
+				}).Build()
+			executor := &RecoveryJobExecutor{Client: kube, Builder: offlineRebuildWorkloadBuilderFunc(func(context.Context, RecoveryPlan) (recovery.WorkloadSpec, error) { return spec, nil })}
+			err := executor.Execute(t.Context(), plan)
+			if err == nil || errors.Is(err, ErrRecoveryInProgress) {
+				t.Fatalf("deterministic activation rejection was treated as retryable: %v", err)
+			}
+			job := new(batchv1.Job)
+			if getErr := kube.Get(t.Context(), client.ObjectKey{Namespace: spec.Namespace, Name: spec.Name}, job); getErr != nil {
+				t.Fatal(getErr)
+			}
+			if !recoveryJobSuspended(job) {
+				t.Fatal("rejected Job was not left suspended")
+			}
+		})
+	}
+}

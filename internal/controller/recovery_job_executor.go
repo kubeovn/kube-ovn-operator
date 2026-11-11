@@ -122,9 +122,7 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 		// that changed since its spec and UID were checked.
 		current.Spec.Suspend = new(false)
 		if err := e.Client.Update(ctx, current); err != nil {
-			// A lost response may mean activation already succeeded. Read
-			// the pinned Job again instead of declaring recovery failed.
-			return fmt.Errorf("%w: activate pinned offline rebuild Job: %w", ErrRecoveryInProgress, err)
+			return recoveryJobActivationError(err)
 		}
 		return ErrRecoveryInProgress
 	}
@@ -135,6 +133,15 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 		return nil
 	}
 	return ErrRecoveryInProgress
+}
+
+func recoveryJobActivationError(err error) error {
+	if apierrors.IsForbidden(err) || apierrors.IsInvalid(err) || apierrors.IsUnauthorized(err) || apierrors.IsMethodNotSupported(err) {
+		return fmt.Errorf("activate pinned offline rebuild Job was rejected: %w", err)
+	}
+	// A lost response, conflict, throttling, or transport failure may mean
+	// activation already succeeded. Read the pinned Job again on retry.
+	return fmt.Errorf("%w: activate pinned offline rebuild Job: %w", ErrRecoveryInProgress, err)
 }
 
 func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, spec recovery.WorkloadSpec) error {
