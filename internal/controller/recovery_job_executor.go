@@ -293,15 +293,6 @@ func matchesRecoveryJobSpec(desired, current *batchv1.Job) bool {
 	return apiequality.Semantic.DeepEqual(expected, actual)
 }
 
-func hasRecoveryRequestOwner(job *batchv1.Job, expected metav1.OwnerReference) bool {
-	for _, owner := range job.OwnerReferences {
-		if owner.APIVersion == expected.APIVersion && owner.Kind == expected.Kind && owner.Name == expected.Name && owner.UID == expected.UID && owner.Controller != nil && *owner.Controller {
-			return true
-		}
-	}
-	return false
-}
-
 func recoveryJobSuspended(job *batchv1.Job) bool {
 	return job.Spec.Suspend != nil && *job.Spec.Suspend
 }
