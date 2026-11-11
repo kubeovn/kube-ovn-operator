@@ -133,7 +133,10 @@ func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
 
 func recoveryArtifactConfigMaps(request *operatorv1alpha1.KubeOVNRecoveryRequest, digest string) (*corev1.ConfigMap, *corev1.ConfigMap) {
 	owner := recoveryRequestOwner(request)
-	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-plan", Namespace: request.Namespace, UID: "plan-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Immutable: new(true), Data: map[string]string{"plan.json": "{}"}}, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-proof", Namespace: request.Namespace, UID: "proof-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: map[string]string{recovery.RebuildPlanDigestAnnotation: digest}}, Immutable: new(true), Data: map[string]string{"proof.json": "{}"}}
+	canonicalDigest := "sha256:" + strings.Repeat("c", 64)
+	annotations := map[string]string{recovery.RebuildPlanDigestAnnotation: digest, recovery.RebuildCanonicalPlanDigestAnnotation: canonicalDigest}
+	proofAnnotations := map[string]string{recovery.RebuildPlanDigestAnnotation: digest, recovery.RebuildCanonicalPlanDigestAnnotation: canonicalDigest}
+	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-plan", Namespace: request.Namespace, UID: "plan-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: annotations}, Immutable: new(true), Data: map[string]string{"plan.json": "{}"}}, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "rebuild-proof", Namespace: request.Namespace, UID: "proof-uid", OwnerReferences: []metav1.OwnerReference{owner}, Annotations: proofAnnotations}, Immutable: new(true), Data: map[string]string{"proof.json": "{}"}}
 }
 
 func recoveryStorageObjects(spec recovery.WorkloadSpec) []client.Object {
@@ -333,8 +336,12 @@ func recoveryJobFixture() (*operatorv1alpha1.KubeOVNRecoveryRequest, RecoveryPla
 	digest := "sha256:" + strings.Repeat("a", 64)
 	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: digest, InstallationUID: "installation-uid", RequestGeneration: request.Generation}
 	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: "installation-uid", Mode: request.Spec.Mode, Digest: digest}
-	spec := recovery.WorkloadSpec{Namespace: request.Namespace, Name: recovery.DeterministicRebuildJobName(digest), InstallationUID: string(plan.InstallationUID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: digest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", PlanConfigMapUID: "plan-uid", PlanConfigMapDataDigest: recovery.ConfigMapDataDigest("{}"), IsolationProofConfigMap: "rebuild-proof", IsolationProofConfigMapUID: "proof-uid", IsolationProofDataDigest: recovery.ConfigMapDataDigest("{}"), BackupClaim: "backup", BackupClaimUID: "backup-uid", BackupPVUID: "backup-pv-uid", Target: recovery.WorkloadVolume{Name: "target", Claim: "target", ClaimUID: "target-uid", PVUID: "target-pv-uid"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ClaimUID: "retained-uid", PVUID: "retained-pv-uid", ReadOnly: true}}}
+	spec := recovery.WorkloadSpec{Namespace: request.Namespace, Name: recovery.DeterministicRebuildJobName(digest), InstallationUID: string(plan.InstallationUID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: digest, CanonicalPlanDigest: "sha256:" + strings.Repeat("c", 64), MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", PlanConfigMapUID: "plan-uid", PlanConfigMapDataDigest: recovery.ConfigMapDataDigest("{}"), IsolationProofConfigMap: "rebuild-proof", IsolationProofConfigMapUID: "proof-uid", IsolationProofDataDigest: recovery.ConfigMapDataDigest("{}"), BackupClaim: "backup", BackupClaimUID: "backup-uid", BackupPVUID: "backup-pv-uid", Target: recovery.WorkloadVolume{Name: "target", Claim: "target", ClaimUID: "target-uid", PVUID: "target-pv-uid"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ClaimUID: "retained-uid", PVUID: "retained-pv-uid", ReadOnly: true}}, TargetStorage: testControllerStorageIdentity("target"), RetainedStorage: map[string]recovery.StorageIdentity{"retained": testControllerStorageIdentity("retained")}}
 	return request, plan, spec
+}
+
+func testControllerStorageIdentity(suffix string) recovery.StorageIdentity {
+	return recovery.StorageIdentity{NodeUID: "node-" + suffix, WorkloadUID: "workload-" + suffix, PodUID: "pod-" + suffix, ContainerID: "container-" + suffix, VolumeUID: "volume-" + suffix}
 }
 
 func assignRecoveryJobUID(ctx context.Context, kube client.WithWatch, obj client.Object, opts ...client.CreateOption) error {

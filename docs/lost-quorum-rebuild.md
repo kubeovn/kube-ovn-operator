@@ -169,10 +169,14 @@ execution status digest; PVC/PV binding, Bound phases, deletion state, and
 exact owner references are checked on every retry. The builder also binds the
 SHA-256 digest of the exact `plan.json` and `proof.json` bytes, so a same-name
 ConfigMap with a reused plan annotation cannot change the mounted inputs.
-The production controller is still fail-closed until a builder can derive a
-backup PVC and complete target/retained storage identities from live
-Kubernetes objects; the existing file/S3 backup path is not converted into a
-PVC by inference. The standalone native create/inspect adapter remains
+The controller admission digest and the canonical `recovery.Plan` digest are
+separate fields and annotations. The production builder input seam requires
+the canonical plan JSON bytes, both artifact UIDs and content digests, and the
+complete backup, target, and retained PVC/PV plus live storage ownership
+identities; it rejects content or identity drift before rendering a Job. The
+production controller is still fail-closed until a live resolver can provide
+that complete snapshot. The existing file/S3 backup path is not converted
+into a PVC by inference. The standalone native create/inspect adapter remains
 available to callers that provide the required execution boundary.
 
 `IsolationProof` is audit metadata, not an isolation capability. It binds the

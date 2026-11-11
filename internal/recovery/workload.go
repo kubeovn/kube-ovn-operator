@@ -17,16 +17,17 @@ import (
 )
 
 const (
-	RebuildWorkloadLabel          = "operator.kubeovn.io/recovery-workload"
-	RebuildPlanDigestAnnotation   = "operator.kubeovn.io/recovery-plan-digest"
-	RebuildOperationAnnotation    = "operator.kubeovn.io/recovery-operation-id"
-	RebuildInstallationAnnotation = "operator.kubeovn.io/recovery-installation-uid"
-	rebuildTargetRoot             = "/var/lib/ovn-rebuild-target"
-	rebuildRetainedRoot           = "/var/lib/ovn-rebuild-retained"
-	rebuildBackupRoot             = "/var/lib/ovn-backups"
-	rebuildPlanRoot               = "/var/lib/ovn-rebuild-plan"
-	rebuildProofRoot              = "/var/lib/ovn-rebuild-proof"
-	rebuildProcRoot               = "/host/proc"
+	RebuildWorkloadLabel                 = "operator.kubeovn.io/recovery-workload"
+	RebuildPlanDigestAnnotation          = "operator.kubeovn.io/recovery-plan-digest"
+	RebuildCanonicalPlanDigestAnnotation = "operator.kubeovn.io/recovery-canonical-plan-digest"
+	RebuildOperationAnnotation           = "operator.kubeovn.io/recovery-operation-id"
+	RebuildInstallationAnnotation        = "operator.kubeovn.io/recovery-installation-uid"
+	rebuildTargetRoot                    = "/var/lib/ovn-rebuild-target"
+	rebuildRetainedRoot                  = "/var/lib/ovn-rebuild-retained"
+	rebuildBackupRoot                    = "/var/lib/ovn-backups"
+	rebuildPlanRoot                      = "/var/lib/ovn-rebuild-plan"
+	rebuildProofRoot                     = "/var/lib/ovn-rebuild-proof"
+	rebuildProcRoot                      = "/host/proc"
 )
 
 // WorkloadVolume binds a named PVC to the rebuild Job. Retained volumes are
@@ -44,11 +45,14 @@ type WorkloadVolume struct {
 // It deliberately contains references and digests only. Backup bytes,
 // credentials and approval material never enter the Job manifest.
 type WorkloadSpec struct {
-	Namespace                  string
-	Name                       string
-	InstallationUID            string
-	OperationID                string
+	Namespace       string
+	Name            string
+	InstallationUID string
+	OperationID     string
+	// PlanDigest is the controller admission digest. CanonicalPlanDigest binds
+	// the exact recovery.Plan consumed by the privileged workload.
 	PlanDigest                 string
+	CanonicalPlanDigest        string
 	MemberName                 string
 	NodeName                   string
 	Image                      string
@@ -64,6 +68,8 @@ type WorkloadSpec struct {
 	BackupPVUID                types.UID
 	Target                     WorkloadVolume
 	Retained                   []WorkloadVolume
+	TargetStorage              StorageIdentity
+	RetainedStorage            map[string]StorageIdentity
 	Helper                     string
 }
 
@@ -112,6 +118,7 @@ func (s WorkloadSpec) Validate() error {
 	for field, value := range map[string]string{
 		"plan ConfigMap data digest":  s.PlanConfigMapDataDigest,
 		"isolation proof data digest": s.IsolationProofDataDigest,
+		"canonical plan digest":       s.CanonicalPlanDigest,
 	} {
 		if !validSHA256(value) {
 			return fmt.Errorf("offline rebuild workload %s must be a SHA-256 value", field)
@@ -144,6 +151,9 @@ func (s WorkloadSpec) Validate() error {
 	if s.Target.Name == "" || s.Target.Name != "target" || s.Target.ReadOnly {
 		return errors.New("offline rebuild target volume must be named target and writable")
 	}
+	if err := s.TargetStorage.Validate(); err != nil {
+		return fmt.Errorf("offline rebuild target storage identity: %w", err)
+	}
 	if s.BackupClaim == s.Target.Claim {
 		return errors.New("offline rebuild backup and target PVCs must be distinct")
 	}
@@ -168,6 +178,16 @@ func (s WorkloadSpec) Validate() error {
 			return fmt.Errorf("offline rebuild PVC %q is mounted more than once", volume.Claim)
 		}
 		seen[volume.Claim] = struct{}{}
+		storage, ok := s.RetainedStorage[volume.Name]
+		if !ok {
+			return fmt.Errorf("offline rebuild retained storage identity %q is missing", volume.Name)
+		}
+		if err := storage.Validate(); err != nil {
+			return fmt.Errorf("offline rebuild retained storage identity %q: %w", volume.Name, err)
+		}
+	}
+	if len(s.RetainedStorage) != len(s.Retained) {
+		return errors.New("offline rebuild retained storage identities do not match retained volumes")
 	}
 	if s.Helper == "" {
 		s.Helper = "/recovery-native"
@@ -192,7 +212,7 @@ func (s WorkloadSpec) Job(owner *metav1.OwnerReference) (*batchv1.Job, error) {
 		s.Helper = "/recovery-native"
 	}
 	labels := map[string]string{RebuildWorkloadLabel: "true", "operator.kubeovn.io/recovery-member": s.MemberName}
-	annotations := map[string]string{RebuildPlanDigestAnnotation: s.PlanDigest, RebuildOperationAnnotation: s.OperationID, RebuildInstallationAnnotation: s.InstallationUID}
+	annotations := map[string]string{RebuildPlanDigestAnnotation: s.PlanDigest, RebuildCanonicalPlanDigestAnnotation: s.CanonicalPlanDigest, RebuildOperationAnnotation: s.OperationID, RebuildInstallationAnnotation: s.InstallationUID}
 	procType := corev1.HostPathDirectory
 	volumes := []corev1.Volume{
 		{Name: "target", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: s.Target.Claim}}},
