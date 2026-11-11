@@ -157,10 +157,13 @@ adapter or write a completion receipt. A real provider must enforce isolation
 for every retained process and verify live target storage ownership before this
 entry point can be enabled. The controller now has a restart-safe
 `RecoveryJobExecutor` handoff boundary. When an explicitly injected workload
-builder can provide every immutable identity, it creates exactly one Job and
-records its name, UID and plan digest on
-`KubeOVNRecoveryRequest.status.execution`. Subsequent reconciles observe that
-exact Job and reject deletion/recreation, metadata drift, or a changed plan.
+builder can provide every immutable identity, it creates a suspended Job,
+validates the API response, and records its name, UID and plan digest on
+`KubeOVNRecoveryRequest.status.execution` before activating it. A status conflict
+leaves the Job suspended so the controller can retry the identity write. A
+missing or renamed pinned Job is rejected before creation. The executor rejects
+mutable or deleting input ConfigMaps and a Job whose spec differs from the
+builder output after accounting for API server defaults.
 The production controller is still fail-closed until a builder can derive a
 backup PVC and complete target/retained storage identities from live
 Kubernetes objects; the existing file/S3 backup path is not converted into a
