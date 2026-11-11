@@ -160,6 +160,10 @@ func TestRecoveryJobExecutorRejectsUnsafeHandoff(t *testing.T) {
 			plan.Immutable = new(false)
 			return nil
 		}, want: "must be immutable"},
+		{name: "wrong plan content", edit: func(plan *corev1.ConfigMap, _ *batchv1.Job) []client.Object {
+			plan.Data["plan.json"] = `{"wrong":true}`
+			return nil
+		}, want: "not bound to plan"},
 		{name: "foreign ConfigMap owner", edit: func(plan *corev1.ConfigMap, _ *batchv1.Job) []client.Object {
 			plan.OwnerReferences = append(plan.OwnerReferences, metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "foreign", UID: "foreign"})
 			return nil
@@ -329,7 +333,7 @@ func recoveryJobFixture() (*operatorv1alpha1.KubeOVNRecoveryRequest, RecoveryPla
 	digest := "sha256:" + strings.Repeat("a", 64)
 	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: digest, InstallationUID: "installation-uid", RequestGeneration: request.Generation}
 	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: "installation-uid", Mode: request.Spec.Mode, Digest: digest}
-	spec := recovery.WorkloadSpec{Namespace: request.Namespace, Name: recovery.DeterministicRebuildJobName(digest), InstallationUID: string(plan.InstallationUID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: digest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", PlanConfigMapUID: "plan-uid", IsolationProofConfigMap: "rebuild-proof", IsolationProofConfigMapUID: "proof-uid", BackupClaim: "backup", BackupClaimUID: "backup-uid", BackupPVUID: "backup-pv-uid", Target: recovery.WorkloadVolume{Name: "target", Claim: "target", ClaimUID: "target-uid", PVUID: "target-pv-uid"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ClaimUID: "retained-uid", PVUID: "retained-pv-uid", ReadOnly: true}}}
+	spec := recovery.WorkloadSpec{Namespace: request.Namespace, Name: recovery.DeterministicRebuildJobName(digest), InstallationUID: string(plan.InstallationUID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: digest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", PlanConfigMapUID: "plan-uid", PlanConfigMapDataDigest: recovery.ConfigMapDataDigest("{}"), IsolationProofConfigMap: "rebuild-proof", IsolationProofConfigMapUID: "proof-uid", IsolationProofDataDigest: recovery.ConfigMapDataDigest("{}"), BackupClaim: "backup", BackupClaimUID: "backup-uid", BackupPVUID: "backup-pv-uid", Target: recovery.WorkloadVolume{Name: "target", Claim: "target", ClaimUID: "target-uid", PVUID: "target-pv-uid"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ClaimUID: "retained-uid", PVUID: "retained-pv-uid", ReadOnly: true}}}
 	return request, plan, spec
 }
 

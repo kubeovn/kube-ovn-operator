@@ -1,6 +1,8 @@
 package recovery
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -53,8 +55,10 @@ type WorkloadSpec struct {
 	ServiceAccountName         string
 	PlanConfigMapName          string
 	PlanConfigMapUID           types.UID
+	PlanConfigMapDataDigest    string
 	IsolationProofConfigMap    string
 	IsolationProofConfigMapUID types.UID
+	IsolationProofDataDigest   string
 	BackupClaim                string
 	BackupClaimUID             types.UID
 	BackupPVUID                types.UID
@@ -73,6 +77,13 @@ func DeterministicRebuildJobName(planDigest string) string {
 		return ""
 	}
 	return "rebuild-" + digest[:32]
+}
+
+// ConfigMapDataDigest returns the SHA-256 digest that a builder must bind to
+// the exact JSON bytes mounted into the rebuild Job.
+func ConfigMapDataDigest(value string) string {
+	hash := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(hash[:])
 }
 
 // Validate checks the privileged workload boundary before a Job is created.
@@ -96,6 +107,14 @@ func (s WorkloadSpec) Validate() error {
 	} {
 		if value == "" {
 			return fmt.Errorf("offline rebuild workload requires %s", field)
+		}
+	}
+	for field, value := range map[string]string{
+		"plan ConfigMap data digest":  s.PlanConfigMapDataDigest,
+		"isolation proof data digest": s.IsolationProofDataDigest,
+	} {
+		if !validSHA256(value) {
+			return fmt.Errorf("offline rebuild workload %s must be a SHA-256 value", field)
 		}
 	}
 	for field, value := range map[string]string{

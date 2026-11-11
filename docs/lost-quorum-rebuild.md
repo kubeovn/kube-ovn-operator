@@ -166,7 +166,9 @@ mutable or deleting input ConfigMaps and a Job whose spec differs from the
 builder output after accounting for API server defaults. Each ConfigMap UID and
 every backup, target, and retained PVC/PV identity is also pinned in the
 execution status digest; PVC/PV binding, Bound phases, deletion state, and
-exact owner references are checked on every retry.
+exact owner references are checked on every retry. The builder also binds the
+SHA-256 digest of the exact `plan.json` and `proof.json` bytes, so a same-name
+ConfigMap with a reused plan annotation cannot change the mounted inputs.
 The production controller is still fail-closed until a builder can derive a
 backup PVC and complete target/retained storage identities from live
 Kubernetes objects; the existing file/S3 backup path is not converted into a
