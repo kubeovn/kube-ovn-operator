@@ -11,11 +11,15 @@ import (
 func rebuildWorkloadFixture() WorkloadSpec {
 	return WorkloadSpec{
 		Namespace: "ovn-system", Name: DeterministicRebuildJobName("sha256:" + strings.Repeat("a", 64)), InstallationUID: "installation-uid",
-		OperationID: "11111111-1111-1111-1111-111111111111", PlanDigest: "sha256:" + strings.Repeat("a", 64), MemberName: "member-new", NodeName: "node-new",
+		OperationID: "11111111-1111-1111-1111-111111111111", PlanDigest: "sha256:" + strings.Repeat("a", 64), CanonicalPlanDigest: "sha256:" + strings.Repeat("c", 64), MemberName: "member-new", NodeName: "node-new",
 		Image: "ghcr.io/kubeovn/kube-ovn-operator@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "rebuild-agent",
 		PlanConfigMapName: "rebuild-plan", PlanConfigMapUID: "plan-uid", PlanConfigMapDataDigest: ConfigMapDataDigest("{}"), IsolationProofConfigMap: "rebuild-proof", IsolationProofConfigMapUID: "proof-uid", IsolationProofDataDigest: ConfigMapDataDigest("{}"), BackupClaim: "ovn-backups", BackupClaimUID: "backup-uid", BackupPVUID: "backup-pv-uid",
-		Target: WorkloadVolume{Name: "target", Claim: "ovn-target", ClaimUID: "target-uid", PVUID: "target-pv-uid"}, Retained: []WorkloadVolume{{Name: "member-old", Claim: "ovn-old", ClaimUID: "retained-uid", PVUID: "retained-pv-uid", ReadOnly: true}},
+		Target: WorkloadVolume{Name: "target", Claim: "ovn-target", ClaimUID: "target-uid", PVUID: "target-pv-uid"}, Retained: []WorkloadVolume{{Name: "member-old", Claim: "ovn-old", ClaimUID: "retained-uid", PVUID: "retained-pv-uid", ReadOnly: true}}, TargetStorage: testStorageIdentity("target"), RetainedStorage: map[string]StorageIdentity{"member-old": testStorageIdentity("retained")},
 	}
+}
+
+func testStorageIdentity(suffix string) StorageIdentity {
+	return StorageIdentity{NodeUID: "node-" + suffix, WorkloadUID: "workload-" + suffix, PodUID: "pod-" + suffix, ContainerID: "container-" + suffix, VolumeUID: "volume-" + suffix}
 }
 
 func TestWorkloadRendersDedicatedPrivilegedJob(t *testing.T) {
@@ -45,7 +49,7 @@ func TestWorkloadRendersDedicatedPrivilegedJob(t *testing.T) {
 	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 || job.Spec.ActiveDeadlineSeconds == nil {
 		t.Fatalf("rebuild job is retryable or unbounded: %+v", job.Spec)
 	}
-	if job.Annotations[RebuildPlanDigestAnnotation] != spec.PlanDigest || len(job.OwnerReferences) != 1 {
+	if job.Annotations[RebuildPlanDigestAnnotation] != spec.PlanDigest || job.Annotations[RebuildCanonicalPlanDigestAnnotation] != spec.CanonicalPlanDigest || len(job.OwnerReferences) != 1 {
 		t.Fatalf("job lost immutable identity: %+v", job.ObjectMeta)
 	}
 }

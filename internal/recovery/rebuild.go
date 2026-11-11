@@ -31,6 +31,11 @@ type StorageIdentity struct {
 	VolumeUID   string `json:"volumeUID"`
 }
 
+// Validate checks that all immutable ownership components are present.
+func (s StorageIdentity) Validate() error {
+	return validateStorage(s)
+}
+
 type Member struct {
 	Name                  string          `json:"name"`
 	NodeName              string          `json:"nodeName"`
@@ -112,6 +117,20 @@ func (p Plan) Canonical() (Plan, string, error) {
 		return Plan{}, "", fmt.Errorf("marshal offline recovery plan: %w", err)
 	}
 	return p, fmt.Sprintf("sha256:%x", sha256.Sum256(data)), nil
+}
+
+// CanonicalDataDigest returns the digest of the exact canonical JSON bytes
+// that a plan ConfigMap must mount into the rebuild workload.
+func (p Plan) CanonicalDataDigest() (string, error) {
+	canonical, _, err := p.Canonical()
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("marshal canonical offline recovery plan: %w", err)
+	}
+	return ConfigMapDataDigest(string(data)), nil
 }
 
 func validateApproval(approval Approval) error {

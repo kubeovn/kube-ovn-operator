@@ -148,11 +148,12 @@ func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, re
 	for name, artifact := range map[string]struct {
 		key        string
 		annotation string
+		canonical  string
 		uid        types.UID
 		dataDigest string
 	}{
-		spec.PlanConfigMapName:       {key: "plan.json", annotation: recovery.RebuildPlanDigestAnnotation, uid: spec.PlanConfigMapUID, dataDigest: spec.PlanConfigMapDataDigest},
-		spec.IsolationProofConfigMap: {key: "proof.json", annotation: recovery.RebuildPlanDigestAnnotation, uid: spec.IsolationProofConfigMapUID, dataDigest: spec.IsolationProofDataDigest},
+		spec.PlanConfigMapName:       {key: "plan.json", annotation: recovery.RebuildPlanDigestAnnotation, canonical: recovery.RebuildCanonicalPlanDigestAnnotation, uid: spec.PlanConfigMapUID, dataDigest: spec.PlanConfigMapDataDigest},
+		spec.IsolationProofConfigMap: {key: "proof.json", annotation: recovery.RebuildPlanDigestAnnotation, canonical: recovery.RebuildCanonicalPlanDigestAnnotation, uid: spec.IsolationProofConfigMapUID, dataDigest: spec.IsolationProofDataDigest},
 	} {
 		configMap := new(corev1.ConfigMap)
 		if err := e.Client.Get(ctx, client.ObjectKey{Namespace: spec.Namespace, Name: name}, configMap); err != nil {
@@ -164,7 +165,7 @@ func (e *RecoveryJobExecutor) validateRecoveryConfigMaps(ctx context.Context, re
 		if configMap.DeletionTimestamp != nil || configMap.UID != artifact.uid || configMap.Immutable == nil || !*configMap.Immutable {
 			return fmt.Errorf("offline rebuild ConfigMap %q must be immutable and not deleting", name)
 		}
-		if configMap.Annotations[artifact.annotation] != spec.PlanDigest || strings.TrimSpace(configMap.Data[artifact.key]) == "" || recovery.ConfigMapDataDigest(configMap.Data[artifact.key]) != artifact.dataDigest {
+		if configMap.Annotations[artifact.annotation] != spec.PlanDigest || configMap.Annotations[artifact.canonical] != spec.CanonicalPlanDigest || strings.TrimSpace(configMap.Data[artifact.key]) == "" || recovery.ConfigMapDataDigest(configMap.Data[artifact.key]) != artifact.dataDigest {
 			return fmt.Errorf("offline rebuild ConfigMap %q is not bound to plan %s", name, spec.PlanDigest)
 		}
 		if !hasRecoveryRequestOwnerConfigMap(configMap, request) {
@@ -343,15 +344,18 @@ func recoveryWorkloadInputIdentityDigest(spec recovery.WorkloadSpec) string {
 	identities := []string{
 		"configmap/plan=" + string(spec.PlanConfigMapUID),
 		"configmap/plan-data=" + spec.PlanConfigMapDataDigest,
+		"configmap/canonical-plan=" + spec.CanonicalPlanDigest,
 		"configmap/proof=" + string(spec.IsolationProofConfigMapUID),
 		"configmap/proof-data=" + spec.IsolationProofDataDigest,
 		"pvc/backup=" + string(spec.BackupClaimUID),
 		"pv/backup=" + string(spec.BackupPVUID),
 		"pvc/target=" + string(spec.Target.ClaimUID),
 		"pv/target=" + string(spec.Target.PVUID),
+		"storage/target=" + fmt.Sprintf("%+v", spec.TargetStorage),
 	}
 	for _, volume := range spec.Retained {
 		identities = append(identities, "pvc/retained/"+volume.Name+"="+string(volume.ClaimUID), "pv/retained/"+volume.Name+"="+string(volume.PVUID))
+		identities = append(identities, "storage/retained/"+volume.Name+"="+fmt.Sprintf("%+v", spec.RetainedStorage[volume.Name]))
 	}
 	sort.Strings(identities)
 	hash := sha256.Sum256([]byte(strings.Join(identities, "\n")))
