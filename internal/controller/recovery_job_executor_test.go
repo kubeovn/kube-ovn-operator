@@ -44,7 +44,7 @@ func TestRecoveryJobExecutorTreatsMissingArtifactsAsNotReady(t *testing.T) {
 		t.Fatalf("missing recovery artifact was not retryable: %v", err)
 	}
 	job := new(batchv1.Job)
-	if err := kube.Get(t.Context(), client.ObjectKey{Namespace: request.Namespace, Name: "rebuild-member-recovery"}, job); err == nil {
+	if err := kube.Get(t.Context(), client.ObjectKey{Namespace: request.Namespace, Name: spec.Name}, job); err == nil {
 		t.Fatal("executor created a Job before recovery artifacts were ready")
 	}
 }
@@ -59,7 +59,7 @@ func TestRecoveryJobExecutorCreatesAndObservesOnePinnedJob(t *testing.T) {
 		t.Fatalf("new Job did not remain in progress: %v", err)
 	}
 	job := new(batchv1.Job)
-	jobKey := client.ObjectKey{Namespace: request.Namespace, Name: "rebuild-member-recovery"}
+	jobKey := client.ObjectKey{Namespace: request.Namespace, Name: spec.Name}
 	if err := kube.Get(t.Context(), jobKey, job); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := new(batchv1.Job)
-	if err := kube.Get(t.Context(), client.ObjectKey{Namespace: request.Namespace, Name: "rebuild-member-recovery"}, job); err != nil {
+	if err := kube.Get(t.Context(), client.ObjectKey{Namespace: request.Namespace, Name: spec.Name}, job); err != nil {
 		t.Fatal(err)
 	}
 	if err := executor.Execute(t.Context(), plan); err != ErrRecoveryInProgress {
@@ -104,7 +104,7 @@ func TestRecoveryJobExecutorRejectsRecreatedJob(t *testing.T) {
 		spec.Name += "-new"
 		return spec, err
 	})
-	if err := executor.Execute(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "name changed") {
+	if err := executor.Execute(t.Context(), plan); err == nil || !strings.Contains(err.Error(), "derived from the plan digest") {
 		t.Fatalf("changed Job name was not rejected: %v", err)
 	}
 	if err := kube.Get(t.Context(), client.ObjectKey{Namespace: job.Namespace, Name: job.Name + "-new"}, new(batchv1.Job)); !apierrors.IsNotFound(err) {
@@ -329,7 +329,7 @@ func recoveryJobFixture() (*operatorv1alpha1.KubeOVNRecoveryRequest, RecoveryPla
 	digest := "sha256:" + strings.Repeat("a", 64)
 	request.Status.Plan = &operatorv1alpha1.RecoveryPlanStatus{Digest: digest, InstallationUID: "installation-uid", RequestGeneration: request.Generation}
 	plan := RecoveryPlan{RequestNamespace: request.Namespace, RequestName: request.Name, RequestUID: request.UID, RequestGeneration: request.Generation, InstallationUID: "installation-uid", Mode: request.Spec.Mode, Digest: digest}
-	spec := recovery.WorkloadSpec{Namespace: request.Namespace, Name: "rebuild-member-recovery", InstallationUID: string(plan.InstallationUID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: digest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", PlanConfigMapUID: "plan-uid", IsolationProofConfigMap: "rebuild-proof", IsolationProofConfigMapUID: "proof-uid", BackupClaim: "backup", BackupClaimUID: "backup-uid", BackupPVUID: "backup-pv-uid", Target: recovery.WorkloadVolume{Name: "target", Claim: "target", ClaimUID: "target-uid", PVUID: "target-pv-uid"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ClaimUID: "retained-uid", PVUID: "retained-pv-uid", ReadOnly: true}}}
+	spec := recovery.WorkloadSpec{Namespace: request.Namespace, Name: recovery.DeterministicRebuildJobName(digest), InstallationUID: string(plan.InstallationUID), OperationID: "123e4567-e89b-12d3-a456-426614174000", PlanDigest: digest, MemberName: "member-recovery", NodeName: "node-recovery", Image: "example/central@sha256:" + strings.Repeat("b", 64), ServiceAccountName: "recovery", PlanConfigMapName: "rebuild-plan", PlanConfigMapUID: "plan-uid", IsolationProofConfigMap: "rebuild-proof", IsolationProofConfigMapUID: "proof-uid", BackupClaim: "backup", BackupClaimUID: "backup-uid", BackupPVUID: "backup-pv-uid", Target: recovery.WorkloadVolume{Name: "target", Claim: "target", ClaimUID: "target-uid", PVUID: "target-pv-uid"}, Retained: []recovery.WorkloadVolume{{Name: "retained", Claim: "retained", ClaimUID: "retained-uid", PVUID: "retained-pv-uid", ReadOnly: true}}}
 	return request, plan, spec
 }
 
