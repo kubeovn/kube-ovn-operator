@@ -42,6 +42,35 @@ type OfflineRebuildWorkloadInputs struct {
 	RetainedStorage map[string]recovery.StorageIdentity
 }
 
+// OfflineRebuildWorkloadInputResolver resolves the live Kubernetes snapshot
+// required by a rebuild. Implementations must return ErrRecoveryWorkloadNotReady
+// when an artifact is not ready and must never synthesize missing identities.
+type OfflineRebuildWorkloadInputResolver interface {
+	Resolve(context.Context, RecoveryPlan) (OfflineRebuildWorkloadInputs, error)
+}
+
+// ResolvingOfflineRebuildWorkloadBuilder adapts a live input resolver to the
+// validated static builder. It is a seam for a future Kubernetes resolver and
+// is intentionally not installed into the default controller.
+type ResolvingOfflineRebuildWorkloadBuilder struct {
+	Resolver OfflineRebuildWorkloadInputResolver
+}
+
+func (b *ResolvingOfflineRebuildWorkloadBuilder) Build(ctx context.Context, plan RecoveryPlan) (recovery.WorkloadSpec, error) {
+	if b == nil || b.Resolver == nil {
+		return recovery.WorkloadSpec{}, errors.New("offline rebuild workload input resolver is not configured")
+	}
+	inputs, err := b.Resolver.Resolve(ctx, plan)
+	if err != nil {
+		return recovery.WorkloadSpec{}, err
+	}
+	static, err := NewStaticOfflineRebuildWorkloadBuilder(inputs)
+	if err != nil {
+		return recovery.WorkloadSpec{}, fmt.Errorf("validate resolved offline rebuild workload inputs: %w", err)
+	}
+	return static.Build(ctx, plan)
+}
+
 // StaticOfflineRebuildWorkloadBuilder validates a complete production input
 // snapshot and renders it into the executor's immutable WorkloadSpec. It is
 // intentionally not installed into the default controller: resolving the
@@ -187,3 +216,4 @@ func validRecoverySHA256(value string) bool {
 }
 
 var _ OfflineRebuildWorkloadBuilder = (*StaticOfflineRebuildWorkloadBuilder)(nil)
+var _ OfflineRebuildWorkloadBuilder = (*ResolvingOfflineRebuildWorkloadBuilder)(nil)

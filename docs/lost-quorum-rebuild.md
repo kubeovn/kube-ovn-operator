@@ -179,6 +179,11 @@ that complete snapshot. The existing file/S3 backup path is not converted
 into a PVC by inference. The standalone native create/inspect adapter remains
 available to callers that provide the required execution boundary.
 
+`ResolvingOfflineRebuildWorkloadBuilder` is the explicit adapter seam for that
+future live resolver. It propagates readiness and cancellation errors, runs
+every resolved snapshot through the static identity and content validation,
+and is not installed into the default controller.
+
 `IsolationProof` is audit metadata, not an isolation capability. It binds the
 canonical plan digest, operation ID and complete retained member set. Validation
 accepts timestamps at most five minutes old, with at most one minute of future
