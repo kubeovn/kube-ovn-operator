@@ -13,9 +13,11 @@ cleanup() {
     kill "${server_pid}" 2>/dev/null || true
     wait "${server_pid}" 2>/dev/null || true
   fi
+  kubectl apply -f config/samples/operator_v1alpha1_kubeovninstallation.yaml >/dev/null 2>&1 || true
   rm -rf "${test_dir}"
 }
 trap cleanup EXIT
+kubectl delete kubeovninstallation kube-ovn -n kube-ovn-operator-system --ignore-not-found >/dev/null 2>&1 || true
 helm package test/e2e/chart --destination "${test_dir}" >/dev/null
 archive="${test_dir}/kube-ovn-1.17.0.tgz"
 digest="sha256:$(sha256sum "${archive}" | cut -d ' ' -f1)"
@@ -85,7 +87,11 @@ if ! kubectl wait -n kube-ovn-operator-system koi/runtime-smoke --for=condition=
   exit 1
 fi
 kubectl get koi/runtime-smoke -n kube-ovn-operator-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' | grep -qx VerificationPending
-kubectl get koi/runtime-smoke -n kube-ovn-operator-system -o jsonpath='{.status.observedVersion}' | grep -qx v1.17.0
+# The synthetic chart has no OVS DaemonSet, so runtime verification must fail
+# closed. Workload readiness alone must not publish an observed version.
+observed_version=$(kubectl get koi/runtime-smoke -n kube-ovn-operator-system -o jsonpath='{.status.observedVersion}')
+[[ -z "${observed_version}" ]]
+kubectl get koi/runtime-smoke -n kube-ovn-operator-system -o jsonpath='{.status.conditions[?(@.type=="DataPlaneReady")].reason}' | grep -qx DataPlaneUnhealthy
 kubectl get deployment/runtime-smoke -n kube-ovn-operator-system -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' | grep -qx kube-ovn-operator
 kubectl patch koi/runtime-smoke -n kube-ovn-operator-system --type=merge -p '{"spec":{"upgrade":{"allowRollback":true}}}'
 kubectl wait -n kube-ovn-operator-system koi/runtime-smoke --for=condition=Degraded --timeout=90s
