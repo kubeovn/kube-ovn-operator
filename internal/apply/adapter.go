@@ -352,13 +352,15 @@ func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, obj
 			return nil, err
 		}
 		labels := copy.GetLabels()
-		if labels == nil {
-			labels = make(map[string]string)
+		if !sharedClusterResource(copy) {
+			if labels == nil {
+				labels = make(map[string]string)
+			}
+			for label, value := range identity.labels() {
+				labels[label] = value
+			}
+			copy.SetLabels(labels)
 		}
-		for label, value := range identity.labels() {
-			labels[label] = value
-		}
-		copy.SetLabels(labels)
 		if namespaced && !retainResource(copy) {
 			copy.SetOwnerReferences([]metav1.OwnerReference{{
 				APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation",
@@ -579,6 +581,15 @@ func (i InstallationIdentity) labels() map[string]string {
 }
 
 func checkOwnership(object *unstructured.Unstructured, identity InstallationIdentity, existing, namespaced bool) error {
+	if sharedClusterResource(object) {
+		// CRDs are cluster capabilities shared by all installations. They have
+		// no installation owner or identity labels; compatibility is enforced by
+		// the pinned manifest and the upgrade readiness gate.
+		if len(object.GetOwnerReferences()) != 0 {
+			return ownershipConflict(object, "shared cluster resource has an owner reference")
+		}
+		return nil
+	}
 	labels := object.GetLabels()
 	for label, expected := range identity.labels() {
 		actual, present := labels[label]
@@ -600,6 +611,10 @@ func checkOwnership(object *unstructured.Unstructured, identity InstallationIden
 		return ownershipConflict(object, "multiple owner references are not supported")
 	}
 	return nil
+}
+
+func sharedClusterResource(object *unstructured.Unstructured) bool {
+	return object != nil && object.GroupVersionKind().Group == "apiextensions.k8s.io" && object.GetKind() == "CustomResourceDefinition"
 }
 
 func objectKey(object *unstructured.Unstructured) string {

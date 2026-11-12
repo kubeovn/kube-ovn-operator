@@ -16,7 +16,11 @@ import (
 	"github.com/kubeovn/kube-ovn-operator/internal/health"
 	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
 	"github.com/kubeovn/kube-ovn-operator/internal/topology"
+	"github.com/kubeovn/kube-ovn-operator/internal/upgrade"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -162,7 +166,7 @@ func (e *KubernetesRollbackExecutor) Step(ctx context.Context, plan RollbackPlan
 	if err != nil {
 		return phase, err
 	}
-	binding := lifecycle.BackupBinding{Destination: strings.TrimSpace(plan.Destination), Version: plan.TargetVersion, TopologyDigest: plan.TopologyDigest}
+	binding := lifecycle.BackupBinding{Destination: strings.TrimSpace(plan.Destination), Version: rollbackBackupVersion(plan), TopologyDigest: plan.TopologyDigest}
 	switch phase {
 	case operatorv1alpha1.RollbackPhaseQuiescing:
 		quiescer, ok := workload.(apply.RollbackClient)
@@ -186,7 +190,7 @@ func (e *KubernetesRollbackExecutor) Step(ctx context.Context, plan RollbackPlan
 		}
 		return operatorv1alpha1.RollbackPhaseWorkloads, nil
 	case operatorv1alpha1.RollbackPhaseWorkloads:
-		if err := workload.Apply(ctx, rendered.Objects); err != nil {
+		if err := e.applyRollbackObjects(ctx, workload, rendered.Objects); err != nil {
 			return phase, fmt.Errorf("apply rollback target workloads: %w", err)
 		}
 		quiescer, ok := workload.(apply.RollbackClient)
@@ -262,6 +266,65 @@ func (e *KubernetesRollbackExecutor) Step(ctx context.Context, plan RollbackPlan
 	default:
 		return phase, fmt.Errorf("unsupported rollback phase %q", phase)
 	}
+}
+
+// applyRollbackObjects keeps CRD discovery and conversion ahead of the
+// workload apply. A rollback can target a chart with a changed CRD schema;
+// applying a Deployment or StatefulSet before the API server establishes the
+// target CRD can leave the restore half-applied and is not restart-safe.
+func (e *KubernetesRollbackExecutor) applyRollbackObjects(ctx context.Context, workload apply.ApplyClient, objects []*unstructured.Unstructured) error {
+	set, err := upgrade.Partition(objects)
+	if err != nil {
+		return err
+	}
+	if len(set.CRDs) != 0 {
+		if err := workload.Apply(ctx, set.CRDs); err != nil {
+			return err
+		}
+		ready, err := e.rollbackCRDsReady(ctx, set.CRDs)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return ErrRollbackInProgress
+		}
+	}
+	if len(set.Central) != 0 {
+		if err := workload.Apply(ctx, set.Central); err != nil {
+			return err
+		}
+	}
+	if len(set.DataPlane) != 0 {
+		if err := workload.Apply(ctx, set.DataPlane); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *KubernetesRollbackExecutor) rollbackCRDsReady(ctx context.Context, objects []*unstructured.Unstructured) (bool, error) {
+	for _, object := range objects {
+		crd := new(apiextensionsv1.CustomResourceDefinition)
+		if err := e.Client.Get(ctx, client.ObjectKey{Name: object.GetName()}, crd); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("read rollback CRD %q readiness: %w", object.GetName(), err)
+		}
+		established, accepted := false, false
+		for _, condition := range crd.Status.Conditions {
+			switch condition.Type {
+			case apiextensionsv1.Established:
+				established = condition.Status == apiextensionsv1.ConditionTrue
+			case apiextensionsv1.NamesAccepted:
+				accepted = condition.Status == apiextensionsv1.ConditionTrue
+			}
+		}
+		if !established || !accepted {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // rollbackOperationToken returns a stable, content-addressed token for the
@@ -359,8 +422,9 @@ func rollbackBackupStatus(installation *operatorv1alpha1.KubeOVNInstallation, pl
 	if installation == nil {
 		return nil, errors.New("rollback backup requires an installation")
 	}
+	expectedVersion := rollbackBackupVersion(plan)
 	if backup := installation.Status.LastBackup; backup != nil && backup.ID == plan.BackupID {
-		if !backupPairIDMatches(backup) || backup.Version != plan.TargetVersion || strings.TrimSpace(backup.Destination) != strings.TrimSpace(plan.Destination) || backup.TopologyDigest != plan.TopologyDigest || backup.CompletedAt.IsZero() || !maps.Equal(backup.DatabaseRefs, plan.DatabaseRefs) {
+		if !backupPairIDMatches(backup) || backup.Version != expectedVersion || strings.TrimSpace(backup.Destination) != strings.TrimSpace(plan.Destination) || backup.TopologyDigest != plan.TopologyDigest || backup.CompletedAt.IsZero() || !maps.Equal(backup.DatabaseRefs, plan.DatabaseRefs) {
 			return nil, errors.New("rollback backup status is not bound to the admitted target version, topology and database references")
 		}
 		copy := new(operatorv1alpha1.BackupStatus)
@@ -369,10 +433,21 @@ func rollbackBackupStatus(installation *operatorv1alpha1.KubeOVNInstallation, pl
 	}
 	checkpoint := installation.Status.Upgrade.Checkpoint
 	checkpointBackup := backupFromUpgradeCheckpoint(checkpoint)
-	if checkpoint == nil || checkpointBackup == nil || !rollbackCheckpointUsable(checkpoint.Phase) || !backupPairIDMatches(checkpointBackup) || checkpoint.ID != plan.BackupID || checkpoint.SourceVersion != plan.TargetVersion || strings.TrimSpace(checkpoint.Destination) != strings.TrimSpace(plan.Destination) || checkpoint.TopologyDigest != plan.TopologyDigest || checkpoint.CapturedAt.IsZero() || !maps.Equal(checkpoint.DatabaseRefs, plan.DatabaseRefs) {
+	if checkpoint == nil || checkpointBackup == nil || !rollbackCheckpointUsable(checkpoint.Phase) || !backupPairIDMatches(checkpointBackup) || checkpoint.ID != plan.BackupID || checkpoint.SourceVersion != expectedVersion || strings.TrimSpace(checkpoint.Destination) != strings.TrimSpace(plan.Destination) || checkpoint.TopologyDigest != plan.TopologyDigest || checkpoint.CapturedAt.IsZero() || !maps.Equal(checkpoint.DatabaseRefs, plan.DatabaseRefs) {
 		return nil, errors.New("rollback backup pair is no longer available in the durable installation checkpoint")
 	}
 	return checkpointBackup, nil
+}
+
+// rollbackBackupVersion selects the version represented by the backup pair.
+// Upgrade rollback checkpoints contain the target version, while destructive
+// recovery requests restore the source-version backup recorded before the
+// current installation was lost or converted.
+func rollbackBackupVersion(plan RollbackPlan) string {
+	if plan.Mode == "" || plan.Mode == "rollback" {
+		return plan.TargetVersion
+	}
+	return plan.SourceVersion
 }
 
 func rollbackCheckpointUsable(phase operatorv1alpha1.UpgradeCheckpointPhase) bool {

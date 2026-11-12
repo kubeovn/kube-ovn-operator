@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -413,8 +414,17 @@ func TestHelmRendererPullsOCIChartLayer(t *testing.T) {
 	mapper.Add(corev1.SchemeGroupVersion.WithKind("ConfigMap"), meta.RESTScopeNamespace)
 	caps := chartutil.DefaultCapabilities.Copy()
 	caps.KubeVersion = chartutil.KubeVersion{Version: "v1.34.3", Major: "1", Minor: "34"}
-	renderer := &HelmRenderer{Name: "tenant", Namespace: "network", Mapper: mapper, Capabilities: caps, HTTPClient: server.Client()}
-	spec := operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Chart: operatorv1alpha1.ChartSpec{Source: "oci://" + server.Listener.Addr().String() + "/repo/kube-ovn:1.17.0", Digest: chartDigest}, Mode: operatorv1alpha1.InstallationModeDataPlaneOnly, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}, DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example:6641", SBEndpoint: "sb.example:6642"}}}
+	source := "oci://" + server.Listener.Addr().String() + "/repo/kube-ovn:1.17.0"
+	renderer := &HelmRenderer{Name: "tenant", Namespace: "network", Mapper: mapper, Capabilities: caps, HTTPClient: server.Client(), AllowedChartHosts: []string{"charts.example.invalid"}}
+	spec := operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Chart: operatorv1alpha1.ChartSpec{Source: source, Digest: chartDigest}, Mode: operatorv1alpha1.InstallationModeDataPlaneOnly, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}, DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example:6641", SBEndpoint: "sb.example:6642"}}}
+	if _, err := renderer.Render(t.Context(), spec); err == nil || !strings.Contains(err.Error(), "not in the operator chart host allowlist") {
+		t.Fatalf("untrusted OCI chart host was accepted: %v", err)
+	}
+	parsed, err := url.Parse(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renderer.AllowedChartHosts = []string{parsed.Hostname()}
 	got, err := renderer.Render(t.Context(), spec)
 	if err != nil {
 		t.Fatal(err)
@@ -460,6 +470,77 @@ func TestHelmRendererRejectsUnverifiedAndUnsupportedInputs(t *testing.T) {
 				t.Fatalf("got %v, objects %d", err, len(got.Objects))
 			}
 		})
+	}
+}
+
+func TestHelmRendererEnforcesChartHostAllowlist(t *testing.T) {
+	renderer, spec := chartFixture(t, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: example\n")
+	parsed, err := url.Parse(spec.Chart.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Hostname() == "" {
+		t.Fatal("chart fixture has no source hostname")
+	}
+
+	renderer.AllowedChartHosts = []string{"charts.example.invalid"}
+	if _, err := renderer.Render(t.Context(), spec); err == nil || !strings.Contains(err.Error(), "not in the operator chart host allowlist") {
+		t.Fatalf("untrusted chart host was accepted: %v", err)
+	}
+
+	renderer.AllowedChartHosts = []string{strings.ToUpper(parsed.Hostname())}
+	got, err := renderer.Render(t.Context(), spec)
+	if err != nil {
+		t.Fatalf("trusted chart host was rejected: %v", err)
+	}
+	if len(got.Objects) != 1 || got.Objects[0].GetName() != "example" {
+		t.Fatalf("unexpected trusted render result: %#v", got.Objects)
+	}
+}
+
+func TestChartHostAllowlistSupportsRegistryPorts(t *testing.T) {
+	parsed, err := url.Parse("https://registry.example.test:5000/charts/kube-ovn.tgz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chartHostAllowed(parsed, []string{"registry.example.test:5000"}) {
+		t.Fatal("registry host and port were not accepted by the chart allowlist")
+	}
+	if chartHostAllowed(parsed, []string{"registry.example.test:5001"}) {
+		t.Fatal("different registry port was accepted by the chart allowlist")
+	}
+}
+
+func TestHelmRendererRejectsChartRedirectOutsideAllowlist(t *testing.T) {
+	data := testArchive(t, map[string]string{
+		"Chart.yaml":              "apiVersion: v2\nname: kube-ovn\nversion: 1.17.0\nappVersion: 1.17.0\n",
+		"templates/workload.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: example\n",
+	})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, "https://charts.example.invalid/chart.tgz", http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion})
+	mapper.Add(corev1.SchemeGroupVersion.WithKind("ConfigMap"), meta.RESTScopeNamespace)
+	caps := chartutil.DefaultCapabilities.Copy()
+	caps.KubeVersion = chartutil.KubeVersion{Version: "v1.34.3", Major: "1", Minor: "34"}
+	renderer := &HelmRenderer{Name: "tenant", Namespace: "network", Mapper: mapper, Capabilities: caps, HTTPClient: server.Client(), AllowedChartHosts: []string{parsed.Hostname()}}
+	spec := operatorv1alpha1.KubeOVNInstallationSpec{
+		Version: "v1.17.0",
+		Chart:   operatorv1alpha1.ChartSpec{Source: server.URL + "/chart.tgz", Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(data))},
+		Mode:    operatorv1alpha1.InstallationModeDataPlaneOnly,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{
+			NBEndpoint: "nb.example:6641",
+			SBEndpoint: "sb.example:6642",
+		}},
+	}
+	if _, err := renderer.Render(t.Context(), spec); err == nil {
+		t.Fatalf("redirect to an untrusted chart host was accepted: %v", err)
 	}
 }
 

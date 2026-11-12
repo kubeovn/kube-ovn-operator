@@ -419,6 +419,21 @@ func TestRetainedResourceHasNoGarbageCollectionOwner(t *testing.T) {
 	}
 }
 
+func TestSharedCRDDoesNotRequireInstallationOwnership(t *testing.T) {
+	crd := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+		"metadata": map[string]any{"name": "kubeovninstallations.operator.kubeovn.io"},
+	}}
+	if err := checkOwnership(crd, testIdentity, true, false); err != nil {
+		t.Fatalf("shared CRD was incorrectly rejected without installation labels: %v", err)
+	}
+	controller := true
+	crd.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "foreign", UID: "foreign", Controller: &controller}})
+	if err := checkOwnership(crd, testIdentity, true, false); !errors.Is(err, ErrOwnershipConflict) {
+		t.Fatalf("foreign CRD owner was accepted: %v", err)
+	}
+}
+
 func TestApplyStopsTheBatchWhenOperationGuardIsLost(t *testing.T) {
 	kube := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), ownedConfigMap("first", testIdentity), ownedConfigMap("second", testIdentity))
 	patches := 0

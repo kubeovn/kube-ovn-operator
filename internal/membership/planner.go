@@ -64,8 +64,8 @@ func BuildPlan(snapshot Snapshot, desiredReplicas int, replacement Member, remov
 	if !ValidID(snapshot.ClusterID) {
 		return Plan{}, fmt.Errorf("a full cluster UUID is required")
 	}
-	if desiredReplicas != 1 && desiredReplicas != 3 && desiredReplicas != 5 {
-		return Plan{}, fmt.Errorf("desired replicas must be 1, 3, or 5")
+	if desiredReplicas != 1 && desiredReplicas != 2 && desiredReplicas != 3 && desiredReplicas != 5 {
+		return Plan{}, fmt.Errorf("desired replicas must be 1, 2, 3, or 5")
 	}
 	if err := ValidateMembers(snapshot.Members); err != nil {
 		return Plan{}, err

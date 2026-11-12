@@ -125,23 +125,60 @@ func (p *RecoveryProvider) Complete(ctx context.Context, ref operatorv1alpha1.Re
 }
 
 func (p *RecoveryProvider) read(ctx context.Context, ref operatorv1alpha1.RecoveryApprovalReference, binding RecoveryBinding, active bool) (*operatorv1alpha1.KubeOVNRecoveryApproval, string, error) {
+	if p == nil || p.kube == nil {
+		return nil, "", errors.New("recovery approval provider is not configured")
+	}
 	if err := lease.CheckFor(ctx, lease.Central, p.installation.UID); err != nil {
 		return nil, "", err
 	}
-	if p == nil || p.kube == nil {
-		return nil, "", errors.New("recovery approval provider is not configured")
+	return readRecoveryApproval(ctx, p.kube, p.namespace, p.installation, ref, binding, active)
+}
+
+// ValidateRecoveryApproval reads and validates an approval without mutating
+// status. It is shared by admission and execution paths that only have a
+// client.Reader, so all consumers enforce the same immutable binding,
+// revocation/expiry and reservation audit rules.
+func ValidateRecoveryApproval(ctx context.Context, reader client.Reader, namespace string, installation operatorv1alpha1.InstallationReference, ref operatorv1alpha1.RecoveryApprovalReference, binding RecoveryBinding, active bool) (string, error) {
+	_, digest, err := readRecoveryApproval(ctx, reader, namespace, installation, ref, binding, active)
+	return digest, err
+}
+
+// ValidateRecoveryApprovalStatus verifies the operator-owned reservation audit
+// for a previously read approval. It accepts both an in-flight reservation
+// and a completed decision, which are the only phases executable workloads
+// may consume.
+func ValidateRecoveryApprovalStatus(record *operatorv1alpha1.KubeOVNRecoveryApproval, digest string) error {
+	if record == nil {
+		return errors.New("recovery approval is missing")
+	}
+	switch record.Status.Phase {
+	case operatorv1alpha1.RecoveryApprovalReserved:
+		return reservedRecovery(record, digest)
+	case operatorv1alpha1.RecoveryApprovalCompleted:
+		return completedRecovery(record, digest)
+	default:
+		return errors.New("recovery approval is not reserved or completed")
+	}
+}
+
+func readRecoveryApproval(ctx context.Context, reader client.Reader, namespace string, installation operatorv1alpha1.InstallationReference, ref operatorv1alpha1.RecoveryApprovalReference, binding RecoveryBinding, active bool) (*operatorv1alpha1.KubeOVNRecoveryApproval, string, error) {
+	if reader == nil {
+		return nil, "", errors.New("recovery approval reader is not configured")
+	}
+	if namespace == "" {
+		return nil, "", errors.New("recovery approval namespace is required")
 	}
 	if ref.Name == "" || len(validation.IsDNS1123Subdomain(ref.Name)) != 0 || ref.UID == "" {
 		return nil, "", errors.New("recovery approval requires a pinned name and UID")
 	}
-	if binding.InstallationName == "" || binding.InstallationUID == "" || binding.InstallationGeneration < 1 || binding.Mode == "" || binding.SourceVersion == "" || binding.TargetVersion == "" || binding.BackupRef == "" || binding.TopologyDigest == "" || binding.ChartDigest == "" {
+	if installation.Name == "" || installation.UID == "" || binding.InstallationName == "" || binding.InstallationUID == "" || binding.InstallationGeneration < 1 || binding.Mode == "" || binding.SourceVersion == "" || binding.TargetVersion == "" || binding.BackupRef == "" || binding.TopologyDigest == "" || binding.ChartDigest == "" {
 		return nil, "", errors.New("recovery approval binding is incomplete")
 	}
 	if !validRecoveryApprovalMode(binding.Mode) {
 		return nil, "", fmt.Errorf("recovery approval mode %q is unsupported", binding.Mode)
 	}
 	record := new(operatorv1alpha1.KubeOVNRecoveryApproval)
-	if err := p.kube.Get(ctx, types.NamespacedName{Namespace: p.namespace, Name: ref.Name}, record); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ref.Name}, record); err != nil {
 		return nil, "", err
 	}
 	if types.UID(record.UID) != ref.UID || record.DeletionTimestamp != nil || record.Generation < 1 || record.CreationTimestamp.IsZero() || len(record.OwnerReferences) != 0 {
@@ -151,7 +188,7 @@ func (p *RecoveryProvider) read(ctx context.Context, ref operatorv1alpha1.Recove
 	if !validRecoveryApprovalMode(decision.Mode) {
 		return nil, "", fmt.Errorf("recovery approval mode %q is unsupported", decision.Mode)
 	}
-	if decision.InstallationRef != p.installation || decision.InstallationRef.Name != binding.InstallationName || decision.InstallationRef.UID != binding.InstallationUID || decision.InstallationGeneration != binding.InstallationGeneration || decision.Mode != binding.Mode || decision.SourceVersion != binding.SourceVersion || decision.TargetVersion != binding.TargetVersion || decision.BackupRef != binding.BackupRef || decision.TopologyDigest != binding.TopologyDigest || decision.ChartDigest != binding.ChartDigest || strings.TrimSpace(decision.Reason) == "" || decision.ExpiresAt.IsZero() || !decision.ExpiresAt.After(record.CreationTimestamp.Time) {
+	if decision.InstallationRef != installation || decision.InstallationRef.Name != binding.InstallationName || decision.InstallationRef.UID != binding.InstallationUID || decision.InstallationGeneration != binding.InstallationGeneration || decision.Mode != binding.Mode || decision.SourceVersion != binding.SourceVersion || decision.TargetVersion != binding.TargetVersion || decision.BackupRef != binding.BackupRef || decision.TopologyDigest != binding.TopologyDigest || decision.ChartDigest != binding.ChartDigest || strings.TrimSpace(decision.Reason) == "" || decision.ExpiresAt.IsZero() || !decision.ExpiresAt.After(record.CreationTimestamp.Time) {
 		return nil, "", errors.New("recovery approval does not bind the requested installation, version, backup and topology")
 	}
 	if decision.RequestRef == nil {
@@ -189,6 +226,13 @@ func recoveryDecisionDigest(decision operatorv1alpha1.RecoveryApprovalSpec) (str
 		return "", err
 	}
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(data)), nil
+}
+
+// RecoveryApprovalDecisionDigest returns the canonical digest of an approval
+// decision. It is useful to producers of offline artifacts and tests that
+// need to bind the exact immutable spec bytes.
+func RecoveryApprovalDecisionDigest(decision operatorv1alpha1.RecoveryApprovalSpec) (string, error) {
+	return recoveryDecisionDigest(decision)
 }
 
 func reservedRecovery(record *operatorv1alpha1.KubeOVNRecoveryApproval, digest string) error {

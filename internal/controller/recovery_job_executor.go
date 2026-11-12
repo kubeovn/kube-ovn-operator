@@ -65,7 +65,7 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if err := spec.Validate(); err != nil {
 		return fmt.Errorf("validate offline rebuild workload: %w", err)
 	}
-	if spec.Namespace != request.Namespace || spec.PlanDigest != plan.Digest || spec.InstallationUID != string(plan.InstallationUID) {
+	if spec.Namespace != request.Namespace || spec.PlanDigest != plan.Digest || spec.InstallationUID != string(plan.InstallationUID) || spec.OperationID != plan.OperationID {
 		return errors.New("offline rebuild workload is bound to a different namespace, installation or plan")
 	}
 	owner := recoveryRequestOwner(request)

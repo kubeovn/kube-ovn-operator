@@ -7,8 +7,13 @@ upgrades preserve Kubernetes API conversion and status ownership.
 ```bash
 helm lint charts/kube-ovn-operator
 helm upgrade --install kube-ovn-operator charts/kube-ovn-operator \
-  --namespace kube-ovn-operator-system --create-namespace
+  --namespace kube-ovn-operator-system --create-namespace \
+  --set 'chartAllowedHosts[0]=charts.example.com'
 ```
+
+`chartAllowedHosts` is an exact host allowlist for HTTPS and OCI installation
+charts. It is empty by default, so the operator refuses remote chart rendering
+until a trusted registry host is configured.
 
 The chart leaves destructive fencing disabled by default. To enable the
 production transport, set `fenceAgent.enabled=true`, provide a digest-pinned

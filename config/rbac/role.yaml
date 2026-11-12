@@ -5,7 +5,7 @@ metadata:
 rules:
   - apiGroups: [operator.kubeovn.io]
     resources: [kubeovninstallations, kubeovninstallations/status, kubeovninstallations/finalizers, kubeovnrecoveryrequests, kubeovnrecoveryrequests/status, kubeovnrecoveryrequests/finalizers]
-    verbs: [get, list, watch, create, update, patch, delete]
+    verbs: [get, list, watch, update, patch]
   - apiGroups: [operator.kubeovn.io]
     resources: [kubeovnmemberremovalapprovals]
     verbs: [get, list, watch]
@@ -21,6 +21,9 @@ rules:
   - apiGroups: [""]
     resources: [configmaps, services, serviceaccounts, persistentvolumeclaims]
     verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [persistentvolumes]
     verbs: [get, list, watch]
