@@ -182,7 +182,7 @@ func (e *LifecycleRecoveryExecutor) executeDestructive(ctx context.Context, plan
 	// newly handed-off approval. Until that step runs, a valid approval has an
 	// intentionally empty operator-owned status audit. Every later phase must
 	// require the reservation (or its completed audit) before doing work.
-	requireApprovalAudit := request.Status.Execution != nil
+	requireApprovalAudit := request.Status.Execution != nil && request.Status.Execution.Phase != operatorv1alpha1.RollbackPhaseQuiescing
 	if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan, requireApprovalAudit); err != nil {
 		return err
 	}
