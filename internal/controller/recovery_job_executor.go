@@ -58,7 +58,7 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if request.DeletionTimestamp != nil || request.UID != plan.RequestUID || request.Generation != plan.RequestGeneration || request.Status.Plan == nil || request.Status.Plan.Digest != plan.Digest {
 		return errors.New("offline rebuild request identity or immutable plan changed")
 	}
-	if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan); err != nil {
+	if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan, true); err != nil {
 		return err
 	}
 	spec, err := e.Builder.Build(ctx, plan)
@@ -105,7 +105,7 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 		}
 		current = desired.DeepCopy()
 		current.Spec.Suspend = new(true)
-		if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan); err != nil {
+		if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan, true); err != nil {
 			return err
 		}
 		if err := e.Client.Create(ctx, current); err != nil {
@@ -126,7 +126,7 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if recoveryJobSuspended(current) {
 		// An optimistic update prevents activating a replacement or a Job
 		// that changed since its spec and UID were checked.
-		if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan); err != nil {
+		if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan, true); err != nil {
 			return err
 		}
 		current.Spec.Suspend = new(false)

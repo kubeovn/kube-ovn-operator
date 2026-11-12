@@ -178,7 +178,12 @@ func (e *LifecycleRecoveryExecutor) executeDestructive(ctx context.Context, plan
 	if request.UID != plan.RequestUID || request.Generation != plan.RequestGeneration || request.Status.Plan == nil || request.Status.Plan.Digest != plan.Digest {
 		return errors.New("destructive recovery request identity or immutable plan changed")
 	}
-	if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan); err != nil {
+	// The first quiescing pass is also where the rollback executor reserves a
+	// newly handed-off approval. Until that step runs, a valid approval has an
+	// intentionally empty operator-owned status audit. Every later phase must
+	// require the reservation (or its completed audit) before doing work.
+	requireApprovalAudit := request.Status.Execution != nil
+	if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan, requireApprovalAudit); err != nil {
 		return err
 	}
 	if err := e.Rollback.Ready(); err != nil {
@@ -206,7 +211,7 @@ func (e *LifecycleRecoveryExecutor) executeDestructive(ctx context.Context, plan
 	var next operatorv1alpha1.RollbackPhase
 	err := e.Leases.With(ctx, installation, lease.Installation, func(operationCtx context.Context) error {
 		return e.Leases.With(operationCtx, installation, lease.Central, func(centralCtx context.Context) error {
-			if err := validateRecoveryApprovalForPlan(centralCtx, e.Client, plan); err != nil {
+			if err := validateRecoveryApprovalForPlan(centralCtx, e.Client, plan, execution.Phase != operatorv1alpha1.RollbackPhaseQuiescing); err != nil {
 				return err
 			}
 			var err error
@@ -253,7 +258,7 @@ func (e *LifecycleRecoveryExecutor) executeDestructive(ctx context.Context, plan
 // destructive operation. Admission and artifact resolution happen in earlier
 // reconciles, so their snapshots cannot authorize a later revoked or edited
 // approval. The status audit is checked against the same spec snapshot.
-func validateRecoveryApprovalForPlan(ctx context.Context, reader client.Reader, plan RecoveryPlan) error {
+func validateRecoveryApprovalForPlan(ctx context.Context, reader client.Reader, plan RecoveryPlan, requireAudit bool) error {
 	if plan.ApprovalRef == nil {
 		// A healthy-quorum recovery may proceed without an exceptional approval;
 		// when an approval is supplied, it is always revalidated at execution.
@@ -273,8 +278,19 @@ func validateRecoveryApprovalForPlan(ctx context.Context, reader client.Reader, 
 	if err != nil {
 		return fmt.Errorf("validate destructive recovery approval: %w", err)
 	}
+	if !requireAudit && approvalObject.Status.Phase == "" {
+		if approvalObject.Status.DecisionDigest != "" || approvalObject.Status.ReservedAt != nil || approvalObject.Status.CompletedAt != nil {
+			return errors.New("recovery approval has an incomplete reservation audit")
+		}
+		// The quiescing step owns the first status write and will reserve this
+		// otherwise valid, unrevoked approval before any restore side effect.
+		return nil
+	}
 	if err := approval.ValidateRecoveryApprovalStatus(approvalObject, digest); err != nil {
-		return fmt.Errorf("validate destructive recovery approval status: %w", err)
+		if requireAudit {
+			return fmt.Errorf("validate destructive recovery approval status: %w", err)
+		}
+		return fmt.Errorf("validate destructive recovery approval status before quiesce: %w", err)
 	}
 	return nil
 }
