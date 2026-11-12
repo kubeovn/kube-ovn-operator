@@ -22,7 +22,7 @@ digest="sha256:$(sha256sum "${archive}" | cut -d ' ' -f1)"
 python3 -m http.server 18082 --bind 127.0.0.1 --directory "${test_dir}" >"${test_dir}/server.log" 2>&1 &
 server_pid=$!
 go build -o "${test_dir}/operator" ./cmd/operator
-"${test_dir}/operator" --leader-elect=false --metrics-bind-address=0 --health-probe-bind-address=:18083 --chart-allowed-hosts=127.0.0.1 >"${test_dir}/operator.log" 2>&1 &
+"${test_dir}/operator" --leader-elect=false --metrics-bind-address=0 --health-probe-bind-address=:18083 --chart-allowed-hosts=github.com,127.0.0.1 >"${test_dir}/operator.log" 2>&1 &
 operator_pid=$!
 for _ in $(seq 1 60); do
   if curl --fail --silent http://127.0.0.1:18083/readyz >/dev/null 2>&1; then break; fi
