@@ -43,7 +43,7 @@ for image in docker.io/kubeovn/kube-ovn:v1.16.13 registry.k8s.io/e2e-test-images
 done
 kubectl apply -f config/crd/bases
 go build -o "${operator_binary}" ./cmd/operator
-"${operator_binary}" --leader-elect=false --metrics-bind-address=0 --health-probe-bind-address=:18084 >"${log_dir}/operator.log" 2>&1 &
+"${operator_binary}" --leader-elect=false --metrics-bind-address=0 --health-probe-bind-address=:18084 --chart-allowed-hosts=github.com >"${log_dir}/operator.log" 2>&1 &
 operator_pid=$!
 for _ in $(seq 1 60); do
   if curl --fail --silent http://127.0.0.1:18084/readyz >/dev/null 2>&1; then break; fi

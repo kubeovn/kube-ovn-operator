@@ -32,7 +32,7 @@ kubectl apply \
   -f config/rbac/role.yaml \
   -f config/rbac/service_account.yaml
 go build -o "${operator_binary}" ./cmd/operator
-"${operator_binary}" --leader-elect=false --plan-only >/tmp/kube-ovn-operator-e2e.log 2>&1 &
+"${operator_binary}" --leader-elect=false --plan-only --chart-allowed-hosts=github.com >/tmp/kube-ovn-operator-e2e.log 2>&1 &
 operator_pid=$!
 for _ in $(seq 1 60); do
   if curl --fail --silent http://127.0.0.1:8081/readyz >/dev/null 2>&1; then
