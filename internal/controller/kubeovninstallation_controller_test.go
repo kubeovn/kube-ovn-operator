@@ -1525,6 +1525,23 @@ func TestReplicaOnlySpecChangePinsTheRetainedMemberCount(t *testing.T) {
 	}
 }
 
+func TestRaftReplicaTransitionRequiresRetainedEvidence(t *testing.T) {
+	installation := &operatorv1alpha1.KubeOVNInstallation{}
+	if raftReplicaTransitionReady(installation) {
+		t.Fatal("empty installation was accepted as a retained RAFT transition")
+	}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{Version: "v1.17.0"}
+	installation.Status.ObservedVersion = "v1.17.0"
+	installation.Status.Topology.Inventory = &operatorv1alpha1.CentralTopologyReference{Digest: "sha256:topology"}
+	if !raftReplicaTransitionReady(installation) {
+		t.Fatal("retained topology and version-bound checkpoint were rejected")
+	}
+	installation.Status.ApplyCheckpoint.Version = "v1.18.0"
+	if raftReplicaTransitionReady(installation) {
+		t.Fatal("checkpoint from a different observed version was accepted")
+	}
+}
+
 func TestBeginAutomaticLifecycleDoesNotRepeatConsumedSpec(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "automatic", Namespace: "default", UID: types.UID("automatic-uid"), Generation: 2},

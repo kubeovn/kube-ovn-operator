@@ -2,11 +2,14 @@
 package apply
 
 import (
+	"bytes"
 	"context"
+	stdjson "encoding/json"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
@@ -640,7 +643,7 @@ func checkSharedCRDCompatibility(live, desired *unstructured.Unstructured) error
 		return fmt.Errorf("decode desired CRD %s: %w", objectKey(desired), err)
 	}
 	if liveCRD.Spec.Group != desiredCRD.Spec.Group || liveCRD.Spec.Scope != desiredCRD.Spec.Scope ||
-		!reflect.DeepEqual(liveCRD.Spec.Names, desiredCRD.Spec.Names) {
+		!equivalentCRDNames(liveCRD.Spec.Names, desiredCRD.Spec.Names) {
 		return ownershipConflict(desired, "shared CRD group, names, or scope is incompatible with the live contract")
 	}
 	if len(liveCRD.Spec.Versions) != len(desiredCRD.Spec.Versions) {
@@ -653,7 +656,7 @@ func checkSharedCRDCompatibility(live, desired *unstructured.Unstructured) error
 	for _, desiredVersion := range desiredCRD.Spec.Versions {
 		liveVersion, ok := liveVersions[desiredVersion.Name]
 		if !ok || liveVersion.Served != desiredVersion.Served || liveVersion.Storage != desiredVersion.Storage ||
-			!reflect.DeepEqual(liveVersion.Schema, desiredVersion.Schema) || !reflect.DeepEqual(liveVersion.Subresources, desiredVersion.Subresources) {
+			!equivalentCRDValidation(liveVersion.Schema, desiredVersion.Schema) || !equivalentCRDSubresources(liveVersion.Subresources, desiredVersion.Subresources) {
 			return ownershipConflict(desired, fmt.Sprintf("shared CRD version %q is incompatible with the live contract", desiredVersion.Name))
 		}
 	}
@@ -670,7 +673,81 @@ func compatibleCRDConversion(live, desired *apiextensionsv1.CustomResourceConver
 	if desired == nil {
 		desired = &apiextensionsv1.CustomResourceConversion{Strategy: apiextensionsv1.NoneConverter}
 	}
-	return live.Strategy == desired.Strategy && reflect.DeepEqual(live.Webhook, desired.Webhook)
+	return live.Strategy == desired.Strategy && equivalentCRDWebhook(live.Webhook, desired.Webhook)
+}
+
+func equivalentCRDNames(live, desired apiextensionsv1.CustomResourceDefinitionNames) bool {
+	return live.Plural == desired.Plural && live.Singular == desired.Singular && live.Kind == desired.Kind && live.ListKind == desired.ListKind &&
+		equivalentCRDStrings(live.ShortNames, desired.ShortNames) && equivalentCRDStrings(live.Categories, desired.Categories)
+}
+
+func equivalentCRDStrings(live, desired []string) bool {
+	live = slices.Clone(live)
+	desired = slices.Clone(desired)
+	slices.Sort(live)
+	slices.Sort(desired)
+	if len(live) != len(desired) {
+		return false
+	}
+	for i := range live {
+		if live[i] != desired[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// equivalentCRDValidation compares the API contract while tolerating the
+// apiserver's nil/empty normalization of optional schema collections. A nil
+// schema and a non-nil schema remain incompatible because they differ in
+// whether structural validation is enabled.
+func equivalentCRDValidation(live, desired *apiextensionsv1.CustomResourceValidation) bool {
+	if live == nil || desired == nil {
+		return live == desired
+	}
+	if live.OpenAPIV3Schema == nil || desired.OpenAPIV3Schema == nil {
+		return live.OpenAPIV3Schema == desired.OpenAPIV3Schema
+	}
+	return equivalentCRDJSON(live.OpenAPIV3Schema, desired.OpenAPIV3Schema)
+}
+
+func equivalentCRDSubresources(live, desired *apiextensionsv1.CustomResourceSubresources) bool {
+	if live == nil || desired == nil {
+		return live == desired
+	}
+	if (live.Status != nil) != (desired.Status != nil) {
+		return false
+	}
+	return reflect.DeepEqual(live.Scale, desired.Scale)
+}
+
+func equivalentCRDWebhook(live, desired *apiextensionsv1.WebhookConversion) bool {
+	if live == nil || desired == nil {
+		return live == desired
+	}
+	if !equivalentCRDClientConfig(live.ClientConfig, desired.ClientConfig) || !equivalentCRDStrings(live.ConversionReviewVersions, desired.ConversionReviewVersions) {
+		return false
+	}
+	return true
+}
+
+func equivalentCRDClientConfig(live, desired *apiextensionsv1.WebhookClientConfig) bool {
+	if live == nil || desired == nil {
+		return live == desired
+	}
+	return reflect.DeepEqual(live.URL, desired.URL) && reflect.DeepEqual(live.Service, desired.Service) && bytes.Equal(live.CABundle, desired.CABundle)
+}
+
+func equivalentCRDJSON(live, desired any) bool {
+	liveJSON, err := stdjson.Marshal(live)
+	if err != nil {
+		return false
+	}
+	desiredJSON, err := stdjson.Marshal(desired)
+	if err != nil {
+		return false
+	}
+	return string(liveJSON) == string(desiredJSON)
 }
 
 func objectKey(object *unstructured.Unstructured) string {

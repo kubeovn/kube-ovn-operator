@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -431,6 +432,75 @@ func TestSharedCRDDoesNotRequireInstallationOwnership(t *testing.T) {
 	crd.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "foreign", UID: "foreign", Controller: &controller}})
 	if err := checkOwnership(crd, testIdentity, true, false); !errors.Is(err, ErrOwnershipConflict) {
 		t.Fatalf("foreign CRD owner was accepted: %v", err)
+	}
+}
+
+func TestSharedCRDCompatibilityToleratesDefaultedEmptySchemaCollections(t *testing.T) {
+	base := apiextensionsv1.CustomResourceDefinition{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "apiextensions.k8s.io/v1", Kind: "CustomResourceDefinition"},
+		ObjectMeta: metav1.ObjectMeta{Name: "widgets.example.io"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "example.io", Scope: apiextensionsv1.NamespaceScoped,
+			Names:    apiextensionsv1.CustomResourceDefinitionNames{Plural: "widgets", Singular: "widget", Kind: "Widget"},
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{Name: "v1", Served: true, Storage: true, Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Properties: map[string]apiextensionsv1.JSONSchemaProps{}}}}},
+		},
+	}
+	live := base.DeepCopy()
+	desired := base.DeepCopy()
+	desired.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties = nil
+	liveObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desiredObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSharedCRDCompatibility(&unstructured.Unstructured{Object: liveObject}, &unstructured.Unstructured{Object: desiredObject}); err != nil {
+		t.Fatalf("defaulted empty schema collections were rejected: %v", err)
+	}
+	desired.Spec.Versions[0].Schema = nil
+	desiredObject, err = runtime.DefaultUnstructuredConverter.ToUnstructured(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSharedCRDCompatibility(&unstructured.Unstructured{Object: liveObject}, &unstructured.Unstructured{Object: desiredObject}); err == nil {
+		t.Fatal("nil and non-nil schemas were accepted as compatible")
+	}
+}
+
+func TestSharedCRDCompatibilityTreatsUnorderedNameCollectionsAsEquivalent(t *testing.T) {
+	base := apiextensionsv1.CustomResourceDefinition{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "apiextensions.k8s.io/v1", Kind: "CustomResourceDefinition"},
+		ObjectMeta: metav1.ObjectMeta{Name: "widgets.example.io"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "example.io", Scope: apiextensionsv1.NamespaceScoped,
+			Names:    apiextensionsv1.CustomResourceDefinitionNames{Plural: "widgets", Singular: "widget", Kind: "Widget", ShortNames: []string{"wd", "w"}, Categories: []string{"all", "example"}},
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{Name: "v1", Served: true, Storage: true}},
+		},
+	}
+	live := base.DeepCopy()
+	desired := base.DeepCopy()
+	desired.Spec.Names.ShortNames = []string{"w", "wd"}
+	desired.Spec.Names.Categories = []string{"example", "all"}
+	liveObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desiredObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSharedCRDCompatibility(&unstructured.Unstructured{Object: liveObject}, &unstructured.Unstructured{Object: desiredObject}); err != nil {
+		t.Fatalf("reordered CRD name collections were rejected: %v", err)
+	}
+	desired.Spec.Names.ShortNames[0] = "different"
+	desiredObject, err = runtime.DefaultUnstructuredConverter.ToUnstructured(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSharedCRDCompatibility(&unstructured.Unstructured{Object: liveObject}, &unstructured.Unstructured{Object: desiredObject}); err == nil {
+		t.Fatal("different CRD name collections were accepted")
 	}
 }
 

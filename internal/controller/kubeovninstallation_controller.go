@@ -307,7 +307,7 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 		now = r.Clock
 	}
 	plan := planner.Build(installation.Spec, installation.Status.ObservedVersion)
-	if plan.Blocking == "" && installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Central.Replicas == 2 && installation.Status.ApplyCheckpoint == nil {
+	if plan.Blocking == "" && installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Central.Replicas == 2 && !raftReplicaTransitionReady(installation) {
 		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "Validate", "spec.central.replicas=2 is permitted only for an existing retained RAFT topology transition"
 	}
 	if err := r.checkExecutingRecovery(ctx, installation); err != nil {
@@ -829,6 +829,14 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 	return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+func raftReplicaTransitionReady(installation *operatorv1alpha1.KubeOVNInstallation) bool {
+	if installation == nil || installation.Status.Topology.Inventory == nil || strings.TrimSpace(installation.Status.Topology.Inventory.Digest) == "" {
+		return false
+	}
+	checkpoint := installation.Status.ApplyCheckpoint
+	return checkpoint != nil && strings.TrimSpace(checkpoint.Version) != "" && strings.TrimSpace(installation.Status.ObservedVersion) != "" && checkpoint.Version == installation.Status.ObservedVersion
 }
 
 var errRecoveryExecuting = errors.New("an identity-bound recovery request is executing")
