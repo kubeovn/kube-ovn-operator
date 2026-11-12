@@ -143,6 +143,13 @@ func ValidateRecoveryApproval(ctx context.Context, reader client.Reader, namespa
 	return digest, err
 }
 
+// ValidateRecoveryApprovalRecord validates a caller's already-read approval
+// snapshot. Callers that perform a second read for status must use this helper
+// on that exact snapshot to avoid a spec/status TOCTOU window.
+func ValidateRecoveryApprovalRecord(record *operatorv1alpha1.KubeOVNRecoveryApproval, namespace string, installation operatorv1alpha1.InstallationReference, ref operatorv1alpha1.RecoveryApprovalReference, binding RecoveryBinding, active bool) (string, error) {
+	return validateRecoveryApprovalRecord(record, namespace, installation, ref, binding, active)
+}
+
 // ValidateRecoveryApprovalStatus verifies the operator-owned reservation audit
 // for a previously read approval. It accepts both an in-flight reservation
 // and a completed decision, which are the only phases executable workloads
@@ -181,31 +188,39 @@ func readRecoveryApproval(ctx context.Context, reader client.Reader, namespace s
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ref.Name}, record); err != nil {
 		return nil, "", err
 	}
-	if types.UID(record.UID) != ref.UID || record.DeletionTimestamp != nil || record.Generation < 1 || record.CreationTimestamp.IsZero() || len(record.OwnerReferences) != 0 {
-		return nil, "", errors.New("recovery approval identity changed, is being deleted, or is subject to owner garbage collection")
-	}
-	decision := record.Spec
-	if !validRecoveryApprovalMode(decision.Mode) {
-		return nil, "", fmt.Errorf("recovery approval mode %q is unsupported", decision.Mode)
-	}
-	if decision.InstallationRef != installation || decision.InstallationRef.Name != binding.InstallationName || decision.InstallationRef.UID != binding.InstallationUID || decision.InstallationGeneration != binding.InstallationGeneration || decision.Mode != binding.Mode || decision.SourceVersion != binding.SourceVersion || decision.TargetVersion != binding.TargetVersion || decision.BackupRef != binding.BackupRef || decision.TopologyDigest != binding.TopologyDigest || decision.ChartDigest != binding.ChartDigest || strings.TrimSpace(decision.Reason) == "" || decision.ExpiresAt.IsZero() || !decision.ExpiresAt.After(record.CreationTimestamp.Time) {
-		return nil, "", errors.New("recovery approval does not bind the requested installation, version, backup and topology")
-	}
-	if decision.RequestRef == nil {
-		if binding.RequestName != "" || binding.RequestUID != "" || binding.RequestGeneration != 0 {
-			return nil, "", errors.New("recovery approval is not bound to the requested RecoveryRequest")
-		}
-	} else if binding.RequestName == "" || decision.RequestRef.Name != binding.RequestName || decision.RequestRef.UID != binding.RequestUID || decision.RequestRef.Generation != binding.RequestGeneration {
-		return nil, "", errors.New("recovery approval request identity does not match")
-	}
-	if active && (decision.Revoked || !time.Now().Before(decision.ExpiresAt.Time)) {
-		return nil, "", errors.New("recovery approval is revoked or expired")
-	}
-	digest, err := recoveryDecisionDigest(decision)
+	digest, err := validateRecoveryApprovalRecord(record, namespace, installation, ref, binding, active)
 	if err != nil {
 		return nil, "", err
 	}
 	return record, digest, nil
+}
+
+func validateRecoveryApprovalRecord(record *operatorv1alpha1.KubeOVNRecoveryApproval, namespace string, installation operatorv1alpha1.InstallationReference, ref operatorv1alpha1.RecoveryApprovalReference, binding RecoveryBinding, active bool) (string, error) {
+	if record == nil || namespace == "" || types.UID(record.UID) != ref.UID || record.DeletionTimestamp != nil || record.Generation < 1 || record.CreationTimestamp.IsZero() || len(record.OwnerReferences) != 0 {
+		return "", errors.New("recovery approval identity changed, is being deleted, or is subject to owner garbage collection")
+	}
+	decision := record.Spec
+	if !validRecoveryApprovalMode(decision.Mode) {
+		return "", fmt.Errorf("recovery approval mode %q is unsupported", decision.Mode)
+	}
+	if decision.InstallationRef != installation || decision.InstallationRef.Name != binding.InstallationName || decision.InstallationRef.UID != binding.InstallationUID || decision.InstallationGeneration != binding.InstallationGeneration || decision.Mode != binding.Mode || decision.SourceVersion != binding.SourceVersion || decision.TargetVersion != binding.TargetVersion || decision.BackupRef != binding.BackupRef || decision.TopologyDigest != binding.TopologyDigest || decision.ChartDigest != binding.ChartDigest || strings.TrimSpace(decision.Reason) == "" || decision.ExpiresAt.IsZero() || !decision.ExpiresAt.After(record.CreationTimestamp.Time) {
+		return "", errors.New("recovery approval does not bind the requested installation, version, backup and topology")
+	}
+	if decision.RequestRef == nil {
+		if binding.RequestName != "" || binding.RequestUID != "" || binding.RequestGeneration != 0 {
+			return "", errors.New("recovery approval is not bound to the requested RecoveryRequest")
+		}
+	} else if binding.RequestName == "" || decision.RequestRef.Name != binding.RequestName || decision.RequestRef.UID != binding.RequestUID || decision.RequestRef.Generation != binding.RequestGeneration {
+		return "", errors.New("recovery approval request identity does not match")
+	}
+	if active && (decision.Revoked || !time.Now().Before(decision.ExpiresAt.Time)) {
+		return "", errors.New("recovery approval is revoked or expired")
+	}
+	digest, err := recoveryDecisionDigest(decision)
+	if err != nil {
+		return "", err
+	}
+	return digest, nil
 }
 
 func validRecoveryApprovalMode(mode string) bool {

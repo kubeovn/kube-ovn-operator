@@ -6,13 +6,16 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
@@ -377,6 +380,11 @@ func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, obj
 			if existing.GetName() != copy.GetName() || existing.GetNamespace() != copy.GetNamespace() {
 				return nil, ownershipConflict(copy, "live resource identity differs from requested identity")
 			}
+			if sharedClusterResource(copy) {
+				if err := checkSharedCRDCompatibility(existing, copy); err != nil {
+					return nil, err
+				}
+			}
 			if err := checkOwnership(existing, identity, true, namespaced && !retainResource(copy)); err != nil {
 				return nil, err
 			}
@@ -615,6 +623,54 @@ func checkOwnership(object *unstructured.Unstructured, identity InstallationIden
 
 func sharedClusterResource(object *unstructured.Unstructured) bool {
 	return object != nil && object.GroupVersionKind().Group == "apiextensions.k8s.io" && object.GetKind() == "CustomResourceDefinition"
+}
+
+// checkSharedCRDCompatibility prevents one installation from silently
+// replacing the API contract established by another installation. CRDs are
+// shared cluster capabilities, so ownership labels cannot provide isolation.
+func checkSharedCRDCompatibility(live, desired *unstructured.Unstructured) error {
+	if live == nil || desired == nil {
+		return errors.New("shared CRD compatibility requires live and desired objects")
+	}
+	var liveCRD, desiredCRD apiextensionsv1.CustomResourceDefinition
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(live.Object, &liveCRD); err != nil {
+		return fmt.Errorf("decode live CRD %s: %w", objectKey(live), err)
+	}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(desired.Object, &desiredCRD); err != nil {
+		return fmt.Errorf("decode desired CRD %s: %w", objectKey(desired), err)
+	}
+	if liveCRD.Spec.Group != desiredCRD.Spec.Group || liveCRD.Spec.Scope != desiredCRD.Spec.Scope ||
+		!reflect.DeepEqual(liveCRD.Spec.Names, desiredCRD.Spec.Names) {
+		return ownershipConflict(desired, "shared CRD group, names, or scope is incompatible with the live contract")
+	}
+	if len(liveCRD.Spec.Versions) != len(desiredCRD.Spec.Versions) {
+		return ownershipConflict(desired, "shared CRD version set is incompatible with the live contract")
+	}
+	liveVersions := make(map[string]apiextensionsv1.CustomResourceDefinitionVersion, len(liveCRD.Spec.Versions))
+	for _, version := range liveCRD.Spec.Versions {
+		liveVersions[version.Name] = version
+	}
+	for _, desiredVersion := range desiredCRD.Spec.Versions {
+		liveVersion, ok := liveVersions[desiredVersion.Name]
+		if !ok || liveVersion.Served != desiredVersion.Served || liveVersion.Storage != desiredVersion.Storage ||
+			!reflect.DeepEqual(liveVersion.Schema, desiredVersion.Schema) || !reflect.DeepEqual(liveVersion.Subresources, desiredVersion.Subresources) {
+			return ownershipConflict(desired, fmt.Sprintf("shared CRD version %q is incompatible with the live contract", desiredVersion.Name))
+		}
+	}
+	if !compatibleCRDConversion(liveCRD.Spec.Conversion, desiredCRD.Spec.Conversion) {
+		return ownershipConflict(desired, "shared CRD conversion is incompatible with the live contract")
+	}
+	return nil
+}
+
+func compatibleCRDConversion(live, desired *apiextensionsv1.CustomResourceConversion) bool {
+	if live == nil {
+		live = &apiextensionsv1.CustomResourceConversion{Strategy: apiextensionsv1.NoneConverter}
+	}
+	if desired == nil {
+		desired = &apiextensionsv1.CustomResourceConversion{Strategy: apiextensionsv1.NoneConverter}
+	}
+	return live.Strategy == desired.Strategy && reflect.DeepEqual(live.Webhook, desired.Webhook)
 }
 
 func objectKey(object *unstructured.Unstructured) string {

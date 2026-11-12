@@ -307,6 +307,9 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 		now = r.Clock
 	}
 	plan := planner.Build(installation.Spec, installation.Status.ObservedVersion)
+	if plan.Blocking == "" && installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Central.Replicas == 2 && installation.Status.ApplyCheckpoint == nil {
+		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "Validate", "spec.central.replicas=2 is permitted only for an existing retained RAFT topology transition"
+	}
 	if err := r.checkExecutingRecovery(ctx, installation); err != nil {
 		if !errors.Is(err, errRecoveryExecuting) {
 			return reconcile.Result{}, err

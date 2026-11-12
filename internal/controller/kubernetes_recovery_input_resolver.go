@@ -203,7 +203,11 @@ func (r *KubernetesOfflineRebuildWorkloadResolver) resolveApproval(ctx context.C
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: r.Namespace, Name: plan.ApprovalRef.Name}, approvalRecord); err != nil {
 		return fmt.Errorf("read offline rebuild recovery approval status: %w", err)
 	}
-	if approvalRecord.Status.DecisionDigest != digest {
+	secondDigest, err := approval.ValidateRecoveryApprovalRecord(approvalRecord, r.Namespace, operatorv1alpha1.InstallationReference{Name: plan.InstallationName, UID: plan.InstallationUID}, *plan.ApprovalRef, binding, true)
+	if err != nil {
+		return fmt.Errorf("revalidate offline rebuild recovery approval snapshot: %w", err)
+	}
+	if secondDigest != digest || approvalRecord.Status.DecisionDigest != secondDigest {
 		return errors.New("offline rebuild recovery approval decision digest does not match the canonical plan")
 	}
 	if err := approval.ValidateRecoveryApprovalStatus(approvalRecord, digest); err != nil {
