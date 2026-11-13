@@ -45,8 +45,8 @@ func recoveryAPIRecord(ctx context.Context, kube client.Client, installation *ap
 		request := &api.KubeOVNRecoveryRequest{
 			Name: "approval-binding-" + uuid.New().String(), Namespace: installation.Namespace,
 			Spec: api.KubeOVNRecoveryRequestSpec{
-				InstallationRef: installation.Name, Reason: "synthetic API/provider request identity", Mode: api.RecoveryMode(mode),
-				BackupRef: record.Spec.BackupRef, ApprovedBy: "CI API contract test", ExpiresAt: record.Spec.ExpiresAt,
+				InstallationName: installation.Name, Reason: "synthetic API/provider request identity", Mode: api.RecoveryMode(mode),
+				BackupRef: record.Spec.BackupRef, RequestedBy: "CI API contract test", ExpiresAt: record.Spec.ExpiresAt,
 			},
 		}
 		if err := kube.Create(ctx, request); err != nil {

@@ -110,7 +110,7 @@ func TestEnsureBackupRetentionProtectsActiveRecoveryRequest(t *testing.T) {
 	recoveryRef := "sha256:" + strings.Repeat("d", 64)
 	request := &api.KubeOVNRecoveryRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "recover", Namespace: installation.Namespace, UID: types.UID("request-uid"), Generation: 1},
-		Spec:       api.KubeOVNRecoveryRequestSpec{InstallationRef: installation.Name, BackupRef: recoveryRef},
+		Spec:       api.KubeOVNRecoveryRequestSpec{InstallationName: installation.Name, BackupRef: recoveryRef},
 		Status: api.KubeOVNRecoveryRequestStatus{
 			Phase: api.RecoveryPhaseAwaitingExecution,
 			Plan:  &api.RecoveryPlanStatus{InstallationUID: installation.UID, BackupRef: recoveryRef},

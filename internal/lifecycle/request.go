@@ -38,9 +38,9 @@ type Inventory struct {
 }
 
 type Addition struct {
-	Workload          workload.Request `json:"workload"`
-	NorthboundAddress string           `json:"northboundAddress"`
-	SouthboundAddress string           `json:"southboundAddress"`
+	Workload           workload.Request `json:"workload"`
+	NorthboundEndpoint string           `json:"northboundEndpoint"`
+	SouthboundEndpoint string           `json:"southboundEndpoint"`
 }
 
 // Request is immutable once Begin accepts it. Replicas in the installation are
@@ -187,7 +187,7 @@ var databaseNames = [2]string{"OVN_Northbound", "OVN_Southbound"}
 
 func (r Request) launch(result prepare.Result) central.Request {
 	launch := central.Request{FormatVersion: 1, Preparation: r.Add.Workload.Preparation, Prepared: result,
-		NorthboundAddress: r.Add.NorthboundAddress, SouthboundAddress: r.Add.SouthboundAddress}
+		NorthboundEndpoint: r.Add.NorthboundEndpoint, SouthboundEndpoint: r.Add.SouthboundEndpoint}
 	if r.Add.Workload.TLSSecret != nil {
 		launch.TLS = &central.TLSFiles{
 			PrivateKey:  central.TLSMountPath + "/key",
@@ -196,7 +196,7 @@ func (r Request) launch(result prepare.Result) central.Request {
 		}
 	}
 	for i, db := range r.Databases {
-		remotes := []string{[]string{launch.NorthboundAddress, launch.SouthboundAddress}[i]}
+		remotes := []string{[]string{launch.NorthboundEndpoint, launch.SouthboundEndpoint}[i]}
 		for _, peer := range db.Peers {
 			remotes = append(remotes, peer.ClientAddress)
 		}
@@ -216,7 +216,7 @@ func (r Request) inventories(state State) []Inventory {
 		result[i].Peers = slices.Clone(result[i].Peers)
 		if state.Prepared != nil {
 			db := state.Prepared.Databases[i]
-			result[i].Peers = append(result[i].Peers, Peer{Name: state.MemberRecord.Name + "-0", ServerID: db.ServerID, Address: db.Address, ClientAddress: []string{r.Add.NorthboundAddress, r.Add.SouthboundAddress}[i]})
+			result[i].Peers = append(result[i].Peers, Peer{Name: state.MemberRecord.Name + "-0", ServerID: db.ServerID, Address: db.Address, ClientAddress: []string{r.Add.NorthboundEndpoint, r.Add.SouthboundEndpoint}[i]})
 		}
 	}
 	return result
@@ -277,7 +277,7 @@ func RebindAutomaticReplacement(request Request, retained, observed health.Centr
 		}
 	}
 	if !changed {
-		return Request{}, errors.New("automatic replacement did not change the target endpoint addresses")
+		return Request{}, errors.New("automatic replacement did not change the target Pod addresses")
 	}
 	for database := range request.Databases {
 		if !sameNonTargetPeers(request.Databases[database], retained, observed, request.RemoveEndpoint, database) {

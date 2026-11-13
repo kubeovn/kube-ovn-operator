@@ -18,10 +18,10 @@ func TestValidatePairRequiresComplementaryRolesAndMatchingVersion(t *testing.T) 
 	}
 }
 
-func TestValidatePairRejectsSameRoleAndWrongPairRef(t *testing.T) {
+func TestValidatePairRejectsSameRoleAndWrongPeerName(t *testing.T) {
 	local := validConfig()
 	local.Role = operatorv1alpha1.HCPRoleDataPlane
-	local.PairRef = "other"
+	local.PeerName = "other"
 	peer := Peer{Name: "data", Version: "v1.17.0", Role: operatorv1alpha1.HCPRoleDataPlane, NBEndpoint: "tcp:nb.remote:6641", SBEndpoint: "tcp:sb.remote:6642"}
 	if err := ValidatePair(local, "v1.17.0", peer); err == nil {
 		t.Fatal("expected invalid pair")
@@ -38,7 +38,7 @@ func TestValidateConfigRequiresNamespaceSecretAndStrictEndpoints(t *testing.T) {
 		mutate func(*operatorv1alpha1.HCPConfig)
 		want   string
 	}{
-		{"namespace", func(config *operatorv1alpha1.HCPConfig) { config.CentralNamespace = "bad namespace" }, "centralNamespace"},
+		{"namespace", func(config *operatorv1alpha1.HCPConfig) { config.PeerNamespace = "bad namespace" }, "peerNamespace"},
 		{"secret", func(config *operatorv1alpha1.HCPConfig) { config.TLSSecretRef = nil }, "tlsSecretRef"},
 		{"protocol", func(config *operatorv1alpha1.HCPConfig) { config.NBEndpoint = "http:nb.local:6641" }, "tcp or ssl"},
 		{"host", func(config *operatorv1alpha1.HCPConfig) { config.NBEndpoint = "tcp::6641" }, "host"},
@@ -74,8 +74,8 @@ func TestValidateConfigAcceptsIPv6AndDisabledOnlyFields(t *testing.T) {
 
 func validConfig() operatorv1alpha1.HCPConfig {
 	return operatorv1alpha1.HCPConfig{
-		Enabled: true, Role: operatorv1alpha1.HCPRoleManagement, PairRef: "data",
-		CentralNamespace: "hcp", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"},
+		Enabled: true, Role: operatorv1alpha1.HCPRoleManagement, PeerName: "data",
+		PeerNamespace: "hcp", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"},
 		NBEndpoint: "tcp:nb.local:6641", SBEndpoint: "ssl:sb.local:6642",
 	}
 }

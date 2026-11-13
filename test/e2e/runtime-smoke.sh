@@ -42,7 +42,7 @@ spec:
   chart:
     source: http://127.0.0.1:18082/kube-ovn-1.17.0.tgz
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
-  mode: dataPlaneOnly
+  mode: nodeNetworking
   central:
     mode: raft
     replicas: 3

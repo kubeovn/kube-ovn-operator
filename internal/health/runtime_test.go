@@ -69,7 +69,7 @@ func TestNorthdRuntimeRequiresOneActiveAndBothConnections(t *testing.T) {
 func dataPlaneFixture(t *testing.T) (*operatorv1alpha1.KubeOVNInstallation, client.Client) {
 	t.Helper()
 	installation, kube, objects := healthFixture(t)
-	installation.Spec.Mode = operatorv1alpha1.InstallationModeDataPlaneOnly
+	installation.Spec.Mode = operatorv1alpha1.InstallationModeNodeNetworking
 	workload := objects[0].(*appsv1.Deployment)
 	ds := &appsv1.DaemonSet{Name: "ovs-ovn", Namespace: installation.Namespace, UID: "ovs-daemonset", Generation: 1, Labels: workload.Labels, OwnerReferences: workload.OwnerReferences,
 		Spec:   appsv1.DaemonSetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "ovs"}}},

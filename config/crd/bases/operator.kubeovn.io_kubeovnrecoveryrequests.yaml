@@ -24,22 +24,38 @@ spec:
           properties:
             spec:
               type: object
-              required: [installationRef, reason, mode, approvedBy, expiresAt]
+              required: [installationName, reason, mode, requestedBy, expiresAt]
               properties:
                 suspend: {type: boolean, default: false}
-                installationRef: {type: string}
-                reason: {type: string}
-                mode: {type: string, enum: [rejoin, reconvert, freshBootstrap]}
-                targetMemberRef: {type: string}
-                backupRef: {type: string}
+                installationName:
+                  type: string
+                  description: "Name of the KubeOVNInstallation in this namespace to recover."
+                reason:
+                  type: string
+                  description: "Human-readable reason for the recovery request."
+                mode:
+                  type: string
+                  description: "Recovery operation; rejoin restores a member, while reconvert and freshBootstrap rebuild from a verified backup."
+                  enum: [rejoin, reconvert, freshBootstrap]
+                targetMemberName:
+                  type: string
+                  description: "Name of the explicit central.memberRequests entry to rejoin."
+                backupRef:
+                  type: string
+                  description: "Digest of the verified backup pair used by reconvert or freshBootstrap."
                 approvalRef:
                   type: object
                   required: [name, uid]
                   properties:
                     name: {type: string, minLength: 1, maxLength: 253}
                     uid: {type: string, minLength: 1, maxLength: 128}
-                approvedBy: {type: string}
-                expiresAt: {type: string, format: date-time}
+                requestedBy:
+                  type: string
+                  description: "Caller-supplied audit label identifying the requester; it does not grant recovery authority."
+                expiresAt:
+                  type: string
+                  description: "Time after which this request cannot be admitted."
+                  format: date-time
             status:
               type: object
               properties:
@@ -58,7 +74,9 @@ spec:
                     sourceVersion: {type: string}
                     targetVersion: {type: string}
                     chartDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
-                    targetMemberRef: {type: string}
+                    targetMemberName:
+                      type: string
+                      description: "Name of the central.memberRequests entry bound into the admitted plan."
                     targetMemberDigest: {type: string}
                     topologyDigest: {type: string}
                     backupRef: {type: string}
@@ -79,6 +97,31 @@ spec:
                     rpoSeconds: {type: integer, format: int64}
                     rtoSeconds: {type: integer, format: int64}
                     reason: {type: string}
+                    operation:
+                      type: object
+                      description: "Admitted central lifecycle operation identity used to resume a rejoin after restart."
+                      required: [journalName, journalUID, requestName, requestUID, inventory, handoffApplied]
+                      properties:
+                        journalName: {type: string}
+                        journalUID: {type: string}
+                        requestName: {type: string}
+                        requestUID: {type: string}
+                        inventory:
+                          type: object
+                          required: [name, uid, digest]
+                          properties:
+                            name: {type: string}
+                            uid: {type: string}
+                            digest: {type: string}
+                        handoffInventory:
+                          type: object
+                          required: [name, uid, digest]
+                          properties:
+                            name: {type: string}
+                            uid: {type: string}
+                            digest: {type: string}
+                        completionDigest: {type: string}
+                        handoffApplied: {type: boolean}
                     jobName: {type: string}
                     jobUID: {type: string}
                     jobPlanDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}

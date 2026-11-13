@@ -41,7 +41,7 @@ func (o *RuntimeObserver) Observe(ctx context.Context, installation *operatorv1a
 		Northd:    metav1.Condition{Type: "NorthdReady", Status: metav1.ConditionTrue, Reason: "NotRequired", Message: "This installation does not manage northd"},
 		DataPlane: metav1.Condition{Type: "DataPlaneReady", Status: metav1.ConditionTrue, Reason: "NotRequired", Message: "This installation does not manage a data plane"},
 	}
-	if installation.Spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly {
+	if installation.Spec.Mode != operatorv1alpha1.InstallationModeNodeNetworking {
 		processes, err := o.observeNorthd(ctx, installation)
 		if err != nil {
 			report.Northd.Status, report.Northd.Reason, report.Northd.Message = metav1.ConditionFalse, "NorthdUnhealthy", err.Error()

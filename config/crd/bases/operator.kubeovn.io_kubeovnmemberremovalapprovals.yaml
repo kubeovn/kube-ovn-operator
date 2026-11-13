@@ -50,18 +50,21 @@ spec:
                       message: The approval decision is immutable.
                   properties:
                     installationRef:
+                      description: "Name and UID of the installation whose lost members may be removed."
                       type: object
                       required: [name, uid]
                       properties:
                         name: {type: string, minLength: 1, maxLength: 253}
                         uid: {type: string, minLength: 1, maxLength: 128}
                     operationID:
+                      description: "UUID of the single member-removal operation authorized by this decision."
                       type: string
                       maxLength: 36
                       pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                     reason: {type: string, minLength: 1, maxLength: 2048, pattern: '\S'}
                     expiresAt: {type: string, format: date-time}
                     targets:
+                      description: "Explicit OVN database member identities proven permanently lost."
                       type: array
                       minItems: 1
                       maxItems: 2
@@ -80,7 +83,7 @@ spec:
                             type: string
                             maxLength: 36
                             pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                          address:
+                          raftAddress:
                             type: string
                             maxLength: 80
                             pattern: '^(tcp|ssl):([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|\[[0-9a-f:]+\]):[0-9]+$'

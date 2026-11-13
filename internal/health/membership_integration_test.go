@@ -304,7 +304,7 @@ func TestLiveOVNMembershipReplacementAndKick(t *testing.T) {
 		Spec: operatorv1alpha1.MemberRemovalApprovalSpec{Decision: operatorv1alpha1.MemberRemovalDecision{
 			InstallationRef: operatorv1alpha1.InstallationReference{Name: installation.Name, UID: installation.UID},
 			OperationID:     uuid.New().String(), Reason: change.Reason, ExpiresAt: metav1.NewTime(time.Now().Add(time.Hour)),
-			Targets: []operatorv1alpha1.MemberRemovalTarget{{Database: snapshot.Database, ClusterID: snapshot.ClusterID, ServerID: lost.ServerID, Address: lost.Address}},
+			Targets: []operatorv1alpha1.MemberRemovalTarget{{Database: snapshot.Database, ClusterID: snapshot.ClusterID, ServerID: lost.ServerID, RaftAddress: lost.Address}},
 		}},
 	}
 	if err := kube.Create(t.Context(), approvalRecord); err != nil {

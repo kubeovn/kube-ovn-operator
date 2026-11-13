@@ -130,7 +130,7 @@ func (p *Kubernetes) VerifyRetainedReplacement(ctx context.Context, installation
 	}
 	changed, same := saved.Topology.SameIdentityExceptEndpoints(observed, targetPod)
 	if !same || !changed {
-		return health.CentralTopology{}, errors.New("automatic replacement observation changed an identity outside the target endpoint or did not observe address drift")
+		return health.CentralTopology{}, errors.New("automatic replacement observation changed an identity outside the target Pod or did not observe address drift")
 	}
 	if err := p.guard(ctx, installation); err != nil {
 		return health.CentralTopology{}, err

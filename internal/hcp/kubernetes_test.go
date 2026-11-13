@@ -47,7 +47,7 @@ func TestKubernetesPeerProviderObservesReadyReciprocalPeer(t *testing.T) {
 		Installation: types.NamespacedName{Namespace: "default", Name: "data"},
 		Version:      "v1.17.0",
 		Config: operatorv1alpha1.HCPConfig{
-			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "management", CentralNamespace: "hcp",
+			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 			NBEndpoint: "tcp:nb.remote:6641", SBEndpoint: "tcp:sb.remote:6642", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "local-tls"},
 		},
 		TLSSecret: SecretIdentity{Namespace: secret.Namespace, Name: secret.Name, UID: secret.UID, ResourceVersion: secret.ResourceVersion},
@@ -69,14 +69,14 @@ func TestKubernetesPeerProviderRequiresReciprocalPair(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer := readyPeerInstallation()
-	peer.Spec.HCP.PairRef = "other"
+	peer.Spec.HCP.PeerName = "other"
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(peer).Build()
 	provider := &KubernetesPeerProvider{Reader: reader}
 	report, err := provider.Observe(t.Context(), validPeerRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Ready || report.Paired || report.Reason != "PeerPairRefMismatch" {
+	if report.Ready || report.Paired || report.Reason != "PeerNameMismatch" {
 		t.Fatalf("non-reciprocal peer was accepted: %+v", report)
 	}
 }
@@ -104,7 +104,7 @@ func validPeerRequest() PeerRequest {
 		Installation: types.NamespacedName{Namespace: "default", Name: "data"},
 		Version:      "v1.17.0",
 		Config: operatorv1alpha1.HCPConfig{
-			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "management", CentralNamespace: "hcp",
+			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 			NBEndpoint: "tcp:nb.remote:6641", SBEndpoint: "tcp:sb.remote:6642", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "local-tls"},
 		},
 		TLSSecret: SecretIdentity{Namespace: "default", Name: "local-tls", UID: types.UID("secret-uid"), ResourceVersion: "7"},
@@ -118,7 +118,7 @@ func readyPeerInstallation() *operatorv1alpha1.KubeOVNInstallation {
 			Version: "v1.17.0",
 			Mode:    operatorv1alpha1.InstallationModeCentralOnly,
 			HCP: operatorv1alpha1.HCPConfig{
-				Enabled: true, Role: operatorv1alpha1.HCPRoleManagement, PairRef: "data", CentralNamespace: "default",
+				Enabled: true, Role: operatorv1alpha1.HCPRoleManagement, PeerName: "data", PeerNamespace: "default",
 				NBEndpoint: "tcp:nb.remote:6641", SBEndpoint: "tcp:sb.remote:6642", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "peer-tls"},
 			},
 		},

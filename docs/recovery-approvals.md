@@ -23,7 +23,7 @@ installation that will be changed:
 For a `KubeOVNRecoveryRequest` operation, `requestRef` additionally pins the
 request name, UID, and generation. A version rollback leaves `requestRef` empty
 and binds directly to the installation generation and version pair. The
-`approvedBy` field on a recovery request is audit input only; it never grants
+`requestedBy` field on a recovery request is audit input only; it never grants
 authority.
 
 The `revoked` field can be changed from `false` to `true` once. Revocation
@@ -62,7 +62,7 @@ run, and the request cannot acquire recovery authority while suspended.
 Suspension cannot be changed after a plan or execution has been recorded. It
 is a preparation gate; cancellation of an admitted operation still follows the
 existing fail-closed recovery contract. Requests that omit `suspend` keep their
-existing immediate admission behavior. `approvedBy` remains audit input only.
+existing immediate admission behavior. `requestedBy` remains audit input only.
 
 ## Lifecycle
 

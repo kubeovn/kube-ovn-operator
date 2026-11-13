@@ -41,13 +41,13 @@ func ValidateConfig(config operatorv1alpha1.HCPConfig) error {
 	if config.Role != operatorv1alpha1.HCPRoleManagement && config.Role != operatorv1alpha1.HCPRoleDataPlane {
 		return fmt.Errorf("HCP role must be management or dataPlane")
 	}
-	if strings.TrimSpace(config.PairRef) == "" {
-		return fmt.Errorf("HCP pairRef is required")
+	if strings.TrimSpace(config.PeerName) == "" {
+		return fmt.Errorf("HCP peerName is required")
 	}
-	if config.CentralNamespace == "" {
-		return fmt.Errorf("HCP centralNamespace is required")
-	} else if messages := kvalidation.IsDNS1123Label(config.CentralNamespace); len(messages) != 0 {
-		return fmt.Errorf("HCP centralNamespace %q is invalid: %s", config.CentralNamespace, messages[0])
+	if config.PeerNamespace == "" {
+		return fmt.Errorf("HCP peerNamespace is required")
+	} else if messages := kvalidation.IsDNS1123Label(config.PeerNamespace); len(messages) != 0 {
+		return fmt.Errorf("HCP peerNamespace %q is invalid: %s", config.PeerNamespace, messages[0])
 	}
 	if config.TLSSecretRef == nil || strings.TrimSpace(config.TLSSecretRef.Name) == "" {
 		return fmt.Errorf("HCP tlsSecretRef.name is required")
@@ -82,8 +82,8 @@ func ValidatePair(local operatorv1alpha1.HCPConfig, localVersion string, peer Pe
 	if local.Role == peer.Role {
 		return fmt.Errorf("HCP pair roles must be complementary, got %q and %q", local.Role, peer.Role)
 	}
-	if strings.TrimSpace(local.PairRef) == "" || local.PairRef != peer.Name {
-		return fmt.Errorf("HCP pairRef %q does not identify peer %q", local.PairRef, peer.Name)
+	if strings.TrimSpace(local.PeerName) == "" || local.PeerName != peer.Name {
+		return fmt.Errorf("HCP peerName %q does not identify peer %q", local.PeerName, peer.Name)
 	}
 	if localVersion == "" || peer.Version == "" || localVersion != peer.Version {
 		return fmt.Errorf("HCP versions must match: local %q, peer %q", localVersion, peer.Version)

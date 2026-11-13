@@ -135,7 +135,7 @@ func PinDeploymentRetirement(ctx context.Context, kube client.Reader, installati
 }
 
 // PinDeploymentRetirementAfterLoss admits a Deployment replacement whose
-// retained endpoint has disappeared or been replaced. The old endpoint
+// retained Pod has disappeared or been replaced. The old endpoint
 // remains UID-pinned from the retained topology, while every surviving Pod is
 // pinned and at most one replacement Pod is allowed. The caller must provide
 // an explicit permanent-loss approval in the lifecycle inventory; this helper
@@ -414,7 +414,7 @@ func (e *Executor) retirementTarget(ctx context.Context, target Retirement) (*re
 				return nil, errors.New("retirement Deployment has a replacement Pod after target removal")
 			}
 			if target.EndpointMissing && (state.endpointPresent || state.replacementPresent || len(pods) != int(target.Replicas-1)) {
-				return nil, errors.New("retirement Deployment lost endpoint replacement has not converged")
+				return nil, errors.New("retirement Deployment lost Pod replacement has not converged")
 			}
 		}
 		return state, nil

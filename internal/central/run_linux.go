@@ -72,7 +72,7 @@ func Run(ctx context.Context, options Options, request Request) error {
 		command := files.Command(options.OVSDBServer)
 		runpath := attachRuntime(command, rundir, lock)
 		name := []string{"ovnnb_db", "ovnsb_db"}[i]
-		remote, err := passiveAddress([]string{request.NorthboundAddress, request.SouthboundAddress}[i])
+		remote, err := passiveAddress([]string{request.NorthboundEndpoint, request.SouthboundEndpoint}[i])
 		if err != nil {
 			return err
 		}

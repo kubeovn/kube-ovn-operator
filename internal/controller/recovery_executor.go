@@ -46,7 +46,7 @@ func (e *LifecycleRecoveryExecutor) Execute(ctx context.Context, plan RecoveryPl
 	if plan.Mode != operatorv1alpha1.RecoveryModeRejoin {
 		return e.executeDestructive(ctx, plan)
 	}
-	if plan.TargetMemberRef == "" || plan.TargetMemberDigest == "" || plan.TopologyDigest == "" {
+	if plan.TargetMemberName == "" || plan.TargetMemberDigest == "" || plan.TopologyDigest == "" {
 		return errors.New("rejoin recovery plan is missing its target or topology identity")
 	}
 	installation := new(operatorv1alpha1.KubeOVNInstallation)
@@ -77,7 +77,7 @@ func (e *LifecycleRecoveryExecutor) Execute(ctx context.Context, plan RecoveryPl
 	if err != nil {
 		return err
 	}
-	if targetRef != plan.TargetMemberRef || targetDigest != plan.TargetMemberDigest {
+	if targetRef != plan.TargetMemberName || targetDigest != plan.TargetMemberDigest {
 		return errors.New("recovery target member changed after plan admission")
 	}
 	if request.Status.Execution == nil {
@@ -102,9 +102,9 @@ func (e *LifecycleRecoveryExecutor) Execute(ctx context.Context, plan RecoveryPl
 			if err := retained.Validate(); err != nil {
 				return fmt.Errorf("validate retained topology for rejoin: %w", err)
 			}
-			lifecycleRequest, err := lifecycle.SelectAdditionForMember(centralCtx, e.Lifecycle.Reader(), installation, retained, plan.TargetMemberRef)
+			lifecycleRequest, err := lifecycle.SelectAdditionForMember(centralCtx, e.Lifecycle.Reader(), installation, retained, plan.TargetMemberName)
 			if err != nil {
-				return fmt.Errorf("select rejoin target %q: %w", plan.TargetMemberRef, err)
+				return fmt.Errorf("select rejoin target %q: %w", plan.TargetMemberName, err)
 			}
 			if lifecycleRequest == nil {
 				return errors.New("rejoin target did not produce a lifecycle operation")

@@ -21,7 +21,7 @@ func TestSuspendedRecoveryRequestWaitsBeforeBindingAndAdmission(t *testing.T) {
 			if mode != api.RecoveryModeRejoin {
 				installation.Status.ObservedVersion = installation.Spec.Version
 				installation.Status.LastBackup = &api.BackupStatus{ID: testBackupPairID(), Version: installation.Spec.Version, DatabaseRefs: testBackupPairRefs(), TopologyDigest: installation.Status.Topology.Inventory.Digest, CompletedAt: metav1.NewTime(now)}
-				request.Spec.TargetMemberRef, request.Spec.BackupRef = "", testBackupPairID()
+				request.Spec.TargetMemberName, request.Spec.BackupRef = "", testBackupPairID()
 			}
 			kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 			calls := 0

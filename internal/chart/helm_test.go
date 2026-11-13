@@ -64,7 +64,7 @@ func chartFixture(t *testing.T, template string) (*HelmRenderer, operatorv1alpha
 	caps.KubeVersion = chartutil.KubeVersion{Version: "v1.34.3", Major: "1", Minor: "34"}
 	return &HelmRenderer{Name: "tenant", Namespace: "network", Mapper: mapper, Capabilities: caps, HTTPClient: server.Client()}, operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Chart: operatorv1alpha1.ChartSpec{Source: server.URL + "/chart.tgz", Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(data))},
-		Mode:      operatorv1alpha1.InstallationModeDataPlaneOnly,
+		Mode:      operatorv1alpha1.InstallationModeNodeNetworking,
 		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
 		DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example", SBEndpoint: "sb.example"}},
 	}
@@ -233,10 +233,10 @@ spec:
 	renderer := &HelmRenderer{Name: "tenant", Namespace: "network", Mapper: mapper, Capabilities: caps, HTTPClient: server.Client()}
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Chart: operatorv1alpha1.ChartSpec{Source: server.URL, Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(data))},
-		Mode:    operatorv1alpha1.InstallationModeDataPlaneOnly,
+		Mode:    operatorv1alpha1.InstallationModeNodeNetworking,
 		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
 		HCP: operatorv1alpha1.HCPConfig{
-			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "management", CentralNamespace: "hcp",
+			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 			NBEndpoint: "ssl:nb.example:6641", SBEndpoint: "ssl:sb.example:6642",
 			TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "remote-ovn-tls"},
 		},
@@ -416,7 +416,7 @@ func TestHelmRendererPullsOCIChartLayer(t *testing.T) {
 	caps.KubeVersion = chartutil.KubeVersion{Version: "v1.34.3", Major: "1", Minor: "34"}
 	source := "oci://" + server.Listener.Addr().String() + "/repo/kube-ovn:1.17.0"
 	renderer := &HelmRenderer{Name: "tenant", Namespace: "network", Mapper: mapper, Capabilities: caps, HTTPClient: server.Client(), AllowedChartHosts: []string{"charts.example.invalid"}}
-	spec := operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Chart: operatorv1alpha1.ChartSpec{Source: source, Digest: chartDigest}, Mode: operatorv1alpha1.InstallationModeDataPlaneOnly, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}, DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example:6641", SBEndpoint: "sb.example:6642"}}}
+	spec := operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Chart: operatorv1alpha1.ChartSpec{Source: source, Digest: chartDigest}, Mode: operatorv1alpha1.InstallationModeNodeNetworking, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}, DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example:6641", SBEndpoint: "sb.example:6642"}}}
 	if _, err := renderer.Render(t.Context(), spec); err == nil || !strings.Contains(err.Error(), "not in the operator chart host allowlist") {
 		t.Fatalf("untrusted OCI chart host was accepted: %v", err)
 	}
@@ -532,7 +532,7 @@ func TestHelmRendererRejectsChartRedirectOutsideAllowlist(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0",
 		Chart:   operatorv1alpha1.ChartSpec{Source: server.URL + "/chart.tgz", Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(data))},
-		Mode:    operatorv1alpha1.InstallationModeDataPlaneOnly,
+		Mode:    operatorv1alpha1.InstallationModeNodeNetworking,
 		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
 		DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{
 			NBEndpoint: "nb.example:6641",
@@ -573,7 +573,7 @@ data:
 	if _, err := renderer.Render(t.Context(), spec); err == nil || !strings.Contains(err.Error(), "expected 3") {
 		t.Fatalf("unexpected mismatch result: %v", err)
 	}
-	spec.Central.Mode = operatorv1alpha1.CentralModeSingle
+	spec.Central.Mode = operatorv1alpha1.CentralModeStandalone
 	spec.Central.Replicas = 1
 	spec.Central.Storage.Size = "5Gi"
 	got, err := renderer.Render(t.Context(), spec)
@@ -624,7 +624,7 @@ func TestReleasedKubeOVNChart(t *testing.T) {
 	caps.KubeVersion = chartutil.KubeVersion{Version: "v1.34.3", Major: "1", Minor: "34"}
 	renderer := &HelmRenderer{Name: "kube-ovn", Namespace: "network", Mapper: mapper, Capabilities: caps, HTTPClient: server.Client(), Reader: fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodes...).Build()}
 	for _, stack := range []string{"", "ipv4", "ipv6", "dual_stack"} {
-		for _, mode := range []operatorv1alpha1.InstallationMode{operatorv1alpha1.InstallationModeFull, operatorv1alpha1.InstallationModeCentralOnly, operatorv1alpha1.InstallationModeDataPlaneOnly} {
+		for _, mode := range []operatorv1alpha1.InstallationMode{operatorv1alpha1.InstallationModeFull, operatorv1alpha1.InstallationModeCentralOnly, operatorv1alpha1.InstallationModeNodeNetworking} {
 			t.Run(string(mode)+"/"+stack, func(t *testing.T) {
 				spec := operatorv1alpha1.KubeOVNInstallationSpec{
 					Version: "v1.16.13", Chart: operatorv1alpha1.ChartSpec{Source: server.URL, Digest: digest}, Mode: mode, NetworkStack: stack,
@@ -674,7 +674,7 @@ func TestReleasedKubeOVNChart(t *testing.T) {
 						t.Fatal("namespace mismatch")
 					}
 				}
-				if central != (mode != operatorv1alpha1.InstallationModeDataPlaneOnly) || controller != (mode != operatorv1alpha1.InstallationModeCentralOnly) || ovs != controller || cni != controller {
+				if central != (mode != operatorv1alpha1.InstallationModeNodeNetworking) || controller != (mode != operatorv1alpha1.InstallationModeCentralOnly) || ovs != controller || cni != controller {
 					t.Fatalf("incorrect mode split: central=%t controller=%t ovs=%t cni=%t", central, controller, ovs, cni)
 				}
 			})
@@ -715,10 +715,10 @@ func TestReleasedKubeOVNChartBindsExternalHCPSSL(t *testing.T) {
 	renderer := &HelmRenderer{Name: "kube-ovn", Namespace: "network", Mapper: mapper, Capabilities: caps, HTTPClient: server.Client()}
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.16.13", Chart: operatorv1alpha1.ChartSpec{Source: server.URL, Digest: digest},
-		Mode:    operatorv1alpha1.InstallationModeDataPlaneOnly,
+		Mode:    operatorv1alpha1.InstallationModeNodeNetworking,
 		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
 		HCP: operatorv1alpha1.HCPConfig{
-			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "management", CentralNamespace: "hcp",
+			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 			NBEndpoint: "ssl:nb.example:6641", SBEndpoint: "ssl:sb.example:6642",
 			TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "remote-ovn-tls"},
 		},

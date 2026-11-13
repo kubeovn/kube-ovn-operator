@@ -133,13 +133,13 @@ The `KubeOVNRecoveryRequest` API resolves and pins a namespaced installation
 identity before it records an immutable recovery plan. The plan digest covers
 the request generation, installation UID/generation, mode, backup reference,
 reason, expiry, source/target versions, target Chart digest, both database
-references and self-reported `approvedBy`; the latter is audit input and is
+references and self-reported `requestedBy`; the latter is audit input and is
 never proof of authority. Rejoin requests may omit a backup, while reconvert
 and fresh-bootstrap requests must name the installation's verified backup pair
 from `status.lastBackup` or a still-valid verified upgrade checkpoint. The
 selected pair must match the observed version, configured destination and
 retained topology.
-Rejoin requests must name an explicit `spec.targetMemberRef` from
+Rejoin requests must name an explicit `spec.targetMemberName` from
 `central.memberRequests`; the plan also records the target-slot and retained
 topology digests so a changed node, volume, image or endpoint cannot be used by
 an executor after admission.
@@ -204,7 +204,7 @@ and thirty days. Once due, the controller captures a verified NB/SB pair under
 both operation Leases, using the retained topology and observed version as the
 binding. The scheduler persists `status.lastBackup` and exits before Chart
 rendering; it never changes `status.applyCheckpoint` or grants apply
-authorization. It skips HCP/data-plane-only installations, active lifecycle
+authorization. It skips HCP/nodeNetworking installations, active lifecycle
 operations, version-only upgrades and installations without retained topology.
 `spec.upgrade.backup.retention.keepLast` and `maxAge` enable cleanup; empty
 fields disable deletion. Cleanup runs under both operation Leases, protects
@@ -298,7 +298,7 @@ HTTP requests. It rejects stale pod/container/node identities or changed
 Service/DaemonSet configuration. Checks run with at most eight concurrent exec
 requests and a 60-second observation deadline. Timeout leaves the network
 unready; partial coverage is never promoted to success. These are sampled HTTP
-and DNS checks, not a complete data-plane conformance suite. Control-plane-only
+and DNS checks, not a complete data-plane conformance suite. centralOnly
    installations skip them; external/HCP verification still awaits peer evidence.
 The default binary publishes a same-cluster Kubernetes peer provider's
 non-sensitive peer identity and endpoint evidence through the `HCPReady`
@@ -323,9 +323,9 @@ with the same contract.
    identity inventory and admits explicit `central.memberRequests` additions one
    at a time while retaining the Chart Deployment count; these requests are
    accepted only after that initial retained topology exists. A request can also
-   set `replaceEndpoint` to replace one pinned independent StatefulSet or Chart
+   set `replacePod` to replace one pinned independent StatefulSet or Chart
    Deployment Pod at the same replica count; a reduction can set
-   `retireEndpoint` for an exact Chart Deployment Pod; see [central
+   `retirePod` for an exact Chart Deployment Pod; see [central
    topology](central-topology.md). An explicit replacement, or an
    approval-backed request that infers one unique healthy target, may acknowledge
    stale RAFT or client `InternalIP` data only for that exact retained Pod/Node
@@ -333,7 +333,7 @@ with the same contract.
    remotes before admission. If a Chart Deployment Pod has already disappeared
    with a failed Node, the same explicit request may use a UID-pinned
    `removalApprovalRef` to authorize a permanent-loss kick and retire one pinned
-   ReplicaSet replacement Pod. If the endpoint is omitted, the selector may
+   ReplicaSet replacement Pod. If the Pod name is omitted, the selector may
    infer it only when exactly one retained Pod has disappeared, changed UID, or
    has the narrowly scoped healthy-node address drift described above; ambiguity,
    a transient Node condition and any non-target identity/address change remain

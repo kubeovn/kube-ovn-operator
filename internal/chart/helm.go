@@ -232,7 +232,7 @@ func isDataPlaneWorkload(object *unstructured.Unstructured) bool {
 }
 
 func externalHCPChartTLS(spec operatorv1alpha1.KubeOVNInstallationSpec) (string, bool, error) {
-	if spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly || !spec.HCP.Enabled {
+	if spec.Mode != operatorv1alpha1.InstallationModeNodeNetworking || !spec.HCP.Enabled {
 		return "", false, nil
 	}
 	northbound, err := hcp.ParseEndpoint(spec.HCP.NBEndpoint)
@@ -467,7 +467,7 @@ func allowedChartURL(u *url.URL) bool {
 
 func (r *HelmRenderer) bootstrapNodes(ctx context.Context, spec operatorv1alpha1.KubeOVNInstallationSpec, values map[string]any) error {
 	// NODE_IPS is an initial bootstrap input, never evidence of live membership.
-	if spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
+	if spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking {
 		return nil
 	}
 	if r.Reader == nil {

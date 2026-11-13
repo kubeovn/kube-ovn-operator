@@ -162,9 +162,9 @@ func newLaunchFixture(t *testing.T) *launchFixture {
 		}
 		f.request.Preparation.Databases = append(f.request.Preparation.Databases, prepare.Database{Name: database, ClusterID: transport.ClusterID, LocalAddress: raft[3], RemoteAddresses: raft[:3]})
 		if database == "OVN_Northbound" {
-			f.request.NorthboundAddress, f.request.NorthboundRemotes = clients[3], clients
+			f.request.NorthboundEndpoint, f.request.NorthboundRemotes = clients[3], clients
 		} else {
-			f.request.SouthboundAddress, f.request.SouthboundRemotes = clients[3], clients
+			f.request.SouthboundEndpoint, f.request.SouthboundRemotes = clients[3], clients
 		}
 		_ = listeners[3].Close()
 		_ = listeners[7].Close()

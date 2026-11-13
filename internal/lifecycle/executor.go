@@ -78,7 +78,7 @@ type Executor struct {
 }
 
 func New(kube client.Client, installation *api.KubeOVNInstallation, dependencies Dependencies) (*Executor, error) {
-	if kube == nil || installation == nil || installation.UID == "" || installation.Name == "" || installation.Namespace == "" || installation.Generation < 1 || installation.Spec.Central.Mode != api.CentralModeRaft || installation.Spec.Mode == api.InstallationModeDataPlaneOnly || installation.Spec.HCP.Enabled || dependencies.Database == nil {
+	if kube == nil || installation == nil || installation.UID == "" || installation.Name == "" || installation.Namespace == "" || installation.Generation < 1 || installation.Spec.Central.Mode != api.CentralModeRaft || installation.Spec.Mode == api.InstallationModeNodeNetworking || installation.Spec.HCP.Enabled || dependencies.Database == nil {
 		return nil, errors.New("joint lifecycle requires an uncached client, local RAFT installation and database factory")
 	}
 	return &Executor{kube: kube, installation: installation.DeepCopy(), dependencies: dependencies}, nil

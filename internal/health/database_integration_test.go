@@ -137,7 +137,7 @@ func TestLiveOVSDBStandaloneMetadata(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeSingle, []Database{state})
+		_, err = assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeStandalone, []Database{state})
 		return err
 	})
 }

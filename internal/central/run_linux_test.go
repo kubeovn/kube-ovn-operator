@@ -106,15 +106,15 @@ func TestCentralSupervisionStopsAndReapsEveryChild(t *testing.T) {
 }
 
 func TestLaunchAddressesAndTLSFailClosed(t *testing.T) {
-	request := Request{FormatVersion: 1, NorthboundAddress: "tcp:192.0.2.4:6641", SouthboundAddress: "tcp:192.0.2.4:6642", Preparation: prepare.Plan{Databases: []prepare.Database{{LocalAddress: "tcp:192.0.2.4:6643"}, {LocalAddress: "tcp:192.0.2.4:6644"}}}}
-	request.NorthboundRemotes = []string{request.NorthboundAddress, "tcp:192.0.2.1:6641"}
-	request.SouthboundRemotes = []string{request.SouthboundAddress, "tcp:192.0.2.1:6642"}
+	request := Request{FormatVersion: 1, NorthboundEndpoint: "tcp:192.0.2.4:6641", SouthboundEndpoint: "tcp:192.0.2.4:6642", Preparation: prepare.Plan{Databases: []prepare.Database{{LocalAddress: "tcp:192.0.2.4:6643"}, {LocalAddress: "tcp:192.0.2.4:6644"}}}}
+	request.NorthboundRemotes = []string{request.NorthboundEndpoint, "tcp:192.0.2.1:6641"}
+	request.SouthboundRemotes = []string{request.SouthboundEndpoint, "tcp:192.0.2.1:6642"}
 	if err := request.validate(); err != nil {
 		t.Fatal(err)
 	}
 	for _, address := range []string{"tcp:hostname:6641", "tcp:192.0.2.4:6643", "ssl:192.0.2.4:6641", "ptcp:6641:192.0.2.4", "tcp:[2001:0db8::1]:6641"} {
 		changed := request
-		changed.NorthboundAddress = address
+		changed.NorthboundEndpoint = address
 		if err := changed.validate(); err == nil {
 			t.Fatalf("unsafe address accepted: %s", address)
 		}
@@ -129,7 +129,7 @@ func TestLaunchAddressesAndTLSFailClosed(t *testing.T) {
 	if request.validate() == nil {
 		t.Fatal("TLS silently accepted for TCP-only launch")
 	}
-	request.NorthboundAddress = "ssl:192.0.2.4:6641"
+	request.NorthboundEndpoint = "ssl:192.0.2.4:6641"
 	if request.validate() == nil {
 		t.Fatal("missing TLS files accepted")
 	}

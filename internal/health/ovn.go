@@ -30,7 +30,7 @@ type OVNObserver struct {
 
 func (o *OVNObserver) Observe(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation) (OVNReport, error) {
 	report := OVNReport{Reason: "OVNVerificationPending", Message: "Waiting for OVN database health evidence"}
-	if installation.Spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
+	if installation.Spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking {
 		report.Ready = true
 		report.Reason = "NotRequired"
 		report.Message = "This installation uses an external OVN central"
@@ -107,7 +107,7 @@ func (o *OVNObserver) Observe(ctx context.Context, installation *operatorv1alpha
 func assessDatabase(name string, mode operatorv1alpha1.CentralMode, states []Database) (operatorv1alpha1.CentralDatabaseStatus, error) {
 	summary := operatorv1alpha1.CentralDatabaseStatus{Database: name, ObservedMembers: int32(len(states))}
 	model := "clustered"
-	if mode == operatorv1alpha1.CentralModeSingle {
+	if mode == operatorv1alpha1.CentralModeStandalone {
 		model = "standalone"
 	}
 	leaders := 0

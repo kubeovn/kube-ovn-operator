@@ -34,7 +34,7 @@ func (p *KubernetesPeerProvider) Observe(ctx context.Context, request PeerReques
 	}
 
 	peer := new(operatorv1alpha1.KubeOVNInstallation)
-	key := client.ObjectKey{Namespace: request.Config.CentralNamespace, Name: request.Config.PairRef}
+	key := client.ObjectKey{Namespace: request.Config.PeerNamespace, Name: request.Config.PeerName}
 	if err := p.Reader.Get(ctx, key, peer); err != nil {
 		if apierrors.IsNotFound(err) {
 			report.Reason = "PeerNotFound"
@@ -55,8 +55,8 @@ func (p *KubernetesPeerProvider) Observe(ctx context.Context, request PeerReques
 	if !peerConfig.Enabled {
 		return pendingReport(&report, "PeerHCPDisabled", "the referenced HCP peer is not enabled")
 	}
-	if peerConfig.PairRef != request.Installation.Name || peerConfig.CentralNamespace != request.Installation.Namespace {
-		return pendingReport(&report, "PeerPairRefMismatch", "the referenced HCP peer does not point back to this installation")
+	if peerConfig.PeerName != request.Installation.Name || peerConfig.PeerNamespace != request.Installation.Namespace {
+		return pendingReport(&report, "PeerNameMismatch", "the referenced HCP peer does not point back to this installation")
 	}
 	if err := ValidateConfig(peerConfig); err != nil {
 		return pendingReport(&report, "PeerContractInvalid", err.Error())

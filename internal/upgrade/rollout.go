@@ -22,7 +22,7 @@ const (
 // ObjectSet is the immutable partition of one rendered chart. CRDs are
 // applied before namespaced workloads, and every DaemonSet is treated as a
 // data-plane workload so node agents cannot be updated before central is
-// healthy. All other resources are part of the central/control-plane phase.
+// healthy. All other resources are part of the central phase.
 type ObjectSet struct {
 	All       []*unstructured.Unstructured
 	CRDs      []*unstructured.Unstructured

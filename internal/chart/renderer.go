@@ -50,12 +50,19 @@ func installationValues(spec operatorv1alpha1.KubeOVNInstallationSpec) (map[stri
 		// still calls the equivalent render mode controlPlaneOnly.
 		installMode = "controlPlaneOnly"
 	}
+	if spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking {
+		// The operator API names this slice nodeNetworking; the upstream Helm
+		// chart still calls the equivalent render mode dataPlaneOnly.
+		installMode = "dataPlaneOnly"
+	}
 	mode := "cluster"
-	if spec.Central.Mode == operatorv1alpha1.CentralModeSingle {
+	if spec.Central.Mode == operatorv1alpha1.CentralModeStandalone {
+		// The operator API calls the one-database topology standalone; the
+		// upstream chart still expects its legacy single value.
 		mode = "single"
 	}
 	central := map[string]any{
-		"storage": map[string]any{"size": spec.Central.Storage.Size, "storageClassName": spec.Central.Storage.ClassName},
+		"storage": map[string]any{"size": spec.Central.Storage.Size, "storageClassName": spec.Central.Storage.StorageClassName},
 	}
 	if len(spec.Central.Placement.NodeSelector) != 0 {
 		central["nodeSelector"] = spec.Central.Placement.NodeSelector
@@ -67,7 +74,7 @@ func installationValues(spec operatorv1alpha1.KubeOVNInstallationSpec) (map[stri
 		}},
 		"ovn-central": central,
 	}
-	if spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
+	if spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking {
 		endpoint := spec.DataPlane.ExternalOVNCentral
 		if spec.HCP.Enabled {
 			northbound, err := hcp.ParseEndpoint(spec.HCP.NBEndpoint)

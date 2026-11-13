@@ -45,7 +45,7 @@ func TestRebindAutomaticReplacementRejectsNonTargetIdentityChange(t *testing.T) 
 	observed.Members[1].Databases[0].Address = "tcp:192.0.2.22:6643"
 	request := rebindRequest(retained)
 	if _, err := RebindAutomaticReplacement(request, retained, observed); err == nil {
-		t.Fatal("non-target endpoint change was accepted")
+		t.Fatal("non-target Pod change was accepted")
 	}
 }
 
@@ -68,7 +68,7 @@ func rebindRequest(topology health.CentralTopology) Request {
 		FormatVersion: 1, InstallationUID: "installation-uid", InstallationGeneration: 4, OperationID: operationID,
 		Databases: inventories, AutomaticReplacement: true, RemoveEndpoint: "member-0-0",
 		Retirement: &Retirement{Kind: statefulSetRetirementKind, Workload: workload.Reference{Name: "member-0", UID: "workload-0"}, Endpoint: workload.Reference{Name: "member-0-0", UID: "pod-0"}, SpecDigest: "sha256:" + strings.Repeat("a", 64)},
-		Add:        &Addition{Workload: workload.Request{InstallationGeneration: 4, Preparation: prepare.Plan{FormatVersion: 1, InstallationUID: "installation-uid", OperationID: operationID, MemberName: "member-new", Databases: plans}, Node: workload.Reference{Name: "node-new", UID: "node-new-uid"}, Claim: workload.Reference{Name: "claim-new", UID: "claim-new-uid"}, Volume: workload.Reference{Name: "volume-new", UID: "volume-new-uid"}, Image: "example/central@sha256:" + strings.Repeat("b", 64)}, NorthboundAddress: "tcp:192.0.2.30:6641", SouthboundAddress: "tcp:192.0.2.30:6642"},
+		Add:        &Addition{Workload: workload.Request{InstallationGeneration: 4, Preparation: prepare.Plan{FormatVersion: 1, InstallationUID: "installation-uid", OperationID: operationID, MemberName: "member-new", Databases: plans}, Node: workload.Reference{Name: "node-new", UID: "node-new-uid"}, Claim: workload.Reference{Name: "claim-new", UID: "claim-new-uid"}, Volume: workload.Reference{Name: "volume-new", UID: "volume-new-uid"}, Image: "example/central@sha256:" + strings.Repeat("b", 64)}, NorthboundEndpoint: "tcp:192.0.2.30:6641", SouthboundEndpoint: "tcp:192.0.2.30:6642"},
 	}
 }
 

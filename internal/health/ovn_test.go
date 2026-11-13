@@ -110,7 +110,7 @@ func TestOVNObserverDoesNotTreatMissingOrUnreadyPodsAsSuccess(t *testing.T) {
 			case "wrong installation":
 				installation.UID = "other-installation"
 			case "peer":
-				installation.Spec.Mode = operatorv1alpha1.InstallationModeDataPlaneOnly
+				installation.Spec.Mode = operatorv1alpha1.InstallationModeNodeNetworking
 			}
 			observer := OVNObserver{Reader: kube, Runner: runnerFunc(func(context.Context, string, string, string, []string) ([]byte, error) {
 				t.Fatal("unexpected execution")
@@ -144,7 +144,7 @@ func TestOVNObserverFailsWhenSouthboundCannotBeRead(t *testing.T) {
 
 func TestOVNObserverStandaloneStatefulSetAndPodReplacement(t *testing.T) {
 	installation, kube, objects := healthFixture(t)
-	installation.Spec.Central.Mode = operatorv1alpha1.CentralModeSingle
+	installation.Spec.Central.Mode = operatorv1alpha1.CentralModeStandalone
 	installation.Spec.Central.Replicas = 1
 	deployment := objects[0].(*appsv1.Deployment)
 	statefulSet := &appsv1.StatefulSet{Name: "central-single", Namespace: installation.Namespace, UID: "statefulset", Labels: deployment.Labels, OwnerReferences: deployment.OwnerReferences}

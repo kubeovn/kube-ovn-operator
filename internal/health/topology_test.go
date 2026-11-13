@@ -53,7 +53,7 @@ func TestCentralTopologyRequiresCompleteJointAndKubernetesIdentity(t *testing.T)
 				if strings.Contains(scenario, "another endpoint") {
 					target = "ovn-central-1"
 				}
-				installation.Spec.Central.MemberRequests = []operatorv1alpha1.CentralMemberSpec{{Name: "replacement", ReplaceEndpoint: target}}
+				installation.Spec.Central.MemberRequests = []operatorv1alpha1.CentralMemberSpec{{Name: "replacement", ReplacePod: target}}
 			}
 			for i := range 3 {
 				pod := objects[i+2].(*corev1.Pod)

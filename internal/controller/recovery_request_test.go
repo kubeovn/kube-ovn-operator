@@ -39,7 +39,7 @@ func TestRecoveryRequestBuildsStablePlanAndWaitsForExplicitExecutor(t *testing.T
 	if first.Status.Phase != operatorv1alpha1.RecoveryPhaseAwaitingExecution || first.Status.Plan == nil || first.Status.Plan.Digest == "" {
 		t.Fatalf("valid request was not durably queued: %+v", first.Status)
 	}
-	if first.Status.Plan.TargetMemberRef != "member-recovery" || first.Status.Plan.TargetMemberDigest == "" || first.Status.Plan.TopologyDigest == "" {
+	if first.Status.Plan.TargetMemberName != "member-recovery" || first.Status.Plan.TargetMemberDigest == "" || first.Status.Plan.TopologyDigest == "" {
 		t.Fatalf("rejoin plan did not retain target identity: %+v", first.Status.Plan)
 	}
 	if condition := findCondition(first.Status.Conditions, "Accepted"); condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "PlanValidated" {
@@ -67,7 +67,7 @@ func TestRecoveryRequestRequiresVerifiedBackupForRestoreModes(t *testing.T) {
 			installation := recoveryInstallation()
 			request := recoveryRequest(now)
 			request.Spec.Mode = mode
-			request.Spec.TargetMemberRef = ""
+			request.Spec.TargetMemberName = ""
 			kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 			reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }}
 			if _, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)}); err != nil {
@@ -96,7 +96,7 @@ func TestRecoveryRequestRejectsMismatchedBackupPair(t *testing.T) {
 	}
 	request := recoveryRequest(now)
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
-	request.Spec.TargetMemberRef = ""
+	request.Spec.TargetMemberName = ""
 	request.Spec.BackupRef = "sha256:other-pair"
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 	reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }}
@@ -125,7 +125,7 @@ func TestRecoveryRequestRejectsBackupPairIDMismatch(t *testing.T) {
 	}
 	request := recoveryRequest(now)
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
-	request.Spec.TargetMemberRef = ""
+	request.Spec.TargetMemberName = ""
 	request.Spec.BackupRef = installation.Status.LastBackup.ID
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 	reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }}
@@ -154,7 +154,7 @@ func TestRecoveryPlanBindsVersionsChartAndDatabasePair(t *testing.T) {
 	}
 	request := recoveryRequest(now)
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
-	request.Spec.TargetMemberRef = ""
+	request.Spec.TargetMemberName = ""
 	request.Spec.BackupRef = installation.Status.LastBackup.ID
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 	reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }}
@@ -184,7 +184,7 @@ func TestRecoveryPlanUsesVerifiedUpgradeCheckpointWhenLastBackupIsAbsent(t *test
 	}
 	request := recoveryRequest(now)
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
-	request.Spec.TargetMemberRef = ""
+	request.Spec.TargetMemberName = ""
 	request.Spec.BackupRef = installation.Status.Upgrade.Checkpoint.ID
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 	reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }}
@@ -212,7 +212,7 @@ func TestRecoveryPlanRejectsFailedUpgradeCheckpoint(t *testing.T) {
 	}
 	request := recoveryRequest(now)
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
-	request.Spec.TargetMemberRef = ""
+	request.Spec.TargetMemberName = ""
 	request.Spec.BackupRef = installation.Status.Upgrade.Checkpoint.ID
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 	reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }}
@@ -241,7 +241,7 @@ func TestRecoveryPlanBindsDestructiveApprovalReference(t *testing.T) {
 	}
 	request := recoveryRequest(now)
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
-	request.Spec.TargetMemberRef = ""
+	request.Spec.TargetMemberName = ""
 	request.Spec.BackupRef = installation.Status.LastBackup.ID
 	request.Spec.ApprovalRef = &operatorv1alpha1.RecoveryApprovalReference{Name: "recovery-approval", UID: types.UID("approval-uid")}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
@@ -408,7 +408,7 @@ func TestRecoveryRequestRequiresExplicitRejoinTarget(t *testing.T) {
 	scheme := controllerScheme(t)
 	installation := recoveryInstallation()
 	request := recoveryRequest(now)
-	request.Spec.TargetMemberRef = ""
+	request.Spec.TargetMemberName = ""
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 	reconciler := &RecoveryRequestReconciler{Client: kube, Scheme: scheme, Clock: func() time.Time { return now }}
 	if _, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(request)}); err != nil {
@@ -529,7 +529,7 @@ func TestDestructiveRecoveryPersistsRestartableExecutionPhases(t *testing.T) {
 	}
 	request := recoveryRequest(now)
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
-	request.Spec.TargetMemberRef = ""
+	request.Spec.TargetMemberName = ""
 	request.Spec.BackupRef = installation.Status.LastBackup.ID
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 	executor := &rollbackExecutorFake{}
@@ -564,7 +564,7 @@ func TestDestructiveRecoveryPersistsRestoreFailureAndStopsRetrying(t *testing.T)
 	}
 	request := recoveryRequest(now)
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
-	request.Spec.TargetMemberRef = ""
+	request.Spec.TargetMemberName = ""
 	request.Spec.BackupRef = installation.Status.LastBackup.ID
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 	executor := &rollbackExecutorFake{failPhase: operatorv1alpha1.RollbackPhaseRestoring, failErr: fmt.Errorf("restore rejected by database fence")}
@@ -608,7 +608,7 @@ func TestDestructiveRecoveryPersistsPendingVerificationReason(t *testing.T) {
 	}
 	request := recoveryRequest(now)
 	request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
-	request.Spec.TargetMemberRef = ""
+	request.Spec.TargetMemberName = ""
 	request.Spec.BackupRef = installation.Status.LastBackup.ID
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 	executor := &rollbackExecutorFake{failPhase: operatorv1alpha1.RollbackPhaseVerifying, failErr: fmt.Errorf("%w: northd NorthdUnhealthy: northd disconnected", ErrRollbackInProgress)}
@@ -642,7 +642,7 @@ func TestDestructiveRecoveryRetriesLeaseContention(t *testing.T) {
 			}
 			request := recoveryRequest(now)
 			request.Spec.Mode = operatorv1alpha1.RecoveryModeReconvert
-			request.Spec.TargetMemberRef = ""
+			request.Spec.TargetMemberName = ""
 			request.Spec.BackupRef = installation.Status.LastBackup.ID
 			kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation, request).WithObjects(installation, request).Build()
 			steps := &rollbackExecutorFake{}
@@ -699,7 +699,7 @@ func TestInstallationYieldsToExecutingRecovery(t *testing.T) {
 	installation.Spec.Upgrade.Backup.Schedule = ""
 	request := recoveryRequest(now)
 	request.Namespace = installation.Namespace
-	request.Spec.InstallationRef = installation.Name
+	request.Spec.InstallationName = installation.Name
 	request.Status = operatorv1alpha1.KubeOVNRecoveryRequestStatus{
 		Phase: operatorv1alpha1.RecoveryPhaseExecuting,
 		Plan:  &operatorv1alpha1.RecoveryPlanStatus{InstallationUID: installation.UID},
@@ -763,7 +763,7 @@ func recoveryInstallation() *operatorv1alpha1.KubeOVNInstallation {
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: types.UID("installation-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{
 			Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true,
-			MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "member-recovery", NodeName: "node-recovery", ClaimName: "claim-recovery", VolumeName: "volume-recovery", Image: "example/central@sha256:" + strings.Repeat("a", 64), NorthboundAddress: "tcp:192.0.2.10:6643", SouthboundAddress: "tcp:192.0.2.10:6644", NorthboundClientAddress: "tcp:192.0.2.10:6641", SouthboundClientAddress: "tcp:192.0.2.10:6642"}},
+			MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "member-recovery", NodeName: "node-recovery", ClaimName: "claim-recovery", VolumeName: "volume-recovery", Image: "example/central@sha256:" + strings.Repeat("a", 64), NorthboundEndpoint: "tcp:192.0.2.10:6643", SouthboundEndpoint: "tcp:192.0.2.10:6644", NorthboundClientEndpoint: "tcp:192.0.2.10:6641", SouthboundClientEndpoint: "tcp:192.0.2.10:6642"}},
 		}},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{Topology: operatorv1alpha1.TopologyStatus{Inventory: &operatorv1alpha1.CentralTopologyReference{Name: "retained", UID: types.UID("retained-uid"), Digest: "sha256:topology"}}},
 	}
@@ -772,7 +772,7 @@ func recoveryInstallation() *operatorv1alpha1.KubeOVNInstallation {
 func recoveryRequest(now time.Time) *operatorv1alpha1.KubeOVNRecoveryRequest {
 	return &operatorv1alpha1.KubeOVNRecoveryRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "recover", Namespace: "default", UID: types.UID("request-uid"), Generation: 1},
-		Spec:       operatorv1alpha1.KubeOVNRecoveryRequestSpec{InstallationRef: "demo", Reason: "replace failed member", Mode: operatorv1alpha1.RecoveryModeRejoin, TargetMemberRef: "member-recovery", ApprovedBy: "human-review", ExpiresAt: metav1.NewTime(now.Add(time.Hour))},
+		Spec:       operatorv1alpha1.KubeOVNRecoveryRequestSpec{InstallationName: "demo", Reason: "replace failed member", Mode: operatorv1alpha1.RecoveryModeRejoin, TargetMemberName: "member-recovery", RequestedBy: "human-review", ExpiresAt: metav1.NewTime(now.Add(time.Hour))},
 	}
 }
 
