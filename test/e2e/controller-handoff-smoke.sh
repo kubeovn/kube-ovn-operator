@@ -867,7 +867,7 @@ approval = json.load(open(os.environ["APPROVAL_FILE"]))["spec"]["decision"]
 for target in approval["targets"]:
     inventory = next(db for db in request["databases"] if db["database"] == target["database"])
     peer = next(peer for peer in inventory["peers"] if peer["name"] == request["removeEndpoint"])
-    if inventory["clusterID"] != target["clusterID"] or any(peer[key] != target[key] for key in ("serverID", "address")):
+    if inventory["clusterID"] != target["clusterID"] or peer["serverID"] != target["serverID"] or peer["address"] != target["raftAddress"]:
         raise SystemExit("automatic request does not remove the exact approved native member")
 if request["retirement"]["endpoint"]["name"] != request["removeEndpoint"]:
     raise SystemExit("automatic request does not pin the lost process reference")
