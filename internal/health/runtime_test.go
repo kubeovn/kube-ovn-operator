@@ -184,7 +184,7 @@ func TestDataPlaneRuntimeRequiresCompleteUniqueAndConnectedNodes(t *testing.T) {
 			})}
 			report := observer.Observe(t.Context(), installation)
 			if report.Northd.Status != metav1.ConditionTrue || report.Northd.Reason != "NotRequired" {
-				t.Fatalf("data-plane-only northd: %+v", report)
+				t.Fatalf("nodeNetworking northd: %+v", report)
 			}
 			if scenario == "healthy" {
 				if report.DataPlane.Status != metav1.ConditionTrue || len(report.Nodes) != 3 || report.Nodes[0].NodeUID != "node-0-uid" {
