@@ -45,7 +45,7 @@ spec:
                 networkStack:
                   type: string
                   description: "Address-family preset passed to the rendered networking components."
-                  enum: [ipv4, ipv6, dual_stack]
+                  enum: ["", ipv4, ipv6, dual_stack]
                 central:
                   type: object
                   required: [mode, replicas]
@@ -108,7 +108,7 @@ spec:
                   type: object
                   properties:
                     nodeSelector: {type: object, additionalProperties: {type: string}}
-                    ovsUpdateStrategy: {type: string, enum: [RollingUpdate, OnDelete]}
+                    ovsUpdateStrategy: {type: string, enum: ["", RollingUpdate, OnDelete]}
                     externalOvnCentral:
                       type: object
                       properties:
@@ -120,7 +120,7 @@ spec:
                   type: object
                   properties:
                     enabled: {type: boolean}
-                    role: {type: string, enum: [none, management, dataPlane]}
+                    role: {type: string, enum: ["", none, management, dataPlane]}
                     peerName:
                       type: string
                       description: "Name of the peer KubeOVNInstallation used by HCP."
@@ -140,7 +140,7 @@ spec:
                     strategy:
                       type: string
                       description: "Upgrade strategy; gatedRolling pauses when health gates are not satisfied."
-                      enum: [gatedRolling]
+                      enum: ["", gatedRolling]
                     pauseOnDegraded: {type: boolean}
                     allowRollback: {type: boolean}
                     rollbackApprovalRef:

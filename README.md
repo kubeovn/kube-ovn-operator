@@ -9,7 +9,7 @@ is still under development.
 ## Initial installation
 
 `spec.mode` accepts `full`, `centralOnly`, or `nodeNetworking`. `centralOnly`
-renders only the OVN central components. `nodeNetworking` renders the
+renders the OVN central workloads and supporting resources. `nodeNetworking` renders the
 node networking agents and controller against an external OVN central; it does
 not render local OVN central components.
 

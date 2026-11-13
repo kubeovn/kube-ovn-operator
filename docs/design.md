@@ -298,8 +298,7 @@ HTTP requests. It rejects stale pod/container/node identities or changed
 Service/DaemonSet configuration. Checks run with at most eight concurrent exec
 requests and a 60-second observation deadline. Timeout leaves the network
 unready; partial coverage is never promoted to success. These are sampled HTTP
-and DNS checks, not a complete data-plane conformance suite. centralOnly
-   installations skip them; external/HCP verification still awaits peer evidence.
+and DNS checks, not a complete data-plane conformance suite. centralOnly installations skip them; external/HCP verification still awaits peer evidence.
 The default binary publishes a same-cluster Kubernetes peer provider's
 non-sensitive peer identity and endpoint evidence through the `HCPReady`
 condition and `status.hcp`; cross-cluster deployments can inject a provider
