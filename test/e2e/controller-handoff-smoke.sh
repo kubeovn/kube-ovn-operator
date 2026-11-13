@@ -766,7 +766,7 @@ targets = [
         "database": database["database"],
         "clusterID": database["clusterID"],
         "serverID": database["serverID"],
-        "address": database["address"],
+        "raftAddress": database["address"],
     }
     for database in target["databases"]
 ]
