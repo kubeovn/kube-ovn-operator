@@ -569,7 +569,7 @@ data:
 	}
 	node := &corev1.Node{Name: "control-plane", Labels: map[string]string{"node-role.kubernetes.io/control-plane": ""}, Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "192.0.2.1"}}}}
 	renderer.Reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
-	spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+	spec.Mode = operatorv1alpha1.InstallationModeCentralOnly
 	if _, err := renderer.Render(t.Context(), spec); err == nil || !strings.Contains(err.Error(), "expected 3") {
 		t.Fatalf("unexpected mismatch result: %v", err)
 	}
@@ -624,7 +624,7 @@ func TestReleasedKubeOVNChart(t *testing.T) {
 	caps.KubeVersion = chartutil.KubeVersion{Version: "v1.34.3", Major: "1", Minor: "34"}
 	renderer := &HelmRenderer{Name: "kube-ovn", Namespace: "network", Mapper: mapper, Capabilities: caps, HTTPClient: server.Client(), Reader: fake.NewClientBuilder().WithScheme(scheme).WithObjects(nodes...).Build()}
 	for _, stack := range []string{"", "ipv4", "ipv6", "dual_stack"} {
-		for _, mode := range []operatorv1alpha1.InstallationMode{operatorv1alpha1.InstallationModeFull, operatorv1alpha1.InstallationModeControlPlaneOnly, operatorv1alpha1.InstallationModeDataPlaneOnly} {
+		for _, mode := range []operatorv1alpha1.InstallationMode{operatorv1alpha1.InstallationModeFull, operatorv1alpha1.InstallationModeCentralOnly, operatorv1alpha1.InstallationModeDataPlaneOnly} {
 			t.Run(string(mode)+"/"+stack, func(t *testing.T) {
 				spec := operatorv1alpha1.KubeOVNInstallationSpec{
 					Version: "v1.16.13", Chart: operatorv1alpha1.ChartSpec{Source: server.URL, Digest: digest}, Mode: mode, NetworkStack: stack,
@@ -674,7 +674,7 @@ func TestReleasedKubeOVNChart(t *testing.T) {
 						t.Fatal("namespace mismatch")
 					}
 				}
-				if central != (mode != operatorv1alpha1.InstallationModeDataPlaneOnly) || controller != (mode != operatorv1alpha1.InstallationModeControlPlaneOnly) || ovs != controller || cni != controller {
+				if central != (mode != operatorv1alpha1.InstallationModeDataPlaneOnly) || controller != (mode != operatorv1alpha1.InstallationModeCentralOnly) || ovs != controller || cni != controller {
 					t.Fatalf("incorrect mode split: central=%t controller=%t ovs=%t cni=%t", central, controller, ovs, cni)
 				}
 			})

@@ -23,9 +23,9 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 		errs = append(errs, fmt.Errorf("spec.version must be a pinned version and cannot be latest"))
 	}
 	switch spec.Mode {
-	case operatorv1alpha1.InstallationModeFull, operatorv1alpha1.InstallationModeControlPlaneOnly, operatorv1alpha1.InstallationModeDataPlaneOnly:
+	case operatorv1alpha1.InstallationModeFull, operatorv1alpha1.InstallationModeCentralOnly, operatorv1alpha1.InstallationModeDataPlaneOnly:
 	default:
-		errs = append(errs, fmt.Errorf("spec.mode must be full, controlPlaneOnly, or dataPlaneOnly"))
+		errs = append(errs, fmt.Errorf("spec.mode must be full, centralOnly, or dataPlaneOnly"))
 	}
 	switch spec.Upgrade.Strategy {
 	case "", "gatedRolling":
@@ -94,8 +94,8 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 		if len(image) > 512 || strings.ContainsAny(image, " \t\n\r") || !pinned || tag == "" || tag == "latest" {
 			errs = append(errs, fmt.Errorf("spec.networkProbe.image requires an explicit non-latest tag or digest"))
 		}
-		if spec.Mode == operatorv1alpha1.InstallationModeControlPlaneOnly {
-			errs = append(errs, fmt.Errorf("controlPlaneOnly cannot schedule data-plane network probes"))
+		if spec.Mode == operatorv1alpha1.InstallationModeCentralOnly {
+			errs = append(errs, fmt.Errorf("centralOnly cannot schedule data-plane network probes"))
 		}
 	}
 	if spec.HCP.Enabled {
@@ -104,8 +104,8 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 		}
 		switch spec.HCP.Role {
 		case operatorv1alpha1.HCPRoleManagement:
-			if spec.Mode != operatorv1alpha1.InstallationModeControlPlaneOnly {
-				errs = append(errs, fmt.Errorf("spec.hcp.role=management requires spec.mode=controlPlaneOnly"))
+			if spec.Mode != operatorv1alpha1.InstallationModeCentralOnly {
+				errs = append(errs, fmt.Errorf("spec.hcp.role=management requires spec.mode=centralOnly"))
 			}
 		case operatorv1alpha1.HCPRoleDataPlane:
 			if spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly {

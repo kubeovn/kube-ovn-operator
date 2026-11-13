@@ -234,7 +234,7 @@ spec:
   chart:
     source: http://127.0.0.1:18084/kube-ovn-1.17.0.tgz
     digest: ${digest}
-  mode: controlPlaneOnly
+  mode: centralOnly
   central:
     mode: raft
     replicas: 3

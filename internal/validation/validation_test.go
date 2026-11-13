@@ -129,7 +129,7 @@ func TestValidateHCPConfigRequiresBoundedTransportInputs(t *testing.T) {
 		t.Fatalf("invalid HCP endpoint was not rejected: %s", joined)
 	}
 	spec.HCP.NBEndpoint = "tcp:nb.example:6641"
-	spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+	spec.Mode = operatorv1alpha1.InstallationModeCentralOnly
 	joined = JoinErrors(ValidateInstallationSpec(spec))
 	if !strings.Contains(joined, "role=dataPlane requires spec.mode=dataPlaneOnly") {
 		t.Fatalf("HCP role/mode mismatch was not rejected: %s", joined)
@@ -154,7 +154,7 @@ func TestValidateMemberRequestsRequireDynamicMembershipAndPinnedImage(t *testing
 
 func TestValidateMemberRequestReplacementEndpoint(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
 			Name: "member-replacement", ReplaceEndpoint: "member-0-0", NodeName: "node", ClaimName: "claim", VolumeName: "volume",
 			Image: "example/central@sha256:" + strings.Repeat("a", 64), NorthboundAddress: "tcp:192.0.2.10:6643", SouthboundAddress: "tcp:192.0.2.10:6644", NorthboundClientAddress: "tcp:192.0.2.10:6641", SouthboundClientAddress: "tcp:192.0.2.10:6642",
@@ -183,7 +183,7 @@ func TestValidateMemberRequestReplacementEndpoint(t *testing.T) {
 
 func TestValidateMemberRequestTLSProtocolBinding(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{validMemberRequest("tls")}},
 	}
 	member := &spec.Central.MemberRequests[0]
@@ -209,7 +209,7 @@ func TestValidateMemberRequestTLSProtocolBinding(t *testing.T) {
 
 func TestValidateMemberRequestRetirementEndpoint(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire", RetireEndpoint: "ovn-central-abc-0"}}},
 	}
 	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
@@ -223,7 +223,7 @@ func TestValidateMemberRequestRetirementEndpoint(t *testing.T) {
 
 func TestValidateMemberRequestsAllowOnlyOneReplacementTarget(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{
 			validMemberRequest("first"), validMemberRequest("second"),
 		}},

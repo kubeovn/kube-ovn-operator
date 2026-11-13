@@ -50,7 +50,7 @@ func (o *RuntimeObserver) Observe(ctx context.Context, installation *operatorv1a
 			report.Northd.Reason, report.Northd.Message = "NorthdHealthy", "Exactly one northd is active and all instances are connected to NB/SB"
 		}
 	}
-	if installation.Spec.Mode != operatorv1alpha1.InstallationModeControlPlaneOnly {
+	if installation.Spec.Mode != operatorv1alpha1.InstallationModeCentralOnly {
 		nodes, err := o.observeDataPlane(ctx, installation)
 		if err != nil {
 			report.DataPlane.Status, report.DataPlane.Reason, report.DataPlane.Message = metav1.ConditionFalse, "DataPlaneUnhealthy", err.Error()

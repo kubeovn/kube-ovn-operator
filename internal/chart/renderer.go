@@ -44,6 +44,12 @@ func installationValues(spec operatorv1alpha1.KubeOVNInstallationSpec) (map[stri
 	if errs := validation.ValidateInstallationSpec(spec); len(errs) != 0 {
 		return nil, fmt.Errorf("render chart values: %s", validation.JoinErrors(errs))
 	}
+	installMode := string(spec.Mode)
+	if spec.Mode == operatorv1alpha1.InstallationModeCentralOnly {
+		// The operator API names this slice centralOnly; the upstream Helm chart
+		// still calls the equivalent render mode controlPlaneOnly.
+		installMode = "controlPlaneOnly"
+	}
 	mode := "cluster"
 	if spec.Central.Mode == operatorv1alpha1.CentralModeSingle {
 		mode = "single"
@@ -55,7 +61,7 @@ func installationValues(spec operatorv1alpha1.KubeOVNInstallationSpec) (map[stri
 		central["nodeSelector"] = spec.Central.Placement.NodeSelector
 	}
 	values := map[string]any{
-		"installMode": string(spec.Mode), "OVN_CENTRAL_MODE": mode,
+		"installMode": installMode, "OVN_CENTRAL_MODE": mode,
 		"global": map[string]any{"images": map[string]any{
 			"kubeovn": map[string]any{"tag": spec.Version}, "natgateway": map[string]any{"tag": spec.Version},
 		}},

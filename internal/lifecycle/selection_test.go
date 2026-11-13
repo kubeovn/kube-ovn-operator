@@ -577,7 +577,7 @@ func selectionClient(t *testing.T, objects []client.Object) client.Reader {
 
 func selectionFixture(t *testing.T, stateful int) (*api.KubeOVNInstallation, health.CentralTopology, []client.Object) {
 	t.Helper()
-	installation := &api.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "installation", Namespace: "default", UID: types.UID("installation-uid"), Generation: 4}, Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3}}}
+	installation := &api.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "installation", Namespace: "default", UID: types.UID("installation-uid"), Generation: 4}, Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeCentralOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3}}}
 	objects := make([]client.Object, 0, stateful)
 	topology := health.CentralTopology{Members: make([]health.CentralIdentity, 0, 4)}
 	for index := range 4 {

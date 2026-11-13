@@ -116,7 +116,7 @@ func readyPeerInstallation() *operatorv1alpha1.KubeOVNInstallation {
 		ObjectMeta: metav1.ObjectMeta{Name: "management", Namespace: "hcp", UID: types.UID("peer-uid"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.17.0",
-			Mode:    operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Mode:    operatorv1alpha1.InstallationModeCentralOnly,
 			HCP: operatorv1alpha1.HCPConfig{
 				Enabled: true, Role: operatorv1alpha1.HCPRoleManagement, PairRef: "data", CentralNamespace: "default",
 				NBEndpoint: "tcp:nb.remote:6641", SBEndpoint: "tcp:sb.remote:6642", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "peer-tls"},

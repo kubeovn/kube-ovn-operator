@@ -220,7 +220,7 @@ func TestNetworkObservationCannotInferUnconfiguredDataPlane(t *testing.T) {
 	if report := observer.Observe(t.Context(), installation, nil); report.Condition.Status != metav1.ConditionUnknown {
 		t.Fatal(report)
 	}
-	installation.Spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+	installation.Spec.Mode = operatorv1alpha1.InstallationModeCentralOnly
 	if report := observer.Observe(t.Context(), installation, nil); report.Condition.Status != metav1.ConditionTrue || report.Condition.Reason != "NotRequired" {
 		t.Fatal(report)
 	}

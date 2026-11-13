@@ -21,7 +21,7 @@ func TestBuildRejectsUnsafeDataPlaneOnlySpec(t *testing.T) {
 func TestBuildOrdersMembershipAndHCPGates(t *testing.T) {
 	plan := Build(operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0",
-		Mode:    operatorv1alpha1.InstallationModeControlPlaneOnly,
+		Mode:    operatorv1alpha1.InstallationModeCentralOnly,
 		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
 		HCP: operatorv1alpha1.HCPConfig{
 			Enabled: true, Role: operatorv1alpha1.HCPRoleManagement, PairRef: "tenant-a", CentralNamespace: "hcp",

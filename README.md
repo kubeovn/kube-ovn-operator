@@ -8,6 +8,11 @@ is still under development.
 
 ## Initial installation
 
+`spec.mode` accepts `full`, `centralOnly`, or `dataPlaneOnly`. `centralOnly`
+renders the OVN central/control-plane slice and omits the node data-plane
+components (`kube-ovn-controller`, `ovs-ovn`, and `kube-ovn-cni`); it does not
+mean that the chart creates only one Kubernetes object.
+
 The operator defaults to workload management. Set `spec.chart.source` to an
 HTTPS `.tgz` URL or an `oci://` repository reference, and set
 `spec.chart.digest` to the SHA-256 of the downloaded archive or OCI chart layer

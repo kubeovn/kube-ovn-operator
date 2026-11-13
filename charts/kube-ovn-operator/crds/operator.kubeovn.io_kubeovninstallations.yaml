@@ -40,7 +40,7 @@ spec:
                     digest: {type: string}
                 mode:
                   type: string
-                  enum: [full, controlPlaneOnly, dataPlaneOnly]
+                  enum: [full, centralOnly, dataPlaneOnly]
                 networkStack:
                   type: string
                   enum: [ipv4, ipv6, dual_stack]

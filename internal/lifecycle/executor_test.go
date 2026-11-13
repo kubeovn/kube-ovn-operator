@@ -137,7 +137,7 @@ func setup(t *testing.T) *fixture {
 	t.Helper()
 	f := new(fixture)
 	f.installation = &api.KubeOVNInstallation{Name: "ovn", Namespace: "test", UID: "installation-uid", Generation: 1,
-		Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3}}}
+		Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeCentralOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3}}}
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{api.AddToScheme, clientgoscheme.AddToScheme} {
 		if err := add(scheme); err != nil {

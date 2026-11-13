@@ -93,7 +93,7 @@ func TestUpdateStatusEmitsPhaseAndReadyEvents(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "events", Namespace: "default", UID: types.UID("events-uid"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeSingle, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
 		},
 	}
@@ -163,7 +163,7 @@ func TestMapNodeToInstallationsWakesMatchingPlacements(t *testing.T) {
 	central := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "central", Namespace: "default", UID: types.UID("central-uid")},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, Placement: operatorv1alpha1.PlacementSpec{NodeSelector: map[string]string{"role": "control"}}},
 		},
 	}
@@ -194,7 +194,7 @@ func TestMapNodeToInstallationsWakesRetainedNodeAfterPlacementChange(t *testing.
 	central := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "central", Namespace: "default", UID: types.UID("central-uid")},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, Placement: operatorv1alpha1.PlacementSpec{NodeSelector: map[string]string{"role": "control"}}},
 		},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{Topology: operatorv1alpha1.TopologyStatus{
@@ -923,7 +923,7 @@ func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 	if err := kube.Get(t.Context(), req.NamespacedName, got); err != nil {
 		t.Fatal(err)
 	}
-	got.Spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+	got.Spec.Mode = operatorv1alpha1.InstallationModeCentralOnly
 	if err := kube.Update(t.Context(), got); err != nil {
 		t.Fatal(err)
 	}
@@ -1145,7 +1145,7 @@ func TestReconcileBlocksVersionRollbackWithoutRestoreExecutor(t *testing.T) {
 			installation := &operatorv1alpha1.KubeOVNInstallation{
 				ObjectMeta: metav1.ObjectMeta{Name: "rollback", Namespace: "default", UID: types.UID("rollback-uid"), Generation: 2},
 				Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-					Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+					Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 					Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeSingle, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
 					Upgrade: operatorv1alpha1.UpgradeSpec{AllowRollback: test.allowRollback},
 				},
@@ -1185,7 +1185,7 @@ func TestRollbackStatusPersistsVerifiedPairAge(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "rollback-rpo", Namespace: "default", UID: types.UID("rollback-rpo-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeSingle, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
 			Upgrade: operatorv1alpha1.UpgradeSpec{AllowRollback: true},
 		},
@@ -1266,7 +1266,7 @@ func TestReconcileExecutesDurableRollbackPhases(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "rollback-exec", Namespace: "default", UID: types.UID("rollback-exec-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Chart:   operatorv1alpha1.ChartSpec{Digest: "sha256:" + strings.Repeat("c", 64)},
 			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeSingle, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
 			Upgrade: operatorv1alpha1.UpgradeSpec{AllowRollback: true},
@@ -1518,7 +1518,7 @@ func TestReplicaOnlySpecChangePinsTheRetainedMemberCount(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("replica-only transition was rejected: %v", err)
 	}
-	installation.Spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+	installation.Spec.Mode = operatorv1alpha1.InstallationModeCentralOnly
 	ok, err = replicaOnlySpecChange(installation, 3)
 	if err != nil || ok {
 		t.Fatalf("unrelated spec change was admitted: ok=%v err=%v", ok, err)
@@ -1546,7 +1546,7 @@ func TestBeginAutomaticLifecycleDoesNotRepeatConsumedSpec(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "automatic", Namespace: "default", UID: types.UID("automatic-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true},
 		},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{
@@ -1571,7 +1571,7 @@ func TestBeginAutomaticLifecycleSelectsNextMemberAfterConsumedHandoff(t *testing
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "sequential", Namespace: "default", UID: types.UID("sequential-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{
 				{Name: "first", NodeName: "node-first", ClaimName: "claim-first", VolumeName: "volume-first", Image: image, NorthboundAddress: "tcp:192.0.2.10:6643", SouthboundAddress: "tcp:192.0.2.10:6644", NorthboundClientAddress: "tcp:192.0.2.10:6641", SouthboundClientAddress: "tcp:192.0.2.10:6642"},
 				{Name: "second", NodeName: "node-second", ClaimName: "claim-second", VolumeName: "volume-second", Image: image, NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644", NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642"},
@@ -1822,7 +1822,7 @@ func TestReconcileSelectsAndPersistsAnAdditionFromLiveMemberObjects(t *testing.T
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "addition", Namespace: "default", UID: types.UID("addition-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
 				Name: "member-new", NodeName: "node-new", ClaimName: "claim-new", VolumeName: "volume-new",
 				Image:             "example/central@sha256:" + strings.Repeat("a", 64),
@@ -1874,7 +1874,7 @@ func TestReconcileSelectsAndPersistsExplicitChartDeploymentRetirement(t *testing
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "retirement", Namespace: "default", UID: types.UID("retirement-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire-chart", RetireEndpoint: "chart-3-0"}}},
 		},
 	}
@@ -1920,7 +1920,7 @@ func TestReconcileAdmitsApprovedLostChartDeploymentReplacement(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "lost-replacement", Namespace: "default", UID: types.UID("lost-replacement-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{
 				Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true,
 				MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
@@ -1994,7 +1994,7 @@ func TestReconcileRebindsAutomaticReplacementAfterRetainedNodeAddressDrift(t *te
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "address-drift", Namespace: "default", UID: types.UID("address-drift-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{
 				Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true,
 				MemberRequests: []operatorv1alpha1.CentralMemberSpec{{

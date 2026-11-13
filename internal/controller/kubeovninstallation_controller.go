@@ -273,7 +273,7 @@ func installationUsesNode(installation *operatorv1alpha1.KubeOVNInstallation, no
 			return true
 		}
 	}
-	if installation.Spec.Mode != operatorv1alpha1.InstallationModeControlPlaneOnly {
+	if installation.Spec.Mode != operatorv1alpha1.InstallationModeCentralOnly {
 		if labels.SelectorFromSet(installation.Spec.DataPlane.NodeSelector).Matches(labels.Set(node.Labels)) {
 			return true
 		}
@@ -1216,7 +1216,7 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		status.Phase = operatorv1alpha1.PhaseDegraded
 		degraded, degradedReason, readyReason, message = metav1.ConditionTrue, "TopologyUnverified", "TopologyUnverified", topologyState.Message
 	}
-	networkVerified := network.Status == metav1.ConditionTrue && (installation.Spec.Mode == operatorv1alpha1.InstallationModeControlPlaneOnly && network.Reason == "NotRequired" || status.Network != nil && status.Network.ObservedNodes > 0 && status.Network.SuccessfulProbes > 0 && len(status.Network.AddressFamilies) > 0)
+	networkVerified := network.Status == metav1.ConditionTrue && (installation.Spec.Mode == operatorv1alpha1.InstallationModeCentralOnly && network.Reason == "NotRequired" || status.Network != nil && status.Network.ObservedNodes > 0 && status.Network.SuccessfulProbes > 0 && len(status.Network.AddressFamilies) > 0)
 	if topologyState.Status == metav1.ConditionTrue && hcpCondition.Status == metav1.ConditionTrue && plan.Blocking == "" && workloadStatus == metav1.ConditionTrue && ovnStatus == metav1.ConditionTrue && northd.Status == metav1.ConditionTrue && dataPlane.Status == metav1.ConditionTrue && networkVerified {
 		readyStatus, readyReason, message = metav1.ConditionTrue, "VerificationComplete", "Workloads, OVN databases, runtime and configured network probes passed verification"
 		status.Phase = operatorv1alpha1.PhaseReady

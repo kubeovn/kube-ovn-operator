@@ -52,7 +52,7 @@ func (p retainedTopologyProvider) Retained(context.Context, *api.KubeOVNInstalla
 
 func TestLifecycleRenderSpecKeepsLegalRaftInputAndReturnsRetainedChartTopology(t *testing.T) {
 	scheme := controllerScheme(t)
-	installation := &api.KubeOVNInstallation{Name: "dynamic", Namespace: "default", UID: "installation", Generation: 2, Spec: api.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3, DynamicMembership: true}}, Status: api.KubeOVNInstallationStatus{Topology: api.TopologyStatus{Inventory: &api.CentralTopologyReference{Name: "inventory", UID: "inventory-uid", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}
+	installation := &api.KubeOVNInstallation{Name: "dynamic", Namespace: "default", UID: "installation", Generation: 2, Spec: api.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: api.InstallationModeCentralOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3, DynamicMembership: true}}, Status: api.KubeOVNInstallationStatus{Topology: api.TopologyStatus{Inventory: &api.CentralTopologyReference{Name: "inventory", UID: "inventory-uid", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
 	retained := health.CentralTopology{Members: []health.CentralIdentity{{Workload: health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: "controller-retirement"}, Kind: "Deployment"}}, {Workload: health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: "controller-retirement"}, Kind: "Deployment"}}, {Workload: health.WorkloadIdentity{ObjectIdentity: health.ObjectIdentity{Name: "replacement"}, Kind: "StatefulSet"}}}}
 	rendered, retainedTopology, err := (&KubeOVNInstallationReconciler{Client: kube, Leases: lease.New(kube), Topology: retainedTopologyProvider{retained: retained}}).lifecycleRenderSpec(t.Context(), installation)
@@ -86,7 +86,7 @@ func TestApplyRetainedChartDeploymentReplicas(t *testing.T) {
 }
 
 func TestLifecycleRenderSpecLeavesNonDynamicInstallationUnchanged(t *testing.T) {
-	installation := &api.KubeOVNInstallation{Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 5}}}
+	installation := &api.KubeOVNInstallation{Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeCentralOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 5}}}
 	rendered, retained, err := (&KubeOVNInstallationReconciler{}).lifecycleRenderSpec(t.Context(), installation)
 	if err != nil || retained != nil || rendered.Central.Replicas != 5 || rendered.Central.DynamicMembership {
 		t.Fatalf("non-dynamic installation changed during lifecycle rendering: spec=%+v retained=%v err=%v", rendered.Central, retained, err)
@@ -143,7 +143,7 @@ func TestReconcileCordonedCentralNodeFailsClosedBeforeWorkloadApply(t *testing.T
 	installation := &api.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "cordoned", Namespace: "default", UID: "cordoned-uid", Generation: 1},
 		Spec: api.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: api.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: api.InstallationModeCentralOnly,
 			Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3},
 		},
 		Status: api.KubeOVNInstallationStatus{Topology: api.TopologyStatus{Inventory: ref}},

@@ -19,7 +19,7 @@ func TestNorthdRuntimeRequiresOneActiveAndBothConnections(t *testing.T) {
 	for _, scenario := range []string{"healthy", "all standby", "two active", "paused", "NB disconnected", "SB disconnected", "pod restarted"} {
 		t.Run(scenario, func(t *testing.T) {
 			installation, kube, _ := healthFixture(t)
-			installation.Spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+			installation.Spec.Mode = operatorv1alpha1.InstallationModeCentralOnly
 			observer := RuntimeObserver{Reader: kube, Runner: runnerFunc(func(_ context.Context, ns, pod, container string, command []string) ([]byte, error) {
 				if container != "ovn-central" || command[0] != "ovn-appctl" || command[3] != "ovn-northd" {
 					return nil, fmt.Errorf("unexpected command target")
@@ -53,7 +53,7 @@ func TestNorthdRuntimeRequiresOneActiveAndBothConnections(t *testing.T) {
 			})}
 			report := observer.Observe(t.Context(), installation)
 			if report.DataPlane.Status != metav1.ConditionTrue || report.DataPlane.Reason != "NotRequired" {
-				t.Fatalf("control-plane-only data plane: %+v", report)
+				t.Fatalf("central-only data plane: %+v", report)
 			}
 			if scenario == "healthy" {
 				if report.Northd.Status != metav1.ConditionTrue || len(report.NorthdProcesses) != 3 {

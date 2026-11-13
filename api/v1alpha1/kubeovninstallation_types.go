@@ -5,12 +5,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// InstallationMode selects the rendered Kube-OVN slice: full, centralOnly
+// (OVN central/control-plane components), or dataPlaneOnly.
 type InstallationMode string
 
 const (
-	InstallationModeFull             InstallationMode = "full"
-	InstallationModeControlPlaneOnly InstallationMode = "controlPlaneOnly"
-	InstallationModeDataPlaneOnly    InstallationMode = "dataPlaneOnly"
+	InstallationModeFull          InstallationMode = "full"
+	InstallationModeCentralOnly   InstallationMode = "centralOnly"
+	InstallationModeDataPlaneOnly InstallationMode = "dataPlaneOnly"
 )
 
 type CentralMode string

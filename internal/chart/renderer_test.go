@@ -53,3 +53,16 @@ func TestValuesRendererIncludesModeCentralAndHCPWithoutCredentials(t *testing.T)
 		t.Fatalf("rendered values contain credential-like data:\n%s", text)
 	}
 }
+
+func TestValuesRendererMapsCentralOnlyToUpstreamControlPlaneMode(t *testing.T) {
+	rendered, err := (ValuesRenderer{}).Render(t.Context(), operatorv1alpha1.KubeOVNInstallationSpec{
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(rendered.ValuesYAML); !strings.Contains(got, "installMode: controlPlaneOnly") {
+		t.Fatalf("upstream install mode = %q, want controlPlaneOnly", got)
+	}
+}
