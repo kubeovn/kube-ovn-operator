@@ -20,14 +20,14 @@ import (
 // workload starts. Prepared is the exact result previously recorded by it.
 // TLS contains mounted file paths only, never inline credential material.
 type Request struct {
-	FormatVersion     int            `json:"formatVersion"`
-	Preparation       prepare.Plan   `json:"preparation"`
-	Prepared          prepare.Result `json:"prepared"`
-	NorthboundAddress string         `json:"northboundAddress"`
-	SouthboundAddress string         `json:"southboundAddress"`
-	NorthboundRemotes []string       `json:"northboundRemotes"`
-	SouthboundRemotes []string       `json:"southboundRemotes"`
-	TLS               *TLSFiles      `json:"tls,omitempty"`
+	FormatVersion      int            `json:"formatVersion"`
+	Preparation        prepare.Plan   `json:"preparation"`
+	Prepared           prepare.Result `json:"prepared"`
+	NorthboundEndpoint string         `json:"northboundEndpoint"`
+	SouthboundEndpoint string         `json:"southboundEndpoint"`
+	NorthboundRemotes  []string       `json:"northboundRemotes"`
+	SouthboundRemotes  []string       `json:"southboundRemotes"`
+	TLS                *TLSFiles      `json:"tls,omitempty"`
 }
 
 type TLSFiles struct {
@@ -63,7 +63,7 @@ func (r Request) Validate() error {
 	if r.FormatVersion != 1 || len(r.Preparation.Databases) != 2 {
 		return errors.New("launch requires format version 1 and both prepared databases")
 	}
-	addresses := []string{r.NorthboundAddress, r.SouthboundAddress}
+	addresses := []string{r.NorthboundEndpoint, r.SouthboundEndpoint}
 	for _, db := range r.Preparation.Databases {
 		addresses = append(addresses, db.LocalAddress)
 	}
@@ -84,7 +84,7 @@ func (r Request) Validate() error {
 		return errors.New("SSL listeners require explicit TLS files; TCP-only launch must omit TLS")
 	}
 	for i, remotes := range [][]string{r.NorthboundRemotes, r.SouthboundRemotes} {
-		local := []string{r.NorthboundAddress, r.SouthboundAddress}[i]
+		local := []string{r.NorthboundEndpoint, r.SouthboundEndpoint}[i]
 		if len(remotes) < 2 || len(remotes) > 8 || !slices.Contains(remotes, local) {
 			return errors.New("northd requires explicit peer client endpoints including the new member")
 		}

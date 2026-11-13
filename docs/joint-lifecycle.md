@@ -18,9 +18,9 @@ Deployment remains at its retained count while the new member is prepared and
 started as an independently managed StatefulSet. Replica reductions require
 one exact retirement candidate. An independently managed, owned one-member
 `OnDelete` StatefulSet can be selected automatically; an ordinary multi-replica
-Chart Deployment requires a request with `retireEndpoint`, which pins one
+Chart Deployment requires a request with `retirePod`, which pins one
 exact Pod, its ReplicaSet and every surviving Pod before a one-step scale-in.
-A request may set `replaceEndpoint` to combine the new member with removal of
+A request may set `replacePod` to combine the new member with removal of
 one exact retained StatefulSet or Chart Deployment Pod at the same replica
 count. The replacement pins the old workload UID, ReplicaSet UID when
 applicable and admitted spec before preparation and reuses the same joint
@@ -31,7 +31,7 @@ was deleted, replaced, cordoned or became NotReady, or has been replaced by a
 different Pod UID, the request must carry a pre-created
 `KubeOVNMemberRemovalApproval` reference in
 `central.memberRequests[].removalApprovalRef`. The request may omit
-`replaceEndpoint`; the selector then chooses exactly one proven lost endpoint
+`replacePod`; the selector then chooses exactly one proven lost Pod
 and rejects ambiguity. Admission keeps the old Pod UID from the retained
 topology, fixes every surviving Pod UID and allows at most one healthy
 replacement Pod from the pinned ReplicaSet. The executor uses the approval only
@@ -106,7 +106,7 @@ do not remove a Namespace, database or persistent volume.
 
 Replica count alone never identifies a safe Deployment member. The selector
 requires one and only one implicit StatefulSet candidate, or an explicit
-`retireEndpoint` for a Chart Deployment. It does not infer a target from
+`retirePod` for a Chart Deployment. It does not infer a target from
 replica ordering or pod names. A desired increase
 requires a complete explicit member request, including node, bound PVC/PV,
 runtime image and listener addresses, and is therefore not synthesized from

@@ -215,7 +215,7 @@ func (p *Provisioner) Start(ctx context.Context, ref Reference, launch central.R
 			return Reference{}, errors.New("TLS launch paths must use the fixed Secret mount")
 		}
 	}
-	for _, address := range []string{launch.NorthboundAddress, launch.SouthboundAddress} {
+	for _, address := range []string{launch.NorthboundEndpoint, launch.SouthboundEndpoint} {
 		if err := p.nodeAddress(ctx, request, address); err != nil {
 			return Reference{}, err
 		}

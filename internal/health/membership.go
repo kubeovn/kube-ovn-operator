@@ -26,7 +26,7 @@ func NewMembershipClient(ctx context.Context, reader client.Reader, runner Comma
 }
 
 func newMembershipRunner(ctx context.Context, reader client.Reader, runner CommandRunner, installation *operatorv1alpha1.KubeOVNInstallation) (*membershipRunner, error) {
-	if reader == nil || runner == nil || installation == nil || installation.UID == "" || installation.Name == "" || installation.Namespace == "" || installation.Spec.Central.Mode != operatorv1alpha1.CentralModeRaft || installation.Spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly || installation.Spec.HCP.Enabled {
+	if reader == nil || runner == nil || installation == nil || installation.UID == "" || installation.Name == "" || installation.Namespace == "" || installation.Spec.Central.Mode != operatorv1alpha1.CentralModeCluster || installation.Spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking || installation.Spec.HCP.Enabled {
 		return nil, fmt.Errorf("membership transport requires a local managed RAFT installation")
 	}
 	pods, err := ownedPods(ctx, reader, installation, "ovn-central")

@@ -23,9 +23,9 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 		errs = append(errs, fmt.Errorf("spec.version must be a pinned version and cannot be latest"))
 	}
 	switch spec.Mode {
-	case operatorv1alpha1.InstallationModeFull, operatorv1alpha1.InstallationModeControlPlaneOnly, operatorv1alpha1.InstallationModeDataPlaneOnly:
+	case operatorv1alpha1.InstallationModeFull, operatorv1alpha1.InstallationModeCentralOnly, operatorv1alpha1.InstallationModeNodeNetworking:
 	default:
-		errs = append(errs, fmt.Errorf("spec.mode must be full, controlPlaneOnly, or dataPlaneOnly"))
+		errs = append(errs, fmt.Errorf("spec.mode must be full, centralOnly, or nodeNetworking"))
 	}
 	switch spec.Upgrade.Strategy {
 	case "", "gatedRolling":
@@ -33,23 +33,23 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 		errs = append(errs, fmt.Errorf("spec.upgrade.strategy must be empty or gatedRolling"))
 	}
 	switch spec.Central.Mode {
-	case operatorv1alpha1.CentralModeRaft:
+	case operatorv1alpha1.CentralModeCluster:
 		if spec.Central.Replicas != 2 && spec.Central.Replicas != 3 && spec.Central.Replicas != 5 {
-			errs = append(errs, fmt.Errorf("spec.central.replicas must be 2, 3 or 5 for raft mode"))
+			errs = append(errs, fmt.Errorf("spec.central.replicas must be 2, 3 or 5 for cluster mode"))
 		}
-	case operatorv1alpha1.CentralModeSingle:
+	case operatorv1alpha1.CentralModeStandalone:
 		if spec.Central.Replicas != 1 {
-			errs = append(errs, fmt.Errorf("spec.central.replicas must be 1 for single mode"))
+			errs = append(errs, fmt.Errorf("spec.central.replicas must be 1 for standalone mode"))
 		}
 		if strings.TrimSpace(spec.Central.Storage.Size) == "" {
-			errs = append(errs, fmt.Errorf("spec.central.storage.size is required for single mode"))
+			errs = append(errs, fmt.Errorf("spec.central.storage.size is required for standalone mode"))
 		}
 	default:
-		errs = append(errs, fmt.Errorf("spec.central.mode must be raft or single"))
+		errs = append(errs, fmt.Errorf("spec.central.mode must be cluster or standalone"))
 	}
-	if spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
+	if spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking {
 		if !spec.HCP.Enabled && (strings.TrimSpace(spec.DataPlane.ExternalOVNCentral.NBEndpoint) == "" || strings.TrimSpace(spec.DataPlane.ExternalOVNCentral.SBEndpoint) == "") {
-			errs = append(errs, fmt.Errorf("dataPlaneOnly requires externalOvnCentral.nbEndpoint and sbEndpoint"))
+			errs = append(errs, fmt.Errorf("nodeNetworking requires externalOvnCentral.nbEndpoint and sbEndpoint"))
 		}
 	}
 	for key, value := range spec.DataPlane.NodeSelector {
@@ -94,8 +94,8 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 		if len(image) > 512 || strings.ContainsAny(image, " \t\n\r") || !pinned || tag == "" || tag == "latest" {
 			errs = append(errs, fmt.Errorf("spec.networkProbe.image requires an explicit non-latest tag or digest"))
 		}
-		if spec.Mode == operatorv1alpha1.InstallationModeControlPlaneOnly {
-			errs = append(errs, fmt.Errorf("controlPlaneOnly cannot schedule data-plane network probes"))
+		if spec.Mode == operatorv1alpha1.InstallationModeCentralOnly {
+			errs = append(errs, fmt.Errorf("centralOnly cannot schedule data-plane network probes"))
 		}
 	}
 	if spec.HCP.Enabled {
@@ -104,12 +104,12 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 		}
 		switch spec.HCP.Role {
 		case operatorv1alpha1.HCPRoleManagement:
-			if spec.Mode != operatorv1alpha1.InstallationModeControlPlaneOnly {
-				errs = append(errs, fmt.Errorf("spec.hcp.role=management requires spec.mode=controlPlaneOnly"))
+			if spec.Mode != operatorv1alpha1.InstallationModeCentralOnly {
+				errs = append(errs, fmt.Errorf("spec.hcp.role=management requires spec.mode=centralOnly"))
 			}
 		case operatorv1alpha1.HCPRoleDataPlane:
-			if spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly {
-				errs = append(errs, fmt.Errorf("spec.hcp.role=dataPlane requires spec.mode=dataPlaneOnly"))
+			if spec.Mode != operatorv1alpha1.InstallationModeNodeNetworking {
+				errs = append(errs, fmt.Errorf("spec.hcp.role=dataPlane requires spec.mode=nodeNetworking"))
 			}
 			if northbound, northboundErr := hcp.ParseEndpoint(spec.HCP.NBEndpoint); northboundErr == nil {
 				if southbound, southboundErr := hcp.ParseEndpoint(spec.HCP.SBEndpoint); southboundErr == nil && northbound.Protocol != southbound.Protocol {
@@ -118,12 +118,12 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 			}
 		}
 	}
-	if spec.Central.Mode == operatorv1alpha1.CentralModeRaft && spec.Central.DynamicMembership && spec.Upgrade.Backup.Required && spec.Upgrade.Backup.Destination == "" {
+	if spec.Central.Mode == operatorv1alpha1.CentralModeCluster && spec.Central.DynamicMembership && spec.Upgrade.Backup.Required && spec.Upgrade.Backup.Destination == "" {
 		errs = append(errs, fmt.Errorf("dynamic membership cannot be enabled without a backup destination"))
 	}
 	if len(spec.Central.MemberRequests) != 0 {
-		if spec.Central.Mode != operatorv1alpha1.CentralModeRaft || spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
-			errs = append(errs, fmt.Errorf("central.memberRequests requires a local raft installation"))
+		if spec.Central.Mode != operatorv1alpha1.CentralModeCluster || spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking {
+			errs = append(errs, fmt.Errorf("central.memberRequests requires a local cluster installation"))
 		}
 		if !spec.Central.DynamicMembership {
 			errs = append(errs, fmt.Errorf("central.memberRequests requires central.dynamicMembership=true"))
@@ -138,20 +138,20 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 			if len(kvalidation.IsDNS1123Label(member.Name)) != 0 {
 				errs = append(errs, fmt.Errorf("central.memberRequests name %q must be a DNS label", member.Name))
 			}
-			if member.ReplaceEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.ReplaceEndpoint)) != 0 {
-				errs = append(errs, fmt.Errorf("central.memberRequests[%q].replaceEndpoint must be a DNS subdomain", member.Name))
+			if member.ReplacePod != "" && len(kvalidation.IsDNS1123Subdomain(member.ReplacePod)) != 0 {
+				errs = append(errs, fmt.Errorf("central.memberRequests[%q].replacePod must be a DNS subdomain", member.Name))
 			}
-			if member.ReplaceEndpoint != "" {
-				if previous, exists := replacementTargets[member.ReplaceEndpoint]; exists {
-					errs = append(errs, fmt.Errorf("central.memberRequests[%q].replaceEndpoint duplicates target %q already requested by %q", member.Name, member.ReplaceEndpoint, previous))
+			if member.ReplacePod != "" {
+				if previous, exists := replacementTargets[member.ReplacePod]; exists {
+					errs = append(errs, fmt.Errorf("central.memberRequests[%q].replacePod duplicates target %q already requested by %q", member.Name, member.ReplacePod, previous))
 				}
-				replacementTargets[member.ReplaceEndpoint] = member.Name
+				replacementTargets[member.ReplacePod] = member.Name
 				if len(replacementTargets) > 1 {
-					errs = append(errs, fmt.Errorf("central.memberRequests may contain only one replaceEndpoint per lifecycle transition"))
+					errs = append(errs, fmt.Errorf("central.memberRequests may contain only one replacePod per lifecycle transition"))
 				}
 			}
-			if member.RetireEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.RetireEndpoint)) != 0 {
-				errs = append(errs, fmt.Errorf("central.memberRequests[%q].retireEndpoint must be a DNS subdomain", member.Name))
+			if member.RetirePod != "" && len(kvalidation.IsDNS1123Subdomain(member.RetirePod)) != 0 {
+				errs = append(errs, fmt.Errorf("central.memberRequests[%q].retirePod must be a DNS subdomain", member.Name))
 			}
 			if member.RemovalApprovalRef != nil {
 				if len(kvalidation.IsDNS1123Subdomain(member.RemovalApprovalRef.Name)) != 0 || member.RemovalApprovalRef.UID == "" {
@@ -161,21 +161,21 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 			if member.TLSSecretRef != nil && len(kvalidation.IsDNS1123Subdomain(member.TLSSecretRef.Name)) != 0 {
 				errs = append(errs, fmt.Errorf("central.memberRequests[%q].tlsSecretRef.name must be a DNS subdomain", member.Name))
 			}
-			if member.ReplaceEndpoint != "" && member.RetireEndpoint != "" {
-				errs = append(errs, fmt.Errorf("central.memberRequests[%q] cannot set both replaceEndpoint and retireEndpoint", member.Name))
+			if member.ReplacePod != "" && member.RetirePod != "" {
+				errs = append(errs, fmt.Errorf("central.memberRequests[%q] cannot set both replacePod and retirePod", member.Name))
 			}
-			if member.RetireEndpoint != "" && member.ReplaceEndpoint == "" {
+			if member.RetirePod != "" && member.ReplacePod == "" {
 				continue
 			}
 			for field, value := range map[string]string{
-				"nodeName":                member.NodeName,
-				"claimName":               member.ClaimName,
-				"volumeName":              member.VolumeName,
-				"image":                   member.Image,
-				"northboundAddress":       member.NorthboundAddress,
-				"southboundAddress":       member.SouthboundAddress,
-				"northboundClientAddress": member.NorthboundClientAddress,
-				"southboundClientAddress": member.SouthboundClientAddress,
+				"nodeName":                 member.NodeName,
+				"claimName":                member.ClaimName,
+				"volumeName":               member.VolumeName,
+				"image":                    member.Image,
+				"northboundEndpoint":       member.NorthboundEndpoint,
+				"southboundEndpoint":       member.SouthboundEndpoint,
+				"northboundClientEndpoint": member.NorthboundClientEndpoint,
+				"southboundClientEndpoint": member.SouthboundClientEndpoint,
 			} {
 				if strings.TrimSpace(value) == "" {
 					errs = append(errs, fmt.Errorf("central.memberRequests[%q].%s is required", member.Name, field))
@@ -200,7 +200,7 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 
 func memberAddressProtocol(member operatorv1alpha1.CentralMemberSpec) (string, bool) {
 	protocol := ""
-	for _, address := range []string{member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+	for _, address := range []string{member.NorthboundEndpoint, member.SouthboundEndpoint, member.NorthboundClientEndpoint, member.SouthboundClientEndpoint} {
 		current, endpoint, found := strings.Cut(address, ":")
 		if !found || endpoint == "" || current != "tcp" && current != "ssl" {
 			return "", false
@@ -215,7 +215,7 @@ func memberAddressProtocol(member operatorv1alpha1.CentralMemberSpec) (string, b
 }
 
 func memberAddressesPresent(member operatorv1alpha1.CentralMemberSpec) bool {
-	for _, address := range []string{member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+	for _, address := range []string{member.NorthboundEndpoint, member.SouthboundEndpoint, member.NorthboundClientEndpoint, member.SouthboundClientEndpoint} {
 		if strings.TrimSpace(address) == "" {
 			return false
 		}

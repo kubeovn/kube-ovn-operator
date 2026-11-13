@@ -56,7 +56,7 @@ func TestReconcileWritesPlanWithoutClaimingOperationLeases(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: types.UID("uid-demo"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		},
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
@@ -93,8 +93,8 @@ func TestUpdateStatusEmitsPhaseAndReadyEvents(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "events", Namespace: "default", UID: types.UID("events-uid"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeSingle, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeStandalone, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
 		},
 	}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
@@ -115,7 +115,7 @@ func TestUpdateStatusPinsObservedVersionOnlyAfterVerification(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "observed-version", Namespace: "default", UID: types.UID("observed-version-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{
 			ObservedVersion: "v1.16.0",
@@ -163,15 +163,15 @@ func TestMapNodeToInstallationsWakesMatchingPlacements(t *testing.T) {
 	central := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "central", Namespace: "default", UID: types.UID("central-uid")},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, Placement: operatorv1alpha1.PlacementSpec{NodeSelector: map[string]string{"role": "control"}}},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, Placement: operatorv1alpha1.PlacementSpec{NodeSelector: map[string]string{"role": "control"}}},
 		},
 	}
 	dataPlane := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "tenant", UID: types.UID("data-uid")},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly,
-			Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 1},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
+			Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 1},
 			DataPlane: operatorv1alpha1.DataPlaneSpec{NodeSelector: map[string]string{"role": "worker"}},
 		},
 	}
@@ -194,8 +194,8 @@ func TestMapNodeToInstallationsWakesRetainedNodeAfterPlacementChange(t *testing.
 	central := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "central", Namespace: "default", UID: types.UID("central-uid")},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, Placement: operatorv1alpha1.PlacementSpec{NodeSelector: map[string]string{"role": "control"}}},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, Placement: operatorv1alpha1.PlacementSpec{NodeSelector: map[string]string{"role": "control"}}},
 		},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{Topology: operatorv1alpha1.TopologyStatus{
 			Members: []operatorv1alpha1.CentralMemberStatus{{Node: "control-1"}},
@@ -217,8 +217,8 @@ func TestMapNodeToInstallationsWakesRetainedDataPlaneNodeAfterPlacementChange(t 
 	dataPlane := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "tenant", UID: types.UID("data-uid")},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly,
-			Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 1},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
+			Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 1},
 			DataPlane: operatorv1alpha1.DataPlaneSpec{NodeSelector: map[string]string{"role": "worker"}},
 		},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{Topology: operatorv1alpha1.TopologyStatus{
@@ -312,7 +312,7 @@ func TestReconcileBlocksInvalidSpecBeforeWritingChildren(t *testing.T) {
 	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "invalid", Namespace: "default"}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "latest", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly}}
+	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "invalid", Namespace: "default"}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "latest", Mode: operatorv1alpha1.InstallationModeNodeNetworking}}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
 	reconciler := &KubeOVNInstallationReconciler{Client: client, Scheme: scheme}
 	if _, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "invalid", Namespace: "default"}}); err != nil {
@@ -337,12 +337,12 @@ func TestReconcileBlocksInitialMemberRequestsBeforeChartRender(t *testing.T) {
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
 			Central: operatorv1alpha1.CentralSpec{
-				Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true,
+				Mode: operatorv1alpha1.CentralModeCluster, Replicas: 5, DynamicMembership: true,
 				MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
 					Name: "member-new", NodeName: "node-new", ClaimName: "claim-new", VolumeName: "volume-new",
-					Image:             "example/central@sha256:" + strings.Repeat("a", 64),
-					NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644",
-					NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642",
+					Image:              "example/central@sha256:" + strings.Repeat("a", 64),
+					NorthboundEndpoint: "tcp:192.0.2.99:6643", SouthboundEndpoint: "tcp:192.0.2.99:6644",
+					NorthboundClientEndpoint: "tcp:192.0.2.99:6641", SouthboundClientEndpoint: "tcp:192.0.2.99:6642",
 				}},
 			},
 		},
@@ -378,7 +378,7 @@ func (f ovnProviderFunc) Observe(ctx context.Context, installation *operatorv1al
 func TestReconcileOVNHealthDoesNotReplaceNetworkVerificationOrKeepStaleEvidence(t *testing.T) {
 	scheme := controllerScheme(t)
 	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "health", Namespace: "default", UID: "installation", Generation: 1,
-		Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}},
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}},
 	}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
 	workload := &observedWorkload{observation: apply.Observation{Ready: true, ReadyCentralReplicas: 3}}
@@ -487,7 +487,7 @@ func TestReconcileUpgradeAppliesCRDsCentralAndDataPlaneInOrder(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "upgrade-phases", Namespace: "default", UID: types.UID("upgrade-phases-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.18.0", Mode: operatorv1alpha1.InstallationModeFull,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		},
 	}
 	previous := installation.Spec
@@ -557,7 +557,7 @@ func TestReconcileRuntimeHealthInvalidatesEvidenceWithoutClaimingNetworkReadines
 		t.Run(failure, func(t *testing.T) {
 			scheme := controllerScheme(t)
 			installation := &operatorv1alpha1.KubeOVNInstallation{Name: "runtime", Namespace: "default", UID: "installation", Generation: 1,
-				Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}},
+				Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}},
 			}
 			kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
 			workload := &observedWorkload{observation: apply.Observation{Ready: true, ReadyCentralReplicas: 3}}
@@ -638,7 +638,7 @@ func TestReconcileBlocksWhenRendererFails(t *testing.T) {
 	if err := operatorv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "render-failure", Namespace: "default", Generation: 1}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}}
+	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "render-failure", Namespace: "default", Generation: 1}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}}}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
 	reconciler := &KubeOVNInstallationReconciler{Client: client, Scheme: scheme, Renderer: failingRenderer{}}
 	if _, err := reconciler.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Name: installation.Name, Namespace: installation.Namespace}}); err != nil {
@@ -713,7 +713,7 @@ func TestReconcileUsesInjectedWorkloadAdapter(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "managed", Namespace: "default", UID: types.UID("uid-managed"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		},
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
@@ -740,7 +740,7 @@ func TestReconcileAdoptsBeforeRegularApply(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "adopt", Namespace: "default", UID: types.UID("uid-adopt"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-			Central:  operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Central:  operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 			Adoption: operatorv1alpha1.AdoptionSpec{Enabled: true, Selector: map[string]string{"app": "kube-ovn"}},
 		},
 	}
@@ -763,7 +763,7 @@ func TestReconcileRecordsWorkloadApplyFailure(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "apply-failure", Namespace: "default", UID: types.UID("uid-apply-failure"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		},
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
@@ -862,7 +862,7 @@ func (w *failingObserveWorkload) Observe(context.Context, []*unstructured.Unstru
 func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 	scheme := controllerScheme(t)
 	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "checkpoint", Namespace: "default", UID: "installation-uid", Generation: 1,
-		Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}},
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}},
 	}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
 	workload := &observedWorkload{observation: apply.Observation{Ready: true, ReadyCentralReplicas: 3, Message: "Rollout completed"}}
@@ -923,7 +923,7 @@ func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 	if err := kube.Get(t.Context(), req.NamespacedName, got); err != nil {
 		t.Fatal(err)
 	}
-	got.Spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+	got.Spec.Mode = operatorv1alpha1.InstallationModeCentralOnly
 	if err := kube.Update(t.Context(), got); err != nil {
 		t.Fatal(err)
 	}
@@ -941,7 +941,7 @@ func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 
 func TestLifecycleHandoffAuthorizesOnlyTheNextApplyCheckpoint(t *testing.T) {
 	scheme := controllerScheme(t)
-	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "handoff", Namespace: "default", UID: "installation-uid", Generation: 2}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5}}}
+	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "handoff", Namespace: "default", UID: "installation-uid", Generation: 2}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 5}}}
 	previous := installation.Spec
 	previous.Central.Replicas = 3
 	previousJSON, err := stdjson.Marshal(previous, stdjson.Deterministic(true))
@@ -981,7 +981,7 @@ func TestLifecycleHandoffAuthorizesOnlyTheNextApplyCheckpoint(t *testing.T) {
 
 func TestLifecycleHandoffIsConsumedAfterApplyBeforeObservation(t *testing.T) {
 	scheme := controllerScheme(t)
-	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "handoff-observe", Namespace: "default", UID: types.UID("installation-uid"), Generation: 2}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5}}}
+	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "handoff-observe", Namespace: "default", UID: types.UID("installation-uid"), Generation: 2}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 5}}}
 	previous := installation.Spec
 	previous.Central.Replicas = 3
 	previousJSON, err := stdjson.Marshal(previous, stdjson.Deterministic(true))
@@ -1013,7 +1013,7 @@ func TestLifecycleHandoffIsConsumedAfterApplyBeforeObservation(t *testing.T) {
 func TestUpgradeAuthorizationBindsTheCurrentVersionAndTopology(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "upgrade-checkpoint", Namespace: "default", UID: types.UID("upgrade-uid"), Generation: 2}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.18.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 	}}
 	installation.Spec.Upgrade.Backup.Destination = "file:///var/lib/kube-ovn/backups"
 	installation.Status.ObservedVersion = "v1.17.0"
@@ -1102,7 +1102,7 @@ func TestReconcilePausesDegradedUpgradeBeforeBackupOrRender(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "paused-upgrade", Namespace: "default", UID: types.UID("paused-upgrade-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.18.0", Mode: operatorv1alpha1.InstallationModeFull,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 			Upgrade: operatorv1alpha1.UpgradeSpec{PauseOnDegraded: true},
 		},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{
@@ -1145,8 +1145,8 @@ func TestReconcileBlocksVersionRollbackWithoutRestoreExecutor(t *testing.T) {
 			installation := &operatorv1alpha1.KubeOVNInstallation{
 				ObjectMeta: metav1.ObjectMeta{Name: "rollback", Namespace: "default", UID: types.UID("rollback-uid"), Generation: 2},
 				Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-					Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-					Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeSingle, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
+					Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+					Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeStandalone, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
 					Upgrade: operatorv1alpha1.UpgradeSpec{AllowRollback: test.allowRollback},
 				},
 				Status: operatorv1alpha1.KubeOVNInstallationStatus{ObservedVersion: "v1.17.0"},
@@ -1185,8 +1185,8 @@ func TestRollbackStatusPersistsVerifiedPairAge(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "rollback-rpo", Namespace: "default", UID: types.UID("rollback-rpo-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeSingle, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
+			Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeStandalone, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
 			Upgrade: operatorv1alpha1.UpgradeSpec{AllowRollback: true},
 		},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{
@@ -1243,7 +1243,7 @@ func TestRollbackAdmissionRejectsMismatchedBackupPairDigest(t *testing.T) {
 	topologyDigest := "sha256:" + strings.Repeat("a", 64)
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "rollback-pair", Namespace: "default", UID: types.UID("rollback-pair-uid"), Generation: 2},
-		Spec:       operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.16.0", Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeSingle}},
+		Spec:       operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.16.0", Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeStandalone}},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{
 			ObservedVersion: "v1.17.0",
 			Topology:        operatorv1alpha1.TopologyStatus{Inventory: &operatorv1alpha1.CentralTopologyReference{Digest: topologyDigest}},
@@ -1266,9 +1266,9 @@ func TestReconcileExecutesDurableRollbackPhases(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "rollback-exec", Namespace: "default", UID: types.UID("rollback-exec-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.16.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Chart:   operatorv1alpha1.ChartSpec{Digest: "sha256:" + strings.Repeat("c", 64)},
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeSingle, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeStandalone, Replicas: 1, Storage: operatorv1alpha1.StorageSpec{Size: "10Gi"}},
 			Upgrade: operatorv1alpha1.UpgradeSpec{AllowRollback: true},
 		},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{
@@ -1336,7 +1336,7 @@ func (f *rollbackExecutorFake) Step(_ context.Context, _ RollbackPlan, phase ope
 func TestUpgradeCheckpointAcceptsOnlyVersionChange(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "upgrade-checkpoint", Namespace: "default", UID: types.UID("upgrade-uid"), Generation: 2}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.18.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 	}}
 	installation.Status.ObservedVersion = "v1.17.0"
 	previous := installation.Spec
@@ -1377,7 +1377,7 @@ func TestUpgradeCheckpointAcceptsOnlyVersionChange(t *testing.T) {
 func TestUpgradeCheckpointPersistsCaptureAuthorizationAndApplyPhases(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "upgrade-phases", Namespace: "default", UID: types.UID("upgrade-phases-uid"), Generation: 2}, Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.18.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 	}}
 	installation.Spec.Upgrade.Backup.Destination = "file:///var/lib/kube-ovn/backups"
 	installation.Status.ObservedVersion = "v1.17.0"
@@ -1506,7 +1506,7 @@ func TestRecordLifecycleBackupStatusRequiresAVerifiedPair(t *testing.T) {
 }
 
 func TestReplicaOnlySpecChangePinsTheRetainedMemberCount(t *testing.T) {
-	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5}}}
+	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 5}}}
 	previous := installation.Spec
 	previous.Central.Replicas = 3
 	data, err := stdjson.Marshal(previous, stdjson.Deterministic(true))
@@ -1518,7 +1518,7 @@ func TestReplicaOnlySpecChangePinsTheRetainedMemberCount(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("replica-only transition was rejected: %v", err)
 	}
-	installation.Spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+	installation.Spec.Mode = operatorv1alpha1.InstallationModeCentralOnly
 	ok, err = replicaOnlySpecChange(installation, 3)
 	if err != nil || ok {
 		t.Fatalf("unrelated spec change was admitted: ok=%v err=%v", ok, err)
@@ -1546,8 +1546,8 @@ func TestBeginAutomaticLifecycleDoesNotRepeatConsumedSpec(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "automatic", Namespace: "default", UID: types.UID("automatic-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true},
 		},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{
 			Topology: operatorv1alpha1.TopologyStatus{Operation: &operatorv1alpha1.CentralOperationReference{HandoffApplied: true}},
@@ -1571,10 +1571,10 @@ func TestBeginAutomaticLifecycleSelectsNextMemberAfterConsumedHandoff(t *testing
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "sequential", Namespace: "default", UID: types.UID("sequential-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{
-				{Name: "first", NodeName: "node-first", ClaimName: "claim-first", VolumeName: "volume-first", Image: image, NorthboundAddress: "tcp:192.0.2.10:6643", SouthboundAddress: "tcp:192.0.2.10:6644", NorthboundClientAddress: "tcp:192.0.2.10:6641", SouthboundClientAddress: "tcp:192.0.2.10:6642"},
-				{Name: "second", NodeName: "node-second", ClaimName: "claim-second", VolumeName: "volume-second", Image: image, NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644", NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642"},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 5, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{
+				{Name: "first", NodeName: "node-first", ClaimName: "claim-first", VolumeName: "volume-first", Image: image, NorthboundEndpoint: "tcp:192.0.2.10:6643", SouthboundEndpoint: "tcp:192.0.2.10:6644", NorthboundClientEndpoint: "tcp:192.0.2.10:6641", SouthboundClientEndpoint: "tcp:192.0.2.10:6642"},
+				{Name: "second", NodeName: "node-second", ClaimName: "claim-second", VolumeName: "volume-second", Image: image, NorthboundEndpoint: "tcp:192.0.2.99:6643", SouthboundEndpoint: "tcp:192.0.2.99:6644", NorthboundClientEndpoint: "tcp:192.0.2.99:6641", SouthboundClientEndpoint: "tcp:192.0.2.99:6642"},
 			}},
 		},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{Topology: operatorv1alpha1.TopologyStatus{Operation: &operatorv1alpha1.CentralOperationReference{HandoffApplied: true}}},
@@ -1605,7 +1605,7 @@ func TestBeginAutomaticLifecycleSelectsNextMemberAfterConsumedHandoff(t *testing
 }
 
 func TestReplicaOnlySpecChangeAllowsASecondTransitionAfterTheFirstHandoff(t *testing.T) {
-	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}}
+	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}}}
 	data, err := stdjson.Marshal(installation.Spec, stdjson.Deterministic(true))
 	if err != nil {
 		t.Fatal(err)
@@ -1627,8 +1627,8 @@ func TestReplicaOnlySpecChangeAllowsASecondTransitionAfterTheFirstHandoff(t *tes
 func TestReplicaOnlySpecChangeAllowsLifecycleMemberRequestAfterHandoff(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true,
-			MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "replacement", ReplaceEndpoint: "chart-0-0"}}},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true,
+			MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "replacement", ReplacePod: "chart-0-0"}}},
 	}}
 	fullHash, baseHash, err := installationSpecHashes(installation.Spec)
 	if err != nil {
@@ -1636,7 +1636,7 @@ func TestReplicaOnlySpecChangeAllowsLifecycleMemberRequestAfterHandoff(t *testin
 	}
 	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{SpecHash: fullHash, BaseSpecHash: baseHash}
 	installation.Spec.Central.Replicas = 2
-	installation.Spec.Central.MemberRequests = []operatorv1alpha1.CentralMemberSpec{{Name: "retire", RetireEndpoint: "chart-1-0"}}
+	installation.Spec.Central.MemberRequests = []operatorv1alpha1.CentralMemberSpec{{Name: "retire", RetirePod: "chart-1-0"}}
 	allowed, err := replicaOnlySpecChange(installation, 3)
 	if err != nil || !allowed {
 		t.Fatalf("lifecycle member request after handoff was rejected: allowed=%v err=%v", allowed, err)
@@ -1652,7 +1652,7 @@ func TestReplicaOnlySpecChangeAllowsPreparedSlotsWithTheFirstReplicaIncrease(t *
 	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
 		Central: operatorv1alpha1.CentralSpec{
-			Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true,
+			Mode: operatorv1alpha1.CentralModeCluster, Replicas: 5, DynamicMembership: true,
 			MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "member-new"}},
 		},
 	}}
@@ -1674,23 +1674,23 @@ func TestValidateLifecycleMemberRequestPinsCurrentSpec(t *testing.T) {
 	image := "example/central@sha256:" + strings.Repeat("a", 64)
 	installation := &operatorv1alpha1.KubeOVNInstallation{Spec: operatorv1alpha1.KubeOVNInstallationSpec{Central: operatorv1alpha1.CentralSpec{MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
 		Name: "member-new", NodeName: "node-new", ClaimName: "claim-new", VolumeName: "volume-new", Image: image,
-		NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644",
-		NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642",
+		NorthboundEndpoint: "tcp:192.0.2.99:6643", SouthboundEndpoint: "tcp:192.0.2.99:6644",
+		NorthboundClientEndpoint: "tcp:192.0.2.99:6641", SouthboundClientEndpoint: "tcp:192.0.2.99:6642",
 	}}}}}
 	request := lifecycle.Request{Add: &lifecycle.Addition{
 		Workload: workload.Request{
 			Node: workload.Reference{Name: "node-new"}, Claim: workload.Reference{Name: "claim-new"}, Volume: workload.Reference{Name: "volume-new"}, Image: image,
 			Preparation: prepare.Plan{MemberName: "member-new", Databases: []prepare.Database{{Name: "OVN_Northbound", LocalAddress: "tcp:192.0.2.99:6643"}, {Name: "OVN_Southbound", LocalAddress: "tcp:192.0.2.99:6644"}}},
-		}, NorthboundAddress: "tcp:192.0.2.99:6641", SouthboundAddress: "tcp:192.0.2.99:6642",
+		}, NorthboundEndpoint: "tcp:192.0.2.99:6641", SouthboundEndpoint: "tcp:192.0.2.99:6642",
 	}}
 	if err := validateLifecycleMemberRequest(installation, request); err != nil {
 		t.Fatalf("matching lifecycle member request was rejected: %v", err)
 	}
-	installation.Spec.Central.MemberRequests[0].NorthboundClientAddress = "tcp:192.0.2.99:6651"
+	installation.Spec.Central.MemberRequests[0].NorthboundClientEndpoint = "tcp:192.0.2.99:6651"
 	if err := validateLifecycleMemberRequest(installation, request); err == nil || !strings.Contains(err.Error(), "changed after operation admission") {
 		t.Fatalf("client listener drift was not rejected: %v", err)
 	}
-	installation.Spec.Central.MemberRequests[0].NorthboundClientAddress = "tcp:192.0.2.99:6641"
+	installation.Spec.Central.MemberRequests[0].NorthboundClientEndpoint = "tcp:192.0.2.99:6641"
 	installation.Spec.Central.MemberRequests[0].TLSSecretRef = &operatorv1alpha1.LocalObjectReference{Name: "member-tls"}
 	if err := validateLifecycleMemberRequest(installation, request); err == nil || !strings.Contains(err.Error(), "changed after operation admission") {
 		t.Fatalf("TLS Secret reference drift was not rejected: %v", err)
@@ -1709,9 +1709,9 @@ func TestValidateLifecycleMemberRequestPinsCurrentSpec(t *testing.T) {
 func TestValidateRecoveryTargetMemberTLSContract(t *testing.T) {
 	member := operatorv1alpha1.CentralMemberSpec{
 		Name: "member", NodeName: "node", ClaimName: "claim", VolumeName: "volume",
-		Image:             "example/central@sha256:" + strings.Repeat("a", 64),
-		NorthboundAddress: "ssl:192.0.2.10:6643", SouthboundAddress: "ssl:192.0.2.10:6644",
-		NorthboundClientAddress: "ssl:192.0.2.10:6641", SouthboundClientAddress: "ssl:192.0.2.10:6642",
+		Image:              "example/central@sha256:" + strings.Repeat("a", 64),
+		NorthboundEndpoint: "ssl:192.0.2.10:6643", SouthboundEndpoint: "ssl:192.0.2.10:6644",
+		NorthboundClientEndpoint: "ssl:192.0.2.10:6641", SouthboundClientEndpoint: "ssl:192.0.2.10:6642",
 	}
 	if err := validateRecoveryTargetMember(member); err == nil || !strings.Contains(err.Error(), "tlsSecretRef") {
 		t.Fatalf("SSL recovery target without TLS Secret was accepted: %v", err)
@@ -1720,7 +1720,7 @@ func TestValidateRecoveryTargetMemberTLSContract(t *testing.T) {
 	if err := validateRecoveryTargetMember(member); err != nil {
 		t.Fatalf("valid SSL recovery target was rejected: %v", err)
 	}
-	member.SouthboundClientAddress = "tcp:192.0.2.10:6642"
+	member.SouthboundClientEndpoint = "tcp:192.0.2.10:6642"
 	if err := validateRecoveryTargetMember(member); err == nil || !strings.Contains(err.Error(), "one protocol") {
 		t.Fatalf("mixed-protocol recovery target was accepted: %v", err)
 	}
@@ -1822,12 +1822,12 @@ func TestReconcileSelectsAndPersistsAnAdditionFromLiveMemberObjects(t *testing.T
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "addition", Namespace: "default", UID: types.UID("addition-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 5, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
 				Name: "member-new", NodeName: "node-new", ClaimName: "claim-new", VolumeName: "volume-new",
-				Image:             "example/central@sha256:" + strings.Repeat("a", 64),
-				NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644",
-				NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642",
+				Image:              "example/central@sha256:" + strings.Repeat("a", 64),
+				NorthboundEndpoint: "tcp:192.0.2.99:6643", SouthboundEndpoint: "tcp:192.0.2.99:6644",
+				NorthboundClientEndpoint: "tcp:192.0.2.99:6641", SouthboundClientEndpoint: "tcp:192.0.2.99:6642",
 			}}},
 		},
 	}
@@ -1874,8 +1874,8 @@ func TestReconcileSelectsAndPersistsExplicitChartDeploymentRetirement(t *testing
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "retirement", Namespace: "default", UID: types.UID("retirement-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire-chart", RetireEndpoint: "chart-3-0"}}},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire-chart", RetirePod: "chart-3-0"}}},
 		},
 	}
 	previous := installation.Spec
@@ -1920,14 +1920,14 @@ func TestReconcileAdmitsApprovedLostChartDeploymentReplacement(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "lost-replacement", Namespace: "default", UID: types.UID("lost-replacement-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{
-				Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, DynamicMembership: true,
+				Mode: operatorv1alpha1.CentralModeCluster, Replicas: 5, DynamicMembership: true,
 				MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
 					Name: "member-replacement", NodeName: "node-new", ClaimName: "claim-new", VolumeName: "volume-new",
-					Image:             "example/central@sha256:" + strings.Repeat("a", 64),
-					NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644",
-					NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642",
+					Image:              "example/central@sha256:" + strings.Repeat("a", 64),
+					NorthboundEndpoint: "tcp:192.0.2.99:6643", SouthboundEndpoint: "tcp:192.0.2.99:6644",
+					NorthboundClientEndpoint: "tcp:192.0.2.99:6641", SouthboundClientEndpoint: "tcp:192.0.2.99:6642",
 					RemovalApprovalRef: &operatorv1alpha1.MemberRemovalApprovalReference{Name: "lost-member-approval", UID: types.UID("approval-uid")},
 				}},
 			},
@@ -1969,7 +1969,7 @@ func TestReconcileAdmitsApprovedLostChartDeploymentReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.RequeueAfter != 10*time.Second || lifecycleFake.begin != 1 {
-		t.Fatalf("approved lost endpoint replacement was not admitted: result=%+v begin=%d request=%+v", result, lifecycleFake.begin, lifecycleFake.request)
+		t.Fatalf("approved lost Pod replacement was not admitted: result=%+v begin=%d request=%+v", result, lifecycleFake.begin, lifecycleFake.request)
 	}
 	request := lifecycleFake.request
 	if !request.AutomaticReplacement || request.Add == nil || request.RemoveEndpoint != "chart-3-0" || request.Retirement == nil || !request.Retirement.EndpointMissing {
@@ -1979,7 +1979,7 @@ func TestReconcileAdmitsApprovedLostChartDeploymentReplacement(t *testing.T) {
 		t.Fatalf("replacement did not reuse the approval operation UUID: %q", request.OperationID)
 	}
 	if request.Retirement.Endpoint.UID != types.UID("chart-3-pod-0") || request.Retirement.ReplicaSet.UID != types.UID("chart-3-rs-uid") || len(request.Retirement.Survivors) != 1 || request.Retirement.Survivors[0].UID != types.UID("chart-3-pod-1") {
-		t.Fatalf("lost endpoint retirement did not pin the retained identities: %+v", request.Retirement)
+		t.Fatalf("lost Pod retirement did not pin the retained identities: %+v", request.Retirement)
 	}
 	got := new(operatorv1alpha1.KubeOVNInstallation)
 	if err := kube.Get(t.Context(), clientKey(installation), got); err != nil {
@@ -1994,14 +1994,14 @@ func TestReconcileRebindsAutomaticReplacementAfterRetainedNodeAddressDrift(t *te
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "address-drift", Namespace: "default", UID: types.UID("address-drift-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
 			Central: operatorv1alpha1.CentralSpec{
-				Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true,
+				Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true,
 				MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
 					Name: "member-replacement", NodeName: "node-new", ClaimName: "claim-new", VolumeName: "volume-new",
-					Image:             "example/central@sha256:" + strings.Repeat("a", 64),
-					NorthboundAddress: "tcp:192.0.2.99:6643", SouthboundAddress: "tcp:192.0.2.99:6644",
-					NorthboundClientAddress: "tcp:192.0.2.99:6641", SouthboundClientAddress: "tcp:192.0.2.99:6642",
+					Image:              "example/central@sha256:" + strings.Repeat("a", 64),
+					NorthboundEndpoint: "tcp:192.0.2.99:6643", SouthboundEndpoint: "tcp:192.0.2.99:6644",
+					NorthboundClientEndpoint: "tcp:192.0.2.99:6641", SouthboundClientEndpoint: "tcp:192.0.2.99:6642",
 					RemovalApprovalRef: &operatorv1alpha1.MemberRemovalApprovalReference{Name: "lost-member-approval", UID: types.UID("approval-uid")},
 				}},
 			},
@@ -2097,7 +2097,7 @@ func TestReconcileRebindsAutomaticReplacementAfterRetainedNodeAddressDrift(t *te
 	if got := request.Databases[0].Peers[1].Address; got != retained.Members[1].Databases[0].Address {
 		t.Fatalf("non-target peer address changed during rebind: got=%q want=%q", got, retained.Members[1].Databases[0].Address)
 	}
-	if got := request.Add.NorthboundAddress; got != "tcp:192.0.2.99:6641" {
+	if got := request.Add.NorthboundEndpoint; got != "tcp:192.0.2.99:6641" {
 		t.Fatalf("new member client address changed during rebind: %q", got)
 	}
 }

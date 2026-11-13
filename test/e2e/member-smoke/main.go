@@ -80,7 +80,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	installation := &api.KubeOVNInstallation{Name: "member-smoke", Namespace: "kube-ovn-operator-system", Spec: api.KubeOVNInstallationSpec{Version: "v1.16.13", Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3}}}
+	installation := &api.KubeOVNInstallation{Name: "member-smoke", Namespace: "kube-ovn-operator-system", Spec: api.KubeOVNInstallationSpec{Version: "v1.16.13", Mode: api.InstallationModeCentralOnly, Central: api.CentralSpec{Mode: api.CentralModeCluster, Replicas: 3}}}
 	if err := kube.Create(ctx, installation); err != nil {
 		return err
 	}
@@ -197,7 +197,7 @@ func run() error {
 	}
 	operation := lifecycle.Request{FormatVersion: 1, InstallationUID: string(installation.UID), InstallationGeneration: installation.Generation,
 		OperationID: request.Preparation.OperationID, RemoveEndpoint: seed.Name, Retirement: &retirement,
-		Add: &lifecycle.Addition{Workload: request, NorthboundAddress: "tcp:" + ip + ":6641", SouthboundAddress: "tcp:" + ip + ":6642"}}
+		Add: &lifecycle.Addition{Workload: request, NorthboundEndpoint: "tcp:" + ip + ":6641", SouthboundEndpoint: "tcp:" + ip + ":6642"}}
 	for i, db := range request.Preparation.Databases {
 		filename := []string{"nb", "sb"}[i]
 		out, err := exec.Run(ctx, seed.Namespace, seed.Name, "ovn-central", []string{"ovsdb-tool", "db-sid", "/work/db/" + filename})

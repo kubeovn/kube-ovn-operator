@@ -456,7 +456,7 @@ func replacementTargetAllowed(installation *api.KubeOVNInstallation, podName str
 		return false
 	}
 	for _, request := range installation.Spec.Central.MemberRequests {
-		if request.ReplaceEndpoint == podName {
+		if request.ReplacePod == podName {
 			return true
 		}
 	}

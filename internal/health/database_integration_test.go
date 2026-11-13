@@ -137,7 +137,7 @@ func TestLiveOVSDBStandaloneMetadata(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeSingle, []Database{state})
+		_, err = assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeStandalone, []Database{state})
 		return err
 	})
 }
@@ -182,7 +182,7 @@ func TestLiveOVSDBClusterLeaderFailoverAndQuorumLoss(t *testing.T) {
 			}
 			states = append(states, state)
 		}
-		_, err := assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeRaft, states)
+		_, err := assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeCluster, states)
 		return states, err
 	}
 	indices := []int{0, 1, 2}
@@ -220,7 +220,7 @@ func TestLiveOVSDBClusterLeaderFailoverAndQuorumLoss(t *testing.T) {
 		if state.Connected {
 			return fmt.Errorf("minority follower still reports connected")
 		}
-		if _, err := assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeRaft, []Database{state}); err == nil {
+		if _, err := assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeCluster, []Database{state}); err == nil {
 			return fmt.Errorf("minority accepted as healthy")
 		}
 		return nil

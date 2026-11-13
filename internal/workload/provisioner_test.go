@@ -127,7 +127,7 @@ func (f fixture) complete(t *testing.T, ref Reference) prepare.Result {
 
 func (f fixture) launch(result prepare.Result) central.Request {
 	return central.Request{FormatVersion: 1, Preparation: f.request.Preparation, Prepared: result,
-		NorthboundAddress: "tcp:192.0.2.4:6641", SouthboundAddress: "tcp:192.0.2.4:6642",
+		NorthboundEndpoint: "tcp:192.0.2.4:6641", SouthboundEndpoint: "tcp:192.0.2.4:6642",
 		NorthboundRemotes: []string{"tcp:192.0.2.1:6641", "tcp:192.0.2.2:6641", "tcp:192.0.2.3:6641", "tcp:192.0.2.4:6641"},
 		SouthboundRemotes: []string{"tcp:192.0.2.1:6642", "tcp:192.0.2.2:6642", "tcp:192.0.2.3:6642", "tcp:192.0.2.4:6642"}}
 }
@@ -230,8 +230,8 @@ func TestTLSSecretIsMountedAndGenerationPinned(t *testing.T) {
 		t.Fatal("preparation result was not durably accepted")
 	}
 	launch := f.launch(result)
-	launch.NorthboundAddress = strings.Replace(launch.NorthboundAddress, "tcp:", "ssl:", 1)
-	launch.SouthboundAddress = strings.Replace(launch.SouthboundAddress, "tcp:", "ssl:", 1)
+	launch.NorthboundEndpoint = strings.Replace(launch.NorthboundEndpoint, "tcp:", "ssl:", 1)
+	launch.SouthboundEndpoint = strings.Replace(launch.SouthboundEndpoint, "tcp:", "ssl:", 1)
 	for index := range launch.NorthboundRemotes {
 		launch.NorthboundRemotes[index] = strings.Replace(launch.NorthboundRemotes[index], "tcp:", "ssl:", 1)
 	}

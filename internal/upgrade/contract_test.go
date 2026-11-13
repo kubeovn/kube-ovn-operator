@@ -3,13 +3,13 @@ package upgrade
 import "testing"
 
 func TestValidateRequiresBackupAndCRDs(t *testing.T) {
-	if err := Validate(Contract{FromVersion: "v1.16.0", ToVersion: "v1.17.0", FromCentralMode: "raft", ToCentralMode: "raft"}); err == nil {
+	if err := Validate(Contract{FromVersion: "v1.16.0", ToVersion: "v1.17.0", FromCentralMode: "cluster", ToCentralMode: "cluster"}); err == nil {
 		t.Fatal("expected upgrade gates")
 	}
 }
 
 func TestValidateRejectsCentralModeSwitch(t *testing.T) {
-	if err := Validate(Contract{FromVersion: "v1.16.0", ToVersion: "v1.17.0", FromCentralMode: "raft", ToCentralMode: "single", BackupReady: true, CRDsReady: true}); err == nil {
+	if err := Validate(Contract{FromVersion: "v1.16.0", ToVersion: "v1.17.0", FromCentralMode: "cluster", ToCentralMode: "standalone", BackupReady: true, CRDsReady: true}); err == nil {
 		t.Fatal("expected central mode transition rejection")
 	}
 }
@@ -31,7 +31,7 @@ func TestCompareVersionsClassifiesPinnedTransitions(t *testing.T) {
 }
 
 func TestValidateRejectsRollbackWithoutRestoreExecutor(t *testing.T) {
-	contract := Contract{FromVersion: "v1.17.0", ToVersion: "v1.16.0", FromCentralMode: "raft", ToCentralMode: "raft", BackupReady: true, CRDsReady: true, AllowRollback: true}
+	contract := Contract{FromVersion: "v1.17.0", ToVersion: "v1.16.0", FromCentralMode: "cluster", ToCentralMode: "cluster", BackupReady: true, CRDsReady: true, AllowRollback: true}
 	if err := Validate(contract); err == nil {
 		t.Fatal("rollback was admitted without a restore executor")
 	}

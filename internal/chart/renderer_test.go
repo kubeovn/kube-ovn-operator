@@ -11,9 +11,9 @@ func TestNetworkStackPreservesHCPTransportValues(t *testing.T) {
 	for _, stack := range []string{"", "ipv4", "ipv6", "dual_stack"} {
 		t.Run(stack, func(t *testing.T) {
 			spec := operatorv1alpha1.KubeOVNInstallationSpec{
-				Version: "v1.16.13", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly, NetworkStack: stack,
-				Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
-				HCP:     operatorv1alpha1.HCPConfig{Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "management", CentralNamespace: "hcp", NBEndpoint: "ssl:nb.example:6641", SBEndpoint: "ssl:sb.example:6642", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"}},
+				Version: "v1.16.13", Mode: operatorv1alpha1.InstallationModeNodeNetworking, NetworkStack: stack,
+				Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
+				HCP:     operatorv1alpha1.HCPConfig{Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp", NBEndpoint: "ssl:nb.example:6641", SBEndpoint: "ssl:sb.example:6642", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"}},
 			}
 			values, err := installationValues(spec)
 			if err != nil {
@@ -35,10 +35,10 @@ func TestNetworkStackPreservesHCPTransportValues(t *testing.T) {
 
 func TestValuesRendererIncludesModeCentralAndHCPWithoutCredentials(t *testing.T) {
 	rendered, err := (ValuesRenderer{}).Render(t.Context(), operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly,
-		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
+		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example", SBEndpoint: "sb.example"}},
-		HCP:       operatorv1alpha1.HCPConfig{Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "tenant-a", CentralNamespace: "hcp", NBEndpoint: "tcp:hcp-nb:6641", SBEndpoint: "tcp:hcp-sb:6642", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"}},
+		HCP:       operatorv1alpha1.HCPConfig{Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "tenant-a", PeerNamespace: "hcp", NBEndpoint: "tcp:hcp-nb:6641", SBEndpoint: "tcp:hcp-sb:6642", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,5 +51,18 @@ func TestValuesRendererIncludesModeCentralAndHCPWithoutCredentials(t *testing.T)
 	}
 	if strings.Contains(text, "private") || strings.Contains(text, "certificate") {
 		t.Fatalf("rendered values contain credential-like data:\n%s", text)
+	}
+}
+
+func TestValuesRendererMapsCentralOnlyToUpstreamControlPlaneMode(t *testing.T) {
+	rendered, err := (ValuesRenderer{}).Render(t.Context(), operatorv1alpha1.KubeOVNInstallationSpec{
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(rendered.ValuesYAML); !strings.Contains(got, "installMode: controlPlaneOnly") {
+		t.Fatalf("upstream install mode = %q, want controlPlaneOnly", got)
 	}
 }

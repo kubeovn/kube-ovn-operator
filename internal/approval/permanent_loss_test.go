@@ -45,8 +45,8 @@ func testRecord() *api.KubeOVNMemberRemovalApproval {
 			InstallationRef: api.InstallationReference{Name: "ovn", UID: "installation-uid"},
 			OperationID:     operationID, Reason: "Hardware permanently lost", ExpiresAt: metav1.NewTime(time.Now().Add(time.Hour).Truncate(time.Second)),
 			Targets: []api.MemberRemovalTarget{
-				{Database: s.Database, ClusterID: s.ClusterID, ServerID: s.Members[2].ServerID, Address: s.Members[2].Address},
-				{Database: "OVN_Southbound", ClusterID: s.ClusterID, ServerID: s.Members[2].ServerID, Address: s.Members[2].Address},
+				{Database: s.Database, ClusterID: s.ClusterID, ServerID: s.Members[2].ServerID, RaftAddress: s.Members[2].Address},
+				{Database: "OVN_Southbound", ClusterID: s.ClusterID, ServerID: s.Members[2].ServerID, RaftAddress: s.Members[2].Address},
 			},
 		}},
 	}
@@ -187,7 +187,7 @@ func TestApprovalRejectsChangedOrInvalidDecisions(t *testing.T) {
 				case "server":
 					record.Spec.Decision.Targets[0].ServerID = "ffff0000-1111-2222-3333-444444444444"
 				case "address":
-					record.Spec.Decision.Targets[0].Address = "tcp:192.0.2.9:6643"
+					record.Spec.Decision.Targets[0].RaftAddress = "tcp:192.0.2.9:6643"
 				case "database":
 					record.Spec.Decision.Targets[0].Database = "other"
 				case "duplicate database":
@@ -197,7 +197,7 @@ func TestApprovalRejectsChangedOrInvalidDecisions(t *testing.T) {
 				case "short server":
 					record.Spec.Decision.Targets[0].ServerID = "abcd"
 				case "hostname":
-					record.Spec.Decision.Targets[0].Address = "tcp:node:6643"
+					record.Spec.Decision.Targets[0].RaftAddress = "tcp:node:6643"
 				case "reason":
 					record.Spec.Decision.Reason = " "
 				case "revoked":

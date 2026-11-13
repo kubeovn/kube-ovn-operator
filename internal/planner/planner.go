@@ -37,7 +37,7 @@ func Build(spec operatorv1alpha1.KubeOVNInstallationSpec, observedVersion string
 			actions = append(actions, "RecordRollbackCheckpoint")
 		}
 	}
-	if spec.Central.Mode == operatorv1alpha1.CentralModeRaft {
+	if spec.Central.Mode == operatorv1alpha1.CentralModeCluster {
 		actions = append(actions, "AcquireCentralMembershipLease", "ValidateQuorum", "JoinBeforeReplicaIncrease", "LeaveBeforeReplicaDecrease")
 	}
 	if spec.HCP.Enabled {
@@ -51,7 +51,7 @@ func Build(spec operatorv1alpha1.KubeOVNInstallationSpec, observedVersion string
 		"version":         spec.Version,
 	}
 	external := spec.DataPlane.ExternalOVNCentral
-	if spec.HCP.Enabled && spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly {
+	if spec.HCP.Enabled && spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking {
 		if northbound, err := hcp.ParseEndpoint(spec.HCP.NBEndpoint); err == nil {
 			if southbound, err := hcp.ParseEndpoint(spec.HCP.SBEndpoint); err == nil {
 				external.NBEndpoint, external.NBPort = northbound.Host, northbound.Port

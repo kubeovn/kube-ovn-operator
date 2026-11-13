@@ -21,10 +21,10 @@ func TestHCPProviderIsRequiredBeforeWorkloadApply(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "data-plane", Namespace: "default", UID: types.UID("hcp-installation"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 			HCP: operatorv1alpha1.HCPConfig{
-				Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "management", CentralNamespace: "hcp",
+				Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 				NBEndpoint: "tcp:nb.example:6641", SBEndpoint: "tcp:sb.example:6642",
 				TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"},
 			},
@@ -52,10 +52,10 @@ func TestHCPPeerRequestPinsTLSSecretGeneration(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "data-plane", Namespace: "default", UID: types.UID("hcp-installation"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 			HCP: operatorv1alpha1.HCPConfig{
-				Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "management", CentralNamespace: "hcp",
+				Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 				NBEndpoint: "tcp:nb.example:6641", SBEndpoint: "tcp:sb.example:6642",
 				TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"},
 			},
@@ -93,7 +93,7 @@ func TestHCPPeerRequestUsesUncachedIdentityReader(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "data-plane", Namespace: "default", UID: types.UID("hcp-installation"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{HCP: operatorv1alpha1.HCPConfig{
-			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "management", CentralNamespace: "hcp",
+			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 			NBEndpoint: "tcp:nb.example:6641", SBEndpoint: "tcp:sb.example:6642", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"},
 		}},
 	}
@@ -116,10 +116,10 @@ func TestHCPReportParticipatesInReadyGateAndStatus(t *testing.T) {
 	installation := &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "data-plane", Namespace: "default", UID: types.UID("hcp-installation"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
-			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 			HCP: operatorv1alpha1.HCPConfig{
-				Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "management", CentralNamespace: "hcp",
+				Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 				NBEndpoint: "tcp:nb.example:6641", SBEndpoint: "tcp:sb.example:6642",
 				TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"},
 			},

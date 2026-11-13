@@ -234,9 +234,9 @@ spec:
   chart:
     source: http://127.0.0.1:18084/kube-ovn-1.17.0.tgz
     digest: ${digest}
-  mode: controlPlaneOnly
+  mode: centralOnly
   central:
-    mode: raft
+    mode: cluster
     replicas: 3
     dynamicMembership: true
     placement:
@@ -335,7 +335,7 @@ if [[ -z "${target_pod}" ]]; then
 fi
 
 cat >"${test_dir}/replacement.json" <<JSON
-{"spec":{"central":{"memberRequests":[{"name":"replacement","replaceEndpoint":"${target_pod}","nodeName":"${worker}","claimName":"${claim_name}","volumeName":"${volume_name}","image":"${member_image}","northboundAddress":"tcp:${worker_ip}:6643","southboundAddress":"tcp:${worker_ip}:6644","northboundClientAddress":"tcp:${worker_ip}:6641","southboundClientAddress":"tcp:${worker_ip}:6642"}]}}}
+{"spec":{"central":{"memberRequests":[{"name":"replacement","replacePod":"${target_pod}","nodeName":"${worker}","claimName":"${claim_name}","volumeName":"${volume_name}","image":"${member_image}","northboundEndpoint":"tcp:${worker_ip}:6643","southboundEndpoint":"tcp:${worker_ip}:6644","northboundClientEndpoint":"tcp:${worker_ip}:6641","southboundClientEndpoint":"tcp:${worker_ip}:6642"}]}}}
 JSON
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/replacement.json" >/dev/null
 
@@ -528,7 +528,7 @@ echo "default controller completed native Deployment replacement: $target_pod ->
 
 # Exercise automatic loss inference after the explicit replacement. The
 # approval is created before the endpoint is lost, and the replacement request
-# deliberately omits replaceEndpoint. Cordon plus Pod deletion makes the old
+# deliberately omits replacePod. Cordon plus Pod deletion makes the old
 # endpoint uniquely lost while preserving the healthy Deployment survivor.
 kubectl rollout status deployment/"${central_deployment}" -n kube-ovn-operator-system --timeout=120s
 automatic_candidates_file="${test_dir}/automatic-candidates.json"
@@ -766,7 +766,7 @@ targets = [
         "database": database["database"],
         "clusterID": database["clusterID"],
         "serverID": database["serverID"],
-        "address": database["address"],
+        "raftAddress": database["address"],
     }
     for database in target["databases"]
 ]
@@ -797,7 +797,7 @@ if [[ -z "${automatic_approval_uid}" ]]; then
 fi
 
 cat >"${test_dir}/automatic-replacement.json" <<JSON
-{"spec":{"central":{"memberRequests":[{"name":"automatic-replacement","nodeName":"${automatic_worker}","claimName":"${automatic_claim_name}","volumeName":"${automatic_volume_name}","image":"${member_image}","northboundAddress":"tcp:${automatic_worker_ip}:6643","southboundAddress":"tcp:${automatic_worker_ip}:6644","northboundClientAddress":"tcp:${automatic_worker_ip}:6641","southboundClientAddress":"tcp:${automatic_worker_ip}:6642","removalApprovalRef":{"name":"${automatic_approval_name}","uid":"${automatic_approval_uid}"}}]}}}
+{"spec":{"central":{"memberRequests":[{"name":"automatic-replacement","nodeName":"${automatic_worker}","claimName":"${automatic_claim_name}","volumeName":"${automatic_volume_name}","image":"${member_image}","northboundEndpoint":"tcp:${automatic_worker_ip}:6643","southboundEndpoint":"tcp:${automatic_worker_ip}:6644","northboundClientEndpoint":"tcp:${automatic_worker_ip}:6641","southboundClientEndpoint":"tcp:${automatic_worker_ip}:6642","removalApprovalRef":{"name":"${automatic_approval_name}","uid":"${automatic_approval_uid}"}}]}}}
 JSON
 kubectl patch koi/controller-retirement -n kube-ovn-operator-system --type=merge --patch-file "${test_dir}/automatic-replacement.json" >/dev/null
 
@@ -854,7 +854,7 @@ if [[ -z "${automatic_request_name}" || "${automatic_request_name}" == "${previo
   cat "${test_dir}/operator.log"
   exit 1
 fi
-# Admission has pinned the unique lost endpoint. Keep the Deployment's
+# Admission has pinned the unique lost Pod. Keep the Deployment's
 # original desired replica count until the durable operation has removed the
 # old database member; the lifecycle executor rejects an early scale-down.
 automatic_request_json=$(kubectl get configmap "${automatic_request_name}" -n kube-ovn-operator-system -o jsonpath='{.data.record\.json}')
@@ -867,7 +867,7 @@ approval = json.load(open(os.environ["APPROVAL_FILE"]))["spec"]["decision"]
 for target in approval["targets"]:
     inventory = next(db for db in request["databases"] if db["database"] == target["database"])
     peer = next(peer for peer in inventory["peers"] if peer["name"] == request["removeEndpoint"])
-    if inventory["clusterID"] != target["clusterID"] or any(peer[key] != target[key] for key in ("serverID", "address")):
+    if inventory["clusterID"] != target["clusterID"] or peer["serverID"] != target["serverID"] or peer["address"] != target["raftAddress"]:
         raise SystemExit("automatic request does not remove the exact approved native member")
 if request["retirement"]["endpoint"]["name"] != request["removeEndpoint"]:
     raise SystemExit("automatic request does not pin the lost process reference")

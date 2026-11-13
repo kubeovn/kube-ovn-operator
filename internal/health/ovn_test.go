@@ -31,7 +31,7 @@ func healthFixture(t *testing.T) (*operatorv1alpha1.KubeOVNInstallation, client.
 			t.Fatal(err)
 		}
 	}
-	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "network", Namespace: "kube-system", UID: "installation", Spec: operatorv1alpha1.KubeOVNInstallationSpec{Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}}
+	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "network", Namespace: "kube-system", UID: "installation", Spec: operatorv1alpha1.KubeOVNInstallationSpec{Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}}}
 	deployment := &appsv1.Deployment{Name: "ovn-central", Namespace: installation.Namespace, UID: "deployment", Labels: map[string]string{apply.ManagedByLabel: apply.ManagedByValue, apply.InstallationLabel: installation.Name, apply.InstallationNamespaceLabel: installation.Namespace, apply.InstallationUIDLabel: string(installation.UID)}, OwnerReferences: []metav1.OwnerReference{{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation", Name: installation.Name, UID: installation.UID, Controller: new(true)}}}
 	rs := &appsv1.ReplicaSet{Name: "ovn-central-rs", Namespace: installation.Namespace, UID: "replicaset", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: deployment.Name, UID: deployment.UID, Controller: new(true)}}}
 	objects := []client.Object{deployment, rs}
@@ -110,7 +110,7 @@ func TestOVNObserverDoesNotTreatMissingOrUnreadyPodsAsSuccess(t *testing.T) {
 			case "wrong installation":
 				installation.UID = "other-installation"
 			case "peer":
-				installation.Spec.Mode = operatorv1alpha1.InstallationModeDataPlaneOnly
+				installation.Spec.Mode = operatorv1alpha1.InstallationModeNodeNetworking
 			}
 			observer := OVNObserver{Reader: kube, Runner: runnerFunc(func(context.Context, string, string, string, []string) ([]byte, error) {
 				t.Fatal("unexpected execution")
@@ -144,7 +144,7 @@ func TestOVNObserverFailsWhenSouthboundCannotBeRead(t *testing.T) {
 
 func TestOVNObserverStandaloneStatefulSetAndPodReplacement(t *testing.T) {
 	installation, kube, objects := healthFixture(t)
-	installation.Spec.Central.Mode = operatorv1alpha1.CentralModeSingle
+	installation.Spec.Central.Mode = operatorv1alpha1.CentralModeStandalone
 	installation.Spec.Central.Replicas = 1
 	deployment := objects[0].(*appsv1.Deployment)
 	statefulSet := &appsv1.StatefulSet{Name: "central-single", Namespace: installation.Namespace, UID: "statefulset", Labels: deployment.Labels, OwnerReferences: deployment.OwnerReferences}

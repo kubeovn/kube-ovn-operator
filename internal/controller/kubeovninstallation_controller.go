@@ -264,7 +264,7 @@ func installationUsesNode(installation *operatorv1alpha1.KubeOVNInstallation, no
 			return true
 		}
 	}
-	if installation.Spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly && !installation.Spec.HCP.Enabled {
+	if installation.Spec.Mode != operatorv1alpha1.InstallationModeNodeNetworking && !installation.Spec.HCP.Enabled {
 		selector := installation.Spec.Central.Placement.NodeSelector
 		if len(selector) == 0 {
 			selector = map[string]string{"node-role.kubernetes.io/control-plane": ""}
@@ -273,7 +273,7 @@ func installationUsesNode(installation *operatorv1alpha1.KubeOVNInstallation, no
 			return true
 		}
 	}
-	if installation.Spec.Mode != operatorv1alpha1.InstallationModeControlPlaneOnly {
+	if installation.Spec.Mode != operatorv1alpha1.InstallationModeCentralOnly {
 		if labels.SelectorFromSet(installation.Spec.DataPlane.NodeSelector).Matches(labels.Set(node.Labels)) {
 			return true
 		}
@@ -307,7 +307,7 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 		now = r.Clock
 	}
 	plan := planner.Build(installation.Spec, installation.Status.ObservedVersion)
-	if plan.Blocking == "" && installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Central.Replicas == 2 && !raftReplicaTransitionReady(installation) {
+	if plan.Blocking == "" && installation.Spec.Central.Mode == operatorv1alpha1.CentralModeCluster && installation.Spec.Central.Replicas == 2 && !raftReplicaTransitionReady(installation) {
 		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "Validate", "spec.central.replicas=2 is permitted only for an existing retained RAFT topology transition"
 	}
 	if err := r.checkExecutingRecovery(ctx, installation); err != nil {
@@ -763,7 +763,7 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 			err = fmt.Errorf("workload management requires an operation lease manager")
 		} else {
 			err = r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
-				if installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly {
+				if installation.Spec.Central.Mode == operatorv1alpha1.CentralModeCluster && installation.Spec.Mode != operatorv1alpha1.InstallationModeNodeNetworking {
 					return r.Leases.With(operationCtx, installation, lease.Central, operation)
 				}
 				return operation(operationCtx)
@@ -858,7 +858,7 @@ func (r *KubeOVNInstallationReconciler) checkExecutingRecovery(ctx context.Conte
 		return fmt.Errorf("inspect executing recovery requests: %w", err)
 	}
 	for _, request := range requests.Items {
-		if request.Spec.InstallationRef == installation.Name && request.Status.Phase == operatorv1alpha1.RecoveryPhaseExecuting && request.Status.Plan != nil && request.Status.Plan.InstallationUID == installation.UID {
+		if request.Spec.InstallationName == installation.Name && request.Status.Phase == operatorv1alpha1.RecoveryPhaseExecuting && request.Status.Plan != nil && request.Status.Plan.InstallationUID == installation.UID {
 			return fmt.Errorf("%w: %s", errRecoveryExecuting, request.Name)
 		}
 	}
@@ -1018,7 +1018,7 @@ func hasMemberReplacementRequest(installation *operatorv1alpha1.KubeOVNInstallat
 		return false
 	}
 	for _, member := range installation.Spec.Central.MemberRequests {
-		if member.ReplaceEndpoint != "" || (member.RetireEndpoint == "" && member.RemovalApprovalRef != nil) {
+		if member.ReplacePod != "" || (member.RetirePod == "" && member.RemovalApprovalRef != nil) {
 			return true
 		}
 	}
@@ -1216,7 +1216,7 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		status.Phase = operatorv1alpha1.PhaseDegraded
 		degraded, degradedReason, readyReason, message = metav1.ConditionTrue, "TopologyUnverified", "TopologyUnverified", topologyState.Message
 	}
-	networkVerified := network.Status == metav1.ConditionTrue && (installation.Spec.Mode == operatorv1alpha1.InstallationModeControlPlaneOnly && network.Reason == "NotRequired" || status.Network != nil && status.Network.ObservedNodes > 0 && status.Network.SuccessfulProbes > 0 && len(status.Network.AddressFamilies) > 0)
+	networkVerified := network.Status == metav1.ConditionTrue && (installation.Spec.Mode == operatorv1alpha1.InstallationModeCentralOnly && network.Reason == "NotRequired" || status.Network != nil && status.Network.ObservedNodes > 0 && status.Network.SuccessfulProbes > 0 && len(status.Network.AddressFamilies) > 0)
 	if topologyState.Status == metav1.ConditionTrue && hcpCondition.Status == metav1.ConditionTrue && plan.Blocking == "" && workloadStatus == metav1.ConditionTrue && ovnStatus == metav1.ConditionTrue && northd.Status == metav1.ConditionTrue && dataPlane.Status == metav1.ConditionTrue && networkVerified {
 		readyStatus, readyReason, message = metav1.ConditionTrue, "VerificationComplete", "Workloads, OVN databases, runtime and configured network probes passed verification"
 		status.Phase = operatorv1alpha1.PhaseReady
@@ -1309,7 +1309,7 @@ func conditionMetricValue(status metav1.ConditionStatus) float64 {
 }
 
 func localRaft(installation *operatorv1alpha1.KubeOVNInstallation) bool {
-	return installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Mode != operatorv1alpha1.InstallationModeDataPlaneOnly && !installation.Spec.HCP.Enabled
+	return installation.Spec.Central.Mode == operatorv1alpha1.CentralModeCluster && installation.Spec.Mode != operatorv1alpha1.InstallationModeNodeNetworking && !installation.Spec.HCP.Enabled
 }
 
 func topologyFailureReason(err error) string {
@@ -1449,7 +1449,7 @@ func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstal
 	}
 	if request.Add == nil {
 		for _, member := range installation.Spec.Central.MemberRequests {
-			if member.RetireEndpoint == request.RemoveEndpoint {
+			if member.RetirePod == request.RemoveEndpoint {
 				if !lifecycleMemberApprovalMatches(member, request) {
 					return fmt.Errorf("retirement member request %q changed after operation admission; restore removalApprovalRef before retrying", member.Name)
 				}
@@ -1457,20 +1457,20 @@ func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstal
 			}
 		}
 		for _, member := range installation.Spec.Central.MemberRequests {
-			if member.RetireEndpoint != "" {
-				return fmt.Errorf("retirement member request changed after operation admission; restore retireEndpoint %q before retrying", request.RemoveEndpoint)
+			if member.RetirePod != "" {
+				return fmt.Errorf("retirement member request changed after operation admission; restore retirePod %q before retrying", request.RemoveEndpoint)
 			}
 		}
 		return nil
 	}
 	plan := request.Add.Workload.Preparation
-	var northboundAddress, southboundAddress string
+	var northboundEndpoint, southboundEndpoint string
 	for _, database := range plan.Databases {
 		switch database.Name {
 		case "OVN_Northbound":
-			northboundAddress = database.LocalAddress
+			northboundEndpoint = database.LocalAddress
 		case "OVN_Southbound":
-			southboundAddress = database.LocalAddress
+			southboundEndpoint = database.LocalAddress
 		}
 	}
 	memberName := plan.MemberName
@@ -1478,7 +1478,7 @@ func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstal
 		if member.Name != memberName {
 			continue
 		}
-		autoReplacement := member.ReplaceEndpoint == "" && member.RetireEndpoint == "" && member.RemovalApprovalRef != nil
+		autoReplacement := member.ReplacePod == "" && member.RetirePod == "" && member.RemovalApprovalRef != nil
 		memberTLSName := ""
 		if member.TLSSecretRef != nil {
 			memberTLSName = member.TLSSecretRef.Name
@@ -1487,7 +1487,7 @@ func validateLifecycleMemberRequest(installation *operatorv1alpha1.KubeOVNInstal
 		if request.Add.Workload.TLSSecret != nil {
 			requestTLSName = request.Add.Workload.TLSSecret.Name
 		}
-		if member.NodeName != request.Add.Workload.Node.Name || member.ClaimName != request.Add.Workload.Claim.Name || member.VolumeName != request.Add.Workload.Volume.Name || member.Image != request.Add.Workload.Image || member.NorthboundAddress != northboundAddress || member.SouthboundAddress != southboundAddress || member.NorthboundClientAddress != request.Add.NorthboundAddress || member.SouthboundClientAddress != request.Add.SouthboundAddress || memberTLSName != requestTLSName || request.AutomaticReplacement != autoReplacement || !autoReplacement && member.ReplaceEndpoint != request.RemoveEndpoint || !lifecycleMemberApprovalMatches(member, request) {
+		if member.NodeName != request.Add.Workload.Node.Name || member.ClaimName != request.Add.Workload.Claim.Name || member.VolumeName != request.Add.Workload.Volume.Name || member.Image != request.Add.Workload.Image || member.NorthboundEndpoint != northboundEndpoint || member.SouthboundEndpoint != southboundEndpoint || member.NorthboundClientEndpoint != request.Add.NorthboundEndpoint || member.SouthboundClientEndpoint != request.Add.SouthboundEndpoint || memberTLSName != requestTLSName || request.AutomaticReplacement != autoReplacement || !autoReplacement && member.ReplacePod != request.RemoveEndpoint || !lifecycleMemberApprovalMatches(member, request) {
 			return fmt.Errorf("lifecycle member request %q changed after operation admission; restore the pinned node, storage, image, addresses and TLS Secret reference before retrying", memberName)
 		}
 		return nil
@@ -1695,7 +1695,7 @@ func (r *KubeOVNInstallationReconciler) protectedRecoveryBackupReferences(ctx co
 	refs := make([]string, 0, len(requests.Items))
 	for index := range requests.Items {
 		request := &requests.Items[index]
-		if request.Spec.InstallationRef != installation.Name {
+		if request.Spec.InstallationName != installation.Name {
 			continue
 		}
 		switch request.Status.Phase {
@@ -2468,7 +2468,7 @@ type RecoveryPlan struct {
 	SourceVersion          string
 	TargetVersion          string
 	ChartDigest            string
-	TargetMemberRef        string
+	TargetMemberName       string
 	TargetMemberDigest     string
 	TopologyDigest         string
 	BackupRef              string
@@ -2523,9 +2523,9 @@ func (r *RecoveryRequestReconciler) Reconcile(ctx context.Context, req reconcile
 		}
 		return reconcile.Result{RequeueAfter: request.Spec.ExpiresAt.Sub(now)}, r.updateRecoveryStatus(ctx, request)
 	}
-	installationName := strings.TrimSpace(request.Spec.InstallationRef)
+	installationName := strings.TrimSpace(request.Spec.InstallationName)
 	if installationName == "" {
-		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "InvalidRequest", "spec.installationRef is required", now, false)
+		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "InvalidRequest", "spec.installationName is required", now, false)
 	}
 	installation := new(operatorv1alpha1.KubeOVNInstallation)
 	if err := r.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: installationName}, installation); err != nil {
@@ -2620,25 +2620,25 @@ func buildRecoveryPlan(request *operatorv1alpha1.KubeOVNRecoveryRequest, install
 	if installation.UID == "" || installation.Generation < 1 {
 		return RecoveryPlan{}, "InstallationIdentityInvalid", errors.New("referenced installation has no stable UID or generation")
 	}
-	if request.Namespace != installation.Namespace || strings.TrimSpace(request.Spec.InstallationRef) != installation.Name {
+	if request.Namespace != installation.Namespace || strings.TrimSpace(request.Spec.InstallationName) != installation.Name {
 		return RecoveryPlan{}, "InstallationMismatch", errors.New("recovery request does not reference the installation in its namespace")
 	}
 	reason := strings.TrimSpace(request.Spec.Reason)
 	if reason == "" || len(reason) > 1024 {
 		return RecoveryPlan{}, "InvalidRequest", errors.New("spec.reason must contain 1 to 1024 non-space characters")
 	}
-	approver := strings.TrimSpace(request.Spec.ApprovedBy)
+	approver := strings.TrimSpace(request.Spec.RequestedBy)
 	if approver == "" || len(approver) > 256 {
-		return RecoveryPlan{}, "InvalidRequest", errors.New("spec.approvedBy must contain 1 to 256 non-space characters")
+		return RecoveryPlan{}, "InvalidRequest", errors.New("spec.requestedBy must contain 1 to 256 non-space characters")
 	}
-	targetMemberRef, targetMemberDigest, topologyDigest, err := recoveryTarget(request, installation)
+	targetMemberName, targetMemberDigest, topologyDigest, err := recoveryTarget(request, installation)
 	if err != nil {
 		return RecoveryPlan{}, "TargetInvalid", err
 	}
 	switch request.Spec.Mode {
 	case operatorv1alpha1.RecoveryModeRejoin:
-		if targetMemberRef == "" {
-			return RecoveryPlan{}, "TargetRequired", errors.New("rejoin requires spec.targetMemberRef naming an explicit central.memberRequests entry")
+		if targetMemberName == "" {
+			return RecoveryPlan{}, "TargetRequired", errors.New("rejoin requires spec.targetMemberName naming an explicit central.memberRequests entry")
 		}
 		if request.Spec.ApprovalRef != nil {
 			return RecoveryPlan{}, "ApprovalUnsupported", errors.New("rejoin recovery does not accept a destructive recovery approval")
@@ -2670,7 +2670,7 @@ func buildRecoveryPlan(request *operatorv1alpha1.KubeOVNRecoveryRequest, install
 		InstallationNamespace: installation.Namespace, InstallationName: installation.Name, InstallationUID: installation.UID,
 		InstallationGeneration: installation.Generation, RequestGeneration: request.Generation,
 		Reason: reason, OperationID: recoveryOperationID(request), Mode: request.Spec.Mode, SourceVersion: installation.Status.ObservedVersion, TargetVersion: installation.Spec.Version,
-		ChartDigest: installation.Spec.Chart.Digest, TargetMemberRef: targetMemberRef, TargetMemberDigest: targetMemberDigest,
+		ChartDigest: installation.Spec.Chart.Digest, TargetMemberName: targetMemberName, TargetMemberDigest: targetMemberDigest,
 		TopologyDigest: topologyDigest, BackupRef: backupRef, ApprovalRef: request.Spec.ApprovalRef, Approver: approver, ExpiresAt: expiresAt,
 	}
 	if verifiedBackup != nil {
@@ -2702,7 +2702,7 @@ func recoveryTarget(request *operatorv1alpha1.KubeOVNRecoveryRequest, installati
 	if request == nil || installation == nil {
 		return "", "", "", errors.New("recovery target requires a request and installation")
 	}
-	ref := strings.TrimSpace(request.Spec.TargetMemberRef)
+	ref := strings.TrimSpace(request.Spec.TargetMemberName)
 	if ref == "" {
 		if request.Spec.Mode == operatorv1alpha1.RecoveryModeReconvert || request.Spec.Mode == operatorv1alpha1.RecoveryModeFreshBootstrap {
 			if installation.Status.Topology.Inventory == nil || installation.Status.Topology.Inventory.Digest == "" {
@@ -2713,10 +2713,10 @@ func recoveryTarget(request *operatorv1alpha1.KubeOVNRecoveryRequest, installati
 		return "", "", "", nil
 	}
 	if request.Spec.Mode != operatorv1alpha1.RecoveryModeRejoin {
-		return "", "", "", errors.New("spec.targetMemberRef is only supported for rejoin recovery")
+		return "", "", "", errors.New("spec.targetMemberName is only supported for rejoin recovery")
 	}
-	if installation.Spec.Central.Mode != operatorv1alpha1.CentralModeRaft || installation.Spec.Mode == operatorv1alpha1.InstallationModeDataPlaneOnly || !installation.Spec.Central.DynamicMembership {
-		return "", "", "", errors.New("rejoin target requires a local raft installation with dynamic membership enabled")
+	if installation.Spec.Central.Mode != operatorv1alpha1.CentralModeCluster || installation.Spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking || !installation.Spec.Central.DynamicMembership {
+		return "", "", "", errors.New("rejoin target requires a local cluster installation with dynamic membership enabled")
 	}
 	retained := installation.Status.Topology.Inventory
 	if retained == nil || retained.Digest == "" {
@@ -2735,7 +2735,7 @@ func recoveryTarget(request *operatorv1alpha1.KubeOVNRecoveryRequest, installati
 	if target == nil {
 		return "", "", "", fmt.Errorf("rejoin target member %q is not present in central.memberRequests", ref)
 	}
-	if target.RetireEndpoint != "" {
+	if target.RetirePod != "" {
 		return "", "", "", errors.New("rejoin target cannot be a retirement-only member request")
 	}
 	if err := validateRecoveryTargetMember(*target); err != nil {
@@ -2752,16 +2752,16 @@ func validateRecoveryTargetMember(member operatorv1alpha1.CentralMemberSpec) err
 	if len(kvalidation.IsDNS1123Label(member.Name)) != 0 {
 		return errors.New("target member name must be a DNS label")
 	}
-	if member.ReplaceEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.ReplaceEndpoint)) != 0 {
-		return errors.New("target member replaceEndpoint must be a DNS subdomain")
+	if member.ReplacePod != "" && len(kvalidation.IsDNS1123Subdomain(member.ReplacePod)) != 0 {
+		return errors.New("target member replacePod must be a DNS subdomain")
 	}
-	if member.RetireEndpoint != "" && len(kvalidation.IsDNS1123Subdomain(member.RetireEndpoint)) != 0 {
-		return errors.New("target member retireEndpoint must be a DNS subdomain")
+	if member.RetirePod != "" && len(kvalidation.IsDNS1123Subdomain(member.RetirePod)) != 0 {
+		return errors.New("target member retirePod must be a DNS subdomain")
 	}
-	if member.ReplaceEndpoint != "" && member.RetireEndpoint != "" {
-		return errors.New("target member cannot set both replaceEndpoint and retireEndpoint")
+	if member.ReplacePod != "" && member.RetirePod != "" {
+		return errors.New("target member cannot set both replacePod and retirePod")
 	}
-	for _, value := range []string{member.NodeName, member.ClaimName, member.VolumeName, member.Image, member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+	for _, value := range []string{member.NodeName, member.ClaimName, member.VolumeName, member.Image, member.NorthboundEndpoint, member.SouthboundEndpoint, member.NorthboundClientEndpoint, member.SouthboundClientEndpoint} {
 		if strings.TrimSpace(value) == "" {
 			return errors.New("target member requires node, storage, image and all NB/SB addresses")
 		}
@@ -2781,7 +2781,7 @@ func validateMemberTLSContract(member operatorv1alpha1.CentralMemberSpec) error 
 		return errors.New("target member tlsSecretRef.name must be a DNS subdomain")
 	}
 	protocol := ""
-	for _, address := range []string{member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+	for _, address := range []string{member.NorthboundEndpoint, member.SouthboundEndpoint, member.NorthboundClientEndpoint, member.SouthboundClientEndpoint} {
 		current, endpoint, found := strings.Cut(address, ":")
 		if !found || endpoint == "" || current != "tcp" && current != "ssl" {
 			return errors.New("target member NB/SB addresses must use tcp or ssl")
@@ -2850,7 +2850,7 @@ func recoveryPlanDigest(plan RecoveryPlan) string {
 		SourceVersion          string
 		TargetVersion          string
 		ChartDigest            string
-		TargetMemberRef        string
+		TargetMemberName       string
 		TargetMemberDigest     string
 		TopologyDigest         string
 		BackupRef              string
@@ -2863,7 +2863,7 @@ func recoveryPlanDigest(plan RecoveryPlan) string {
 		InstallationNamespace: plan.InstallationNamespace, InstallationName: plan.InstallationName, InstallationUID: plan.InstallationUID,
 		InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration,
 		Reason: plan.Reason, OperationID: plan.OperationID, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest,
-		TargetMemberRef: plan.TargetMemberRef, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest,
+		TargetMemberName: plan.TargetMemberName, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest,
 		BackupRef: plan.BackupRef, DatabaseRefs: plan.DatabaseRefs, ApprovalRef: plan.ApprovalRef, Approver: plan.Approver,
 		ExpiresAt: plan.ExpiresAt.UTC().Format(time.RFC3339Nano),
 	}, stdjson.Deterministic(true))
@@ -2891,7 +2891,7 @@ func recoveryPlanDigestLegacy(plan RecoveryPlan) string {
 		SourceVersion          string
 		TargetVersion          string
 		ChartDigest            string
-		TargetMemberRef        string
+		TargetMemberName       string
 		TargetMemberDigest     string
 		TopologyDigest         string
 		BackupRef              string
@@ -2904,7 +2904,7 @@ func recoveryPlanDigestLegacy(plan RecoveryPlan) string {
 		InstallationNamespace: plan.InstallationNamespace, InstallationName: plan.InstallationName, InstallationUID: plan.InstallationUID,
 		InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration,
 		Reason: plan.Reason, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest,
-		TargetMemberRef: plan.TargetMemberRef, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest,
+		TargetMemberName: plan.TargetMemberName, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest,
 		BackupRef: plan.BackupRef, DatabaseRefs: plan.DatabaseRefs, ApprovalRef: plan.ApprovalRef, Approver: plan.Approver,
 		ExpiresAt: plan.ExpiresAt.UTC().Format(time.RFC3339Nano),
 	}, stdjson.Deterministic(true))
@@ -2918,14 +2918,14 @@ func recoveryPlanStatus(plan RecoveryPlan) *operatorv1alpha1.RecoveryPlanStatus 
 	// metav1.Time drops fractional seconds on the wire. Normalize the status
 	// projection before comparison; the digest and expiry admission retain
 	// the request's complete timestamp precision.
-	return &operatorv1alpha1.RecoveryPlanStatus{Digest: plan.Digest, InstallationUID: plan.InstallationUID, InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest, TargetMemberRef: plan.TargetMemberRef, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest, BackupRef: plan.BackupRef, DatabaseRefs: maps.Clone(plan.DatabaseRefs), ApprovalRef: plan.ApprovalRef, ExpiresAt: metav1.NewTime(plan.ExpiresAt.Truncate(time.Second))}
+	return &operatorv1alpha1.RecoveryPlanStatus{Digest: plan.Digest, InstallationUID: plan.InstallationUID, InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest, TargetMemberName: plan.TargetMemberName, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest, BackupRef: plan.BackupRef, DatabaseRefs: maps.Clone(plan.DatabaseRefs), ApprovalRef: plan.ApprovalRef, ExpiresAt: metav1.NewTime(plan.ExpiresAt.Truncate(time.Second))}
 }
 
 func sameRecoveryPlan(left, right *operatorv1alpha1.RecoveryPlanStatus) bool {
 	if left == nil || right == nil {
 		return left == right
 	}
-	return left.Digest == right.Digest && left.InstallationUID == right.InstallationUID && left.InstallationGeneration == right.InstallationGeneration && left.RequestGeneration == right.RequestGeneration && left.Mode == right.Mode && left.SourceVersion == right.SourceVersion && left.TargetVersion == right.TargetVersion && left.ChartDigest == right.ChartDigest && left.TargetMemberRef == right.TargetMemberRef && left.TargetMemberDigest == right.TargetMemberDigest && left.TopologyDigest == right.TopologyDigest && left.BackupRef == right.BackupRef && maps.Equal(left.DatabaseRefs, right.DatabaseRefs) && sameRecoveryApprovalRef(left.ApprovalRef, right.ApprovalRef) && left.ExpiresAt.Time.Equal(right.ExpiresAt.Time)
+	return left.Digest == right.Digest && left.InstallationUID == right.InstallationUID && left.InstallationGeneration == right.InstallationGeneration && left.RequestGeneration == right.RequestGeneration && left.Mode == right.Mode && left.SourceVersion == right.SourceVersion && left.TargetVersion == right.TargetVersion && left.ChartDigest == right.ChartDigest && left.TargetMemberName == right.TargetMemberName && left.TargetMemberDigest == right.TargetMemberDigest && left.TopologyDigest == right.TopologyDigest && left.BackupRef == right.BackupRef && maps.Equal(left.DatabaseRefs, right.DatabaseRefs) && sameRecoveryApprovalRef(left.ApprovalRef, right.ApprovalRef) && left.ExpiresAt.Time.Equal(right.ExpiresAt.Time)
 }
 
 func sameRecoveryApprovalRef(left, right *operatorv1alpha1.RecoveryApprovalReference) bool {
@@ -2941,28 +2941,28 @@ func recoveryCondition(generation int64, conditionType string, status metav1.Con
 
 func (r *RecoveryRequestReconciler) setRecoveryAwaiting(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, now time.Time) error {
 	request.Status.Phase = operatorv1alpha1.RecoveryPhaseAwaitingExecution
-	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; approvedBy is self-reported and does not authorize execution", now))
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; requestedBy is self-reported and does not authorize execution", now))
 	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionFalse, "ExternalExecutorRequired", "no explicit central recovery executor is configured; no database or storage mutation was attempted", now))
 	return r.updateRecoveryStatus(ctx, request)
 }
 
 func (r *RecoveryRequestReconciler) setRecoveryExecuting(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, now time.Time) error {
 	request.Status.Phase = operatorv1alpha1.RecoveryPhaseExecuting
-	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; approvedBy is self-reported and does not authorize execution", now))
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; requestedBy is self-reported and does not authorize execution", now))
 	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionTrue, "ExecutionStarted", "explicit recovery executor was admitted to execute the persisted plan", now))
 	return r.updateRecoveryStatus(ctx, request)
 }
 
 func (r *RecoveryRequestReconciler) setRecoveryInProgress(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, now time.Time) error {
 	request.Status.Phase = operatorv1alpha1.RecoveryPhaseExecuting
-	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; approvedBy is self-reported and does not authorize execution", now))
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; requestedBy is self-reported and does not authorize execution", now))
 	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionTrue, "ExecutionInProgress", "the durable rejoin operation is advancing and will be retried until both databases and the workload converge", now))
 	return r.updateRecoveryStatus(ctx, request)
 }
 
 func (r *RecoveryRequestReconciler) setRecoveryWorkloadNotReady(ctx context.Context, request *operatorv1alpha1.KubeOVNRecoveryRequest, now time.Time) error {
 	request.Status.Phase = operatorv1alpha1.RecoveryPhaseExecuting
-	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; approvedBy is self-reported and does not authorize execution", now))
+	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "Accepted", metav1.ConditionTrue, "PlanValidated", "recovery plan is identity-bound; requestedBy is self-reported and does not authorize execution", now))
 	setCondition(&request.Status.Conditions, recoveryCondition(request.Generation, "ExecutionReady", metav1.ConditionFalse, "WorkloadNotReady", "recovery artifacts are not available yet; no database or storage mutation was attempted", now))
 	return r.updateRecoveryStatus(ctx, request)
 }

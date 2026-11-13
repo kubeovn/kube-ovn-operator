@@ -14,10 +14,10 @@ type InstallationReference struct {
 }
 
 type MemberRemovalTarget struct {
-	Database  string `json:"database"`
-	ClusterID string `json:"clusterID"`
-	ServerID  string `json:"serverID"`
-	Address   string `json:"address"`
+	Database    string `json:"database"`
+	ClusterID   string `json:"clusterID"`
+	ServerID    string `json:"serverID"`
+	RaftAddress string `json:"raftAddress"`
 }
 
 // MemberRemovalDecision is immutable. Permission to create an approval is the

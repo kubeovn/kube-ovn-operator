@@ -19,7 +19,7 @@ func TestNorthdRuntimeRequiresOneActiveAndBothConnections(t *testing.T) {
 	for _, scenario := range []string{"healthy", "all standby", "two active", "paused", "NB disconnected", "SB disconnected", "pod restarted"} {
 		t.Run(scenario, func(t *testing.T) {
 			installation, kube, _ := healthFixture(t)
-			installation.Spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+			installation.Spec.Mode = operatorv1alpha1.InstallationModeCentralOnly
 			observer := RuntimeObserver{Reader: kube, Runner: runnerFunc(func(_ context.Context, ns, pod, container string, command []string) ([]byte, error) {
 				if container != "ovn-central" || command[0] != "ovn-appctl" || command[3] != "ovn-northd" {
 					return nil, fmt.Errorf("unexpected command target")
@@ -53,7 +53,7 @@ func TestNorthdRuntimeRequiresOneActiveAndBothConnections(t *testing.T) {
 			})}
 			report := observer.Observe(t.Context(), installation)
 			if report.DataPlane.Status != metav1.ConditionTrue || report.DataPlane.Reason != "NotRequired" {
-				t.Fatalf("control-plane-only data plane: %+v", report)
+				t.Fatalf("central-only data plane: %+v", report)
 			}
 			if scenario == "healthy" {
 				if report.Northd.Status != metav1.ConditionTrue || len(report.NorthdProcesses) != 3 {
@@ -69,7 +69,7 @@ func TestNorthdRuntimeRequiresOneActiveAndBothConnections(t *testing.T) {
 func dataPlaneFixture(t *testing.T) (*operatorv1alpha1.KubeOVNInstallation, client.Client) {
 	t.Helper()
 	installation, kube, objects := healthFixture(t)
-	installation.Spec.Mode = operatorv1alpha1.InstallationModeDataPlaneOnly
+	installation.Spec.Mode = operatorv1alpha1.InstallationModeNodeNetworking
 	workload := objects[0].(*appsv1.Deployment)
 	ds := &appsv1.DaemonSet{Name: "ovs-ovn", Namespace: installation.Namespace, UID: "ovs-daemonset", Generation: 1, Labels: workload.Labels, OwnerReferences: workload.OwnerReferences,
 		Spec:   appsv1.DaemonSetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "ovs"}}},
@@ -184,7 +184,7 @@ func TestDataPlaneRuntimeRequiresCompleteUniqueAndConnectedNodes(t *testing.T) {
 			})}
 			report := observer.Observe(t.Context(), installation)
 			if report.Northd.Status != metav1.ConditionTrue || report.Northd.Reason != "NotRequired" {
-				t.Fatalf("data-plane-only northd: %+v", report)
+				t.Fatalf("nodeNetworking northd: %+v", report)
 			}
 			if scenario == "healthy" {
 				if report.DataPlane.Status != metav1.ConditionTrue || len(report.Nodes) != 3 || report.Nodes[0].NodeUID != "node-0-uid" {

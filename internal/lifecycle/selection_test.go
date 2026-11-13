@@ -72,7 +72,7 @@ func TestSelectRemovalBuildsExplicitChartDeploymentScaleIn(t *testing.T) {
 	installation, topology, objects := selectionFixture(t, 3)
 	installation.Spec.Central.Replicas = int32(len(topology.Members) - 1)
 	installation.Spec.Central.DynamicMembership = true
-	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{{Name: "retire-chart", RetireEndpoint: "chart-3-0", RemovalApprovalRef: &api.MemberRemovalApprovalReference{Name: "lost-member-approval", UID: types.UID("approval-uid")}}}
+	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{{Name: "retire-chart", RetirePod: "chart-3-0", RemovalApprovalRef: &api.MemberRemovalApprovalReference{Name: "lost-member-approval", UID: types.UID("approval-uid")}}}
 	objects = append(objects, chartDeploymentObjects(installation, "chart-3", "chart-3-0", "pod-3", "chart-rs", "chart-rs-uid")...)
 	objects = append(objects, removalApprovalObject(installation))
 
@@ -96,15 +96,15 @@ func TestSelectAdditionRequiresPinnedMemberObjectsAndBuildsBothDatabasePlan(t *t
 	installation.Spec.Central.Replicas = 5
 	installation.Spec.Central.DynamicMembership = true
 	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{{
-		Name:                    "member-new",
-		NodeName:                "node-new",
-		ClaimName:               "claim-new",
-		VolumeName:              "volume-new",
-		Image:                   "example/central@sha256:" + strings.Repeat("a", 64),
-		NorthboundAddress:       "tcp:192.0.2.99:6643",
-		SouthboundAddress:       "tcp:192.0.2.99:6644",
-		NorthboundClientAddress: "tcp:192.0.2.99:6641",
-		SouthboundClientAddress: "tcp:192.0.2.99:6642",
+		Name:                     "member-new",
+		NodeName:                 "node-new",
+		ClaimName:                "claim-new",
+		VolumeName:               "volume-new",
+		Image:                    "example/central@sha256:" + strings.Repeat("a", 64),
+		NorthboundEndpoint:       "tcp:192.0.2.99:6643",
+		SouthboundEndpoint:       "tcp:192.0.2.99:6644",
+		NorthboundClientEndpoint: "tcp:192.0.2.99:6641",
+		SouthboundClientEndpoint: "tcp:192.0.2.99:6642",
 	}}
 	objects = append(objects,
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-new", UID: types.UID("node-new-uid")}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}, Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "192.0.2.99"}}}},
@@ -128,10 +128,10 @@ func TestSelectAdditionBindsMemberTLSSecretGeneration(t *testing.T) {
 	installation.Spec.Central.Replicas = 5
 	installation.Spec.Central.DynamicMembership = true
 	member := memberRequest("member-tls", "node-new", "claim-new", "volume-new", "192.0.2.99")
-	member.NorthboundAddress = "ssl:192.0.2.99:6643"
-	member.SouthboundAddress = "ssl:192.0.2.99:6644"
-	member.NorthboundClientAddress = "ssl:192.0.2.99:6641"
-	member.SouthboundClientAddress = "ssl:192.0.2.99:6642"
+	member.NorthboundEndpoint = "ssl:192.0.2.99:6643"
+	member.SouthboundEndpoint = "ssl:192.0.2.99:6644"
+	member.NorthboundClientEndpoint = "ssl:192.0.2.99:6641"
+	member.SouthboundClientEndpoint = "ssl:192.0.2.99:6642"
 	member.TLSSecretRef = &api.LocalObjectReference{Name: "member-tls"}
 	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{member}
 	for memberIndex := range topology.Members {
@@ -155,7 +155,7 @@ func TestSelectAdditionBindsMemberTLSSecretGeneration(t *testing.T) {
 	if bound.Name != "member-tls" || bound.UID != types.UID("secret-uid") || bound.ResourceVersion != "7" || bound.PrivateKeyKey != "tls.key" || bound.CertificateKey != "tls.crt" || bound.CAKey != "ca.crt" {
 		t.Fatalf("unexpected TLS Secret binding: %+v", bound)
 	}
-	if request.Add.Workload.Preparation.Databases[0].LocalAddress[:4] != "ssl:" || request.Add.NorthboundAddress[:4] != "ssl:" {
+	if request.Add.Workload.Preparation.Databases[0].LocalAddress[:4] != "ssl:" || request.Add.NorthboundEndpoint[:4] != "ssl:" {
 		t.Fatalf("TLS member addresses were not preserved: %+v", request.Add)
 	}
 }
@@ -165,7 +165,7 @@ func TestSelectAdditionRejectsMixedMemberTLSProtocols(t *testing.T) {
 	installation.Spec.Central.Replicas = 5
 	installation.Spec.Central.DynamicMembership = true
 	member := memberRequest("member-mixed", "node-new", "claim-new", "volume-new", "192.0.2.99")
-	member.NorthboundAddress = "ssl:192.0.2.99:6643"
+	member.NorthboundEndpoint = "ssl:192.0.2.99:6643"
 	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{member}
 	objects = append(objects, memberObjects(installation, "node-new", "claim-new", "volume-new", "192.0.2.99")...)
 	if _, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology); err == nil || !strings.Contains(err.Error(), "one protocol") {
@@ -178,7 +178,7 @@ func TestSelectAdditionBuildsSameSizeReplacementForPinnedStatefulSet(t *testing.
 	installation.Spec.Central.Replicas = int32(len(topology.Members))
 	installation.Spec.Central.DynamicMembership = true
 	member := memberRequest("member-replacement", "node-new", "claim-new", "volume-new", "192.0.2.99")
-	member.ReplaceEndpoint = "member-0-0"
+	member.ReplacePod = "member-0-0"
 	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{member}
 	objects = append(objects, memberObjects(installation, "node-new", "claim-new", "volume-new", "192.0.2.99")...)
 
@@ -186,7 +186,7 @@ func TestSelectAdditionBuildsSameSizeReplacementForPinnedStatefulSet(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request == nil || request.Add == nil || request.RemoveEndpoint != member.ReplaceEndpoint || request.Retirement == nil {
+	if request == nil || request.Add == nil || request.RemoveEndpoint != member.ReplacePod || request.Retirement == nil {
 		t.Fatalf("unexpected same-size replacement request: %+v", request)
 	}
 	if request.Retirement.Workload.Name != "member-0" || request.Add.Workload.Preparation.MemberName != member.Name {
@@ -202,7 +202,7 @@ func TestSelectAdditionBuildsSameSizeReplacementForChartDeployment(t *testing.T)
 	installation.Spec.Central.Replicas = int32(len(topology.Members))
 	installation.Spec.Central.DynamicMembership = true
 	member := memberRequest("member-replacement", "node-new", "claim-new", "volume-new", "192.0.2.99")
-	member.ReplaceEndpoint = "chart-3-0"
+	member.ReplacePod = "chart-3-0"
 	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{member}
 	objects = append(objects, memberObjects(installation, "node-new", "claim-new", "volume-new", "192.0.2.99")...)
 	objects = append(objects, chartDeploymentObjects(installation, "chart-3", "chart-3-0", "pod-3", "chart-rs", "chart-rs-uid")...)
@@ -222,7 +222,7 @@ func TestSelectAdditionRejectsMissingRemovalApproval(t *testing.T) {
 	installation.Spec.Central.Replicas = int32(len(topology.Members))
 	installation.Spec.Central.DynamicMembership = true
 	member := memberRequest("member-replacement", "node-new", "claim-new", "volume-new", "192.0.2.99")
-	member.ReplaceEndpoint = "chart-3-0"
+	member.ReplacePod = "chart-3-0"
 	member.RemovalApprovalRef = &api.MemberRemovalApprovalReference{Name: "missing-approval", UID: types.UID("approval-uid")}
 	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{member}
 	objects = append(objects, memberObjects(installation, "node-new", "claim-new", "volume-new", "192.0.2.99")...)
@@ -239,7 +239,7 @@ func TestSelectAdditionBuildsLostDeploymentReplacementWithApproval(t *testing.T)
 	installation.Spec.Central.Replicas = int32(len(topology.Members))
 	installation.Spec.Central.DynamicMembership = true
 	member := memberRequest("member-replacement", "node-new", "claim-new", "volume-new", "192.0.2.99")
-	member.ReplaceEndpoint = "chart-3-0"
+	member.ReplacePod = "chart-3-0"
 	member.RemovalApprovalRef = &api.MemberRemovalApprovalReference{Name: "lost-member-approval", UID: types.UID("approval-uid")}
 	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{member}
 	objects = append(objects, memberObjects(installation, "node-new", "claim-new", "volume-new", "192.0.2.99")...)
@@ -296,7 +296,7 @@ func TestSelectAdditionAutomaticallyTargetsOneLostDeployment(t *testing.T) {
 		t.Fatal(err)
 	}
 	if request == nil || request.RemoveEndpoint != "chart-3-0" || request.Retirement == nil || !request.Retirement.EndpointMissing {
-		t.Fatalf("automatic replacement did not target the unique lost endpoint: %+v", request)
+		t.Fatalf("automatic replacement did not target the unique lost Pod: %+v", request)
 	}
 	if request.Databases[0].Approval.Name != "lost-member-approval" || request.Databases[0].Approval.UID != "approval-uid" {
 		t.Fatalf("automatic replacement lost its approval binding: %+v", request.Databases)
@@ -411,7 +411,7 @@ func TestSelectAdditionRejectsAmbiguousAutomaticReplacement(t *testing.T) {
 			},
 		})
 	}
-	// All retained endpoint Pods and Nodes are absent, which produces two
+	// All retained Pod Pods and Nodes are absent, which produces two
 	// equally plausible loss candidates and must stop automatic selection.
 	_, err := SelectAddition(t.Context(), selectionClient(t, objects), installation, topology)
 	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
@@ -434,7 +434,7 @@ func TestSelectAdditionSkipsRetirementOnlySlots(t *testing.T) {
 	installation.Spec.Central.Replicas = 5
 	installation.Spec.Central.DynamicMembership = true
 	installation.Spec.Central.MemberRequests = []api.CentralMemberSpec{
-		{Name: "retire-chart", RetireEndpoint: "chart-0-0"},
+		{Name: "retire-chart", RetirePod: "chart-0-0"},
 		memberRequest("member-new", "node-new", "claim-new", "volume-new", "192.0.2.99"),
 	}
 	objects = append(objects, memberObjects(installation, "node-new", "claim-new", "volume-new", "192.0.2.99")...)
@@ -493,9 +493,9 @@ func TestSelectAdditionForMemberDoesNotFallBackToAnotherSlot(t *testing.T) {
 func memberRequest(name, node, claim, volume, address string) api.CentralMemberSpec {
 	return api.CentralMemberSpec{
 		Name: name, NodeName: node, ClaimName: claim, VolumeName: volume,
-		Image:             "example/central@sha256:" + strings.Repeat("a", 64),
-		NorthboundAddress: "tcp:" + address + ":6643", SouthboundAddress: "tcp:" + address + ":6644",
-		NorthboundClientAddress: "tcp:" + address + ":6641", SouthboundClientAddress: "tcp:" + address + ":6642",
+		Image:              "example/central@sha256:" + strings.Repeat("a", 64),
+		NorthboundEndpoint: "tcp:" + address + ":6643", SouthboundEndpoint: "tcp:" + address + ":6644",
+		NorthboundClientEndpoint: "tcp:" + address + ":6641", SouthboundClientEndpoint: "tcp:" + address + ":6642",
 	}
 }
 
@@ -577,7 +577,7 @@ func selectionClient(t *testing.T, objects []client.Object) client.Reader {
 
 func selectionFixture(t *testing.T, stateful int) (*api.KubeOVNInstallation, health.CentralTopology, []client.Object) {
 	t.Helper()
-	installation := &api.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "installation", Namespace: "default", UID: types.UID("installation-uid"), Generation: 4}, Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3}}}
+	installation := &api.KubeOVNInstallation{ObjectMeta: metav1.ObjectMeta{Name: "installation", Namespace: "default", UID: types.UID("installation-uid"), Generation: 4}, Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeCentralOnly, Central: api.CentralSpec{Mode: api.CentralModeCluster, Replicas: 3}}}
 	objects := make([]client.Object, 0, stateful)
 	topology := health.CentralTopology{Members: make([]health.CentralIdentity, 0, 4)}
 	for index := range 4 {

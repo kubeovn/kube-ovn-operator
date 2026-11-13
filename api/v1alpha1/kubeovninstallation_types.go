@@ -5,19 +5,22 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// InstallationMode selects the rendered Kube-OVN slice: full, centralOnly
+// (OVN central components), or nodeNetworking (node networking agents and
+// controller connected to an external central).
 type InstallationMode string
 
 const (
-	InstallationModeFull             InstallationMode = "full"
-	InstallationModeControlPlaneOnly InstallationMode = "controlPlaneOnly"
-	InstallationModeDataPlaneOnly    InstallationMode = "dataPlaneOnly"
+	InstallationModeFull           InstallationMode = "full"
+	InstallationModeCentralOnly    InstallationMode = "centralOnly"
+	InstallationModeNodeNetworking InstallationMode = "nodeNetworking"
 )
 
 type CentralMode string
 
 const (
-	CentralModeRaft   CentralMode = "raft"
-	CentralModeSingle CentralMode = "single"
+	CentralModeCluster    CentralMode = "cluster"
+	CentralModeStandalone CentralMode = "standalone"
 )
 
 type HCPRole string
@@ -83,28 +86,28 @@ type CentralSpec struct {
 // CentralMemberSpec is an explicit member slot. Addition and replacement
 // entries must identify a pre-provisioned claim, volume, node, image and all
 // listener addresses; the operator records their live UIDs before creating a
-// preparation Job or StatefulSet. When replaceEndpoint is set, the slot is a
-// same-size replacement for the pinned old endpoint. A retirement-only entry
-// may set retireEndpoint to select one retained Chart Deployment Pod for a
+// preparation Job or StatefulSet. When replacePod is set, the slot is a
+// same-size replacement for the pinned old Pod. A retirement-only entry
+// may set retirePod to select one retained Chart Deployment Pod for a
 // one-member scale-in transition.
 type CentralMemberSpec struct {
-	Name            string `json:"name"`
-	ReplaceEndpoint string `json:"replaceEndpoint,omitempty"`
-	RetireEndpoint  string `json:"retireEndpoint,omitempty"`
+	Name       string `json:"name"`
+	ReplacePod string `json:"replacePod,omitempty"`
+	RetirePod  string `json:"retirePod,omitempty"`
 	// RemovalApprovalRef authorizes a permanent-loss kick when the retained
-	// endpoint has disappeared or been replaced. Without replaceEndpoint, the
+	// Pod has disappeared or been replaced. Without replacePod, the
 	// reference opts into automatic same-size replacement only when exactly one
-	// retained endpoint is proven lost. The operator never creates this approval
+	// retained Pod is proven lost. The operator never creates this approval
 	// and only forwards its immutable name/UID to the joint lifecycle executor.
-	RemovalApprovalRef      *MemberRemovalApprovalReference `json:"removalApprovalRef,omitempty"`
-	NodeName                string                          `json:"nodeName,omitempty"`
-	ClaimName               string                          `json:"claimName,omitempty"`
-	VolumeName              string                          `json:"volumeName,omitempty"`
-	Image                   string                          `json:"image,omitempty"`
-	NorthboundAddress       string                          `json:"northboundAddress,omitempty"`
-	SouthboundAddress       string                          `json:"southboundAddress,omitempty"`
-	NorthboundClientAddress string                          `json:"northboundClientAddress,omitempty"`
-	SouthboundClientAddress string                          `json:"southboundClientAddress,omitempty"`
+	RemovalApprovalRef       *MemberRemovalApprovalReference `json:"removalApprovalRef,omitempty"`
+	NodeName                 string                          `json:"nodeName,omitempty"`
+	ClaimName                string                          `json:"claimName,omitempty"`
+	VolumeName               string                          `json:"volumeName,omitempty"`
+	Image                    string                          `json:"image,omitempty"`
+	NorthboundEndpoint       string                          `json:"northboundEndpoint,omitempty"`
+	SouthboundEndpoint       string                          `json:"southboundEndpoint,omitempty"`
+	NorthboundClientEndpoint string                          `json:"northboundClientEndpoint,omitempty"`
+	SouthboundClientEndpoint string                          `json:"southboundClientEndpoint,omitempty"`
 	// TLSSecretRef names an existing Secret containing either tls.key/tls.crt/ca.crt
 	// or the native key/cert/cacert keys. The lifecycle executor records its
 	// identity before creating a workload and never copies Secret data.
@@ -125,8 +128,8 @@ type PlacementSpec struct {
 }
 
 type StorageSpec struct {
-	ClassName string `json:"className,omitempty"`
-	Size      string `json:"size,omitempty"`
+	StorageClassName string `json:"storageClassName,omitempty"`
+	Size             string `json:"size,omitempty"`
 }
 
 type DataPlaneSpec struct {
@@ -143,13 +146,13 @@ type EndpointSpec struct {
 }
 
 type HCPConfig struct {
-	Enabled          bool                  `json:"enabled,omitempty"`
-	Role             HCPRole               `json:"role,omitempty"`
-	PairRef          string                `json:"pairRef,omitempty"`
-	CentralNamespace string                `json:"centralNamespace,omitempty"`
-	NBEndpoint       string                `json:"nbEndpoint,omitempty"`
-	SBEndpoint       string                `json:"sbEndpoint,omitempty"`
-	TLSSecretRef     *LocalObjectReference `json:"tlsSecretRef,omitempty"`
+	Enabled       bool                  `json:"enabled,omitempty"`
+	Role          HCPRole               `json:"role,omitempty"`
+	PeerName      string                `json:"peerName,omitempty"`
+	PeerNamespace string                `json:"peerNamespace,omitempty"`
+	NBEndpoint    string                `json:"nbEndpoint,omitempty"`
+	SBEndpoint    string                `json:"sbEndpoint,omitempty"`
+	TLSSecretRef  *LocalObjectReference `json:"tlsSecretRef,omitempty"`
 }
 
 type LocalObjectReference struct {
@@ -434,20 +437,23 @@ const (
 type KubeOVNRecoveryRequestSpec struct {
 	// Suspend holds a new request before plan admission so its API identity can
 	// be bound to an independent approval. It cannot change after admission.
-	Suspend         bool         `json:"suspend,omitzero"`
-	InstallationRef string       `json:"installationRef"`
-	Reason          string       `json:"reason"`
-	Mode            RecoveryMode `json:"mode"`
-	// TargetMemberRef is required for rejoin. It names one explicit
+	Suspend          bool         `json:"suspend,omitzero"`
+	InstallationName string       `json:"installationName"`
+	Reason           string       `json:"reason"`
+	Mode             RecoveryMode `json:"mode"`
+	// TargetMemberName is required for rejoin. It names one explicit
 	// Central.MemberRequests entry and prevents recovery from inferring a
 	// target from replica count or whichever Pod happens to be available.
-	TargetMemberRef string `json:"targetMemberRef,omitempty"`
-	BackupRef       string `json:"backupRef,omitempty"`
+	TargetMemberName string `json:"targetMemberName,omitempty"`
+	BackupRef        string `json:"backupRef,omitempty"`
 	// ApprovalRef supplies independent destructive recovery admission when
-	// quorum cannot be established. It is never inferred from approvedBy.
+	// quorum cannot be established. It is never inferred from requestedBy.
 	ApprovalRef *RecoveryApprovalReference `json:"approvalRef,omitempty"`
-	ApprovedBy  string                     `json:"approvedBy"`
-	ExpiresAt   metav1.Time                `json:"expiresAt"`
+	// RequestedBy is a caller-supplied audit label. It identifies the requester
+	// but does not authorize recovery; Kubernetes audit records identify the
+	// authenticated principal.
+	RequestedBy string      `json:"requestedBy"`
+	ExpiresAt   metav1.Time `json:"expiresAt"`
 }
 
 type RecoveryPhase string
@@ -463,7 +469,7 @@ const (
 
 // RecoveryPlanStatus pins the installation and request identities validated
 // before an external recovery executor may be called. The digest covers the
-// complete request, including the self-reported approver; that field is never
+// complete request, including the self-reported requester; that field is never
 // treated as authority by the operator.
 type RecoveryPlanStatus struct {
 	Digest                 string                     `json:"digest"`
@@ -474,7 +480,7 @@ type RecoveryPlanStatus struct {
 	SourceVersion          string                     `json:"sourceVersion,omitempty"`
 	TargetVersion          string                     `json:"targetVersion,omitempty"`
 	ChartDigest            string                     `json:"chartDigest,omitempty"`
-	TargetMemberRef        string                     `json:"targetMemberRef,omitempty"`
+	TargetMemberName       string                     `json:"targetMemberName,omitempty"`
 	TargetMemberDigest     string                     `json:"targetMemberDigest,omitempty"`
 	TopologyDigest         string                     `json:"topologyDigest,omitempty"`
 	BackupRef              string                     `json:"backupRef,omitempty"`

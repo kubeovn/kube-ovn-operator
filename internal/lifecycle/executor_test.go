@@ -137,7 +137,7 @@ func setup(t *testing.T) *fixture {
 	t.Helper()
 	f := new(fixture)
 	f.installation = &api.KubeOVNInstallation{Name: "ovn", Namespace: "test", UID: "installation-uid", Generation: 1,
-		Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeControlPlaneOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3}}}
+		Spec: api.KubeOVNInstallationSpec{Mode: api.InstallationModeCentralOnly, Central: api.CentralSpec{Mode: api.CentralModeCluster, Replicas: 3}}}
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{api.AddToScheme, clientgoscheme.AddToScheme} {
 		if err := add(scheme); err != nil {
@@ -188,7 +188,7 @@ func setup(t *testing.T) *fixture {
 		plan.Databases = append(plan.Databases, prepared)
 	}
 	work := workload.Request{InstallationGeneration: 1, Preparation: plan, Node: workload.Reference{Name: "new-node", UID: "node-uid"}, Claim: workload.Reference{Name: "data", UID: "pvc-uid"}, Volume: workload.Reference{Name: "pv", UID: "pv-uid"}, Image: "example/central@sha256:" + strings.Repeat("a", 64)}
-	f.request.Add = &Addition{Workload: work, NorthboundAddress: "tcp:192.0.2.4:6641", SouthboundAddress: "tcp:192.0.2.4:6642"}
+	f.request.Add = &Addition{Workload: work, NorthboundEndpoint: "tcp:192.0.2.4:6641", SouthboundEndpoint: "tcp:192.0.2.4:6642"}
 	_, digest, err := plan.Canonical()
 	if err != nil {
 		t.Fatal(err)
@@ -733,7 +733,7 @@ func TestCompletedOperationCannotDriveOrReplayItsSuccessor(t *testing.T) {
 	next.RemoveEndpoint, next.Retirement = "", nil
 	next.Add.Workload.Preparation.OperationID = next.OperationID
 	next.Add.Workload.Preparation.MemberName = "second-replacement"
-	next.Add.NorthboundAddress, next.Add.SouthboundAddress = "tcp:192.0.2.5:6641", "tcp:192.0.2.5:6642"
+	next.Add.NorthboundEndpoint, next.Add.SouthboundEndpoint = "tcp:192.0.2.5:6641", "tcp:192.0.2.5:6642"
 	for i := range 2 {
 		peers := slices.DeleteFunc(next.Databases[i].Peers, func(p Peer) bool { return p.Name == "old-0" })
 		prepared := f.members.prepared.Result.Databases[i]

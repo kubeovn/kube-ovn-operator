@@ -32,7 +32,7 @@ func SelectRemoval(ctx context.Context, kube client.Reader, installation *api.Ku
 	if kube == nil || installation == nil || installation.UID == "" || installation.Generation < 1 {
 		return nil, errors.New("automatic membership selection requires an identified installation and reader")
 	}
-	if installation.Spec.Central.Mode != api.CentralModeRaft || installation.Spec.Mode == api.InstallationModeDataPlaneOnly || installation.Spec.HCP.Enabled {
+	if installation.Spec.Central.Mode != api.CentralModeCluster || installation.Spec.Mode == api.InstallationModeNodeNetworking || installation.Spec.HCP.Enabled {
 		return nil, errors.New("automatic membership selection requires a local RAFT installation")
 	}
 	if err := topology.Validate(); err != nil {
@@ -48,17 +48,17 @@ func SelectRemoval(ctx context.Context, kube client.Reader, installation *api.Ku
 	case current-desired != 1:
 		return nil, fmt.Errorf("automatic central membership removal supports one member per transition; current=%d desired=%d", current, desired)
 	}
-	retireEndpoint := ""
+	retirePod := ""
 	for _, member := range installation.Spec.Central.MemberRequests {
-		if member.RetireEndpoint == "" {
+		if member.RetirePod == "" {
 			continue
 		}
-		if retireEndpoint != "" && retireEndpoint != member.RetireEndpoint {
-			return nil, errors.New("central member retirement requires one explicit retireEndpoint")
+		if retirePod != "" && retirePod != member.RetirePod {
+			return nil, errors.New("central member retirement requires one explicit retirePod")
 		}
-		retireEndpoint = member.RetireEndpoint
+		retirePod = member.RetirePod
 	}
-	if retireEndpoint != "" && !installation.Spec.Central.DynamicMembership {
+	if retirePod != "" && !installation.Spec.Central.DynamicMembership {
 		return nil, errors.New("explicit Deployment retirement requires central dynamicMembership=true")
 	}
 
@@ -69,13 +69,13 @@ func SelectRemoval(ctx context.Context, kube client.Reader, installation *api.Ku
 	}
 	candidates := make([]candidate, 0, len(topology.Members))
 	for _, member := range topology.Members {
-		if retireEndpoint != "" && member.Pod.Name != retireEndpoint {
+		if retirePod != "" && member.Pod.Name != retirePod {
 			continue
 		}
-		if retireEndpoint != "" && member.Workload.Kind == "StatefulSet" && member.Pod.Name != member.Workload.Name+"-0" {
+		if retirePod != "" && member.Workload.Kind == "StatefulSet" && member.Pod.Name != member.Workload.Name+"-0" {
 			return nil, errors.New("explicit retirement must identify the ordinal Pod of an independent StatefulSet")
 		}
-		if retireEndpoint == "" && (member.Workload.Kind != "StatefulSet" || member.Pod.Name != member.Workload.Name+"-0") {
+		if retirePod == "" && (member.Workload.Kind != "StatefulSet" || member.Pod.Name != member.Workload.Name+"-0") {
 			continue
 		}
 		workloadRef := workload.Reference{Name: member.Workload.Name, UID: member.Workload.UID}
@@ -87,10 +87,10 @@ func SelectRemoval(ctx context.Context, kube client.Reader, installation *api.Ku
 		candidates = append(candidates, candidate{endpoint: member.Pod.Name, retirement: retirement, member: memberRequest})
 	}
 	if len(candidates) == 0 {
-		if retireEndpoint != "" {
-			return nil, fmt.Errorf("central replica decrease cannot find the requested retained endpoint %q", retireEndpoint)
+		if retirePod != "" {
+			return nil, fmt.Errorf("central replica decrease cannot find the requested retained Pod %q", retirePod)
 		}
-		return nil, errors.New("central replica decrease is unsafe: no independently managed one-member StatefulSet can be retired; ordinary Chart multi-replica workloads require an explicit retireEndpoint")
+		return nil, errors.New("central replica decrease is unsafe: no independently managed one-member StatefulSet can be retired; ordinary Chart multi-replica workloads require an explicit retirePod")
 	}
 	if len(candidates) != 1 {
 		return nil, fmt.Errorf("central replica decrease is ambiguous: %d independently managed members are eligible; an explicit retirement selection is required", len(candidates))
@@ -122,8 +122,8 @@ func SelectRemoval(ctx context.Context, kube client.Reader, installation *api.Ku
 // SelectAddition builds one immutable addition request from a member slot that
 // the user has explicitly prepared. Replica count alone is never enough to
 // choose a node, volume, image or listener address. A same-size request may
-// omit replaceEndpoint only when it carries a loss approval and exactly one
-// retained endpoint has been proven lost or replaced.
+// omit replacePod only when it carries a loss approval and exactly one
+// retained Pod has been proven lost or replaced.
 func SelectAddition(ctx context.Context, kube client.Reader, installation *api.KubeOVNInstallation, topology health.CentralTopology) (*Request, error) {
 	return selectAddition(ctx, kube, installation, topology, "")
 }
@@ -143,7 +143,7 @@ func selectAddition(ctx context.Context, kube client.Reader, installation *api.K
 	if kube == nil || installation == nil || installation.UID == "" || installation.Generation < 1 {
 		return nil, errors.New("automatic membership selection requires an identified installation and reader")
 	}
-	if installation.Spec.Central.Mode != api.CentralModeRaft || installation.Spec.Mode == api.InstallationModeDataPlaneOnly || installation.Spec.HCP.Enabled {
+	if installation.Spec.Central.Mode != api.CentralModeCluster || installation.Spec.Mode == api.InstallationModeNodeNetworking || installation.Spec.HCP.Enabled {
 		return nil, errors.New("automatic membership selection requires a local RAFT installation")
 	}
 	if err := topology.Validate(); err != nil {
@@ -175,13 +175,13 @@ func selectAddition(ctx context.Context, kube client.Reader, installation *api.K
 		}
 		// Retirement-only entries select an existing Chart Pod for scale-in;
 		// they do not describe a workload that can be prepared and started.
-		if member.RetireEndpoint != "" {
+		if member.RetirePod != "" {
 			continue
 		}
-		if desired == current && member.ReplaceEndpoint == "" && member.RemovalApprovalRef == nil {
+		if desired == current && member.ReplacePod == "" && member.RemovalApprovalRef == nil {
 			continue
 		}
-		if desired > current && member.ReplaceEndpoint == "" && member.RemovalApprovalRef != nil {
+		if desired > current && member.ReplacePod == "" && member.RemovalApprovalRef != nil {
 			// An approval without an explicit target is reserved for the
 			// same-size automatic replacement path. It must never turn a
 			// replica increase into an implicit removal.
@@ -220,12 +220,12 @@ func selectAddition(ctx context.Context, kube client.Reader, installation *api.K
 	if (protocol == "ssl") != (tlsSecret != nil) {
 		return nil, errors.New("member listener protocol and tlsSecretRef must agree")
 	}
-	if desired > current && member.ReplaceEndpoint != "" {
-		return nil, errors.New("memberRequest.replaceEndpoint requires a same-size central replacement")
+	if desired > current && member.ReplacePod != "" {
+		return nil, errors.New("memberRequest.replacePod requires a same-size central replacement")
 	}
-	automaticReplacement := desired == current && member.ReplaceEndpoint == ""
-	replaceEndpoint := member.ReplaceEndpoint
-	if desired == current && replaceEndpoint == "" {
+	automaticReplacement := desired == current && member.ReplacePod == ""
+	replacePod := member.ReplacePod
+	if desired == current && replacePod == "" {
 		target, err := automaticReplacementTarget(ctx, kube, installation, topology)
 		if err != nil {
 			return nil, err
@@ -233,29 +233,29 @@ func selectAddition(ctx context.Context, kube client.Reader, installation *api.K
 		if target == nil {
 			return nil, nil
 		}
-		replaceEndpoint = target.Pod.Name
+		replacePod = target.Pod.Name
 	}
 	var retirement *Retirement
-	if replaceEndpoint != "" {
+	if replacePod != "" {
 		if desired != current {
-			return nil, errors.New("memberRequest.replaceEndpoint requires replicas to match the retained member count")
+			return nil, errors.New("memberRequest.replacePod requires replicas to match the retained member count")
 		}
 		index := slices.IndexFunc(topology.Members, func(retained health.CentralIdentity) bool {
-			return retained.Pod.Name == replaceEndpoint
+			return retained.Pod.Name == replacePod
 		})
 		if index < 0 {
-			return nil, fmt.Errorf("replacement endpoint %q must identify a retained central Pod", replaceEndpoint)
+			return nil, fmt.Errorf("replacement Pod %q must identify a retained central Pod", replacePod)
 		}
 		retained := topology.Members[index]
 		workloadRef := workload.Reference{Name: retained.Workload.Name, UID: retained.Workload.UID}
 		var pinned Retirement
 		var err error
 		if retained.Workload.Kind == "StatefulSet" && retained.Pod.Name != retained.Workload.Name+"-0" {
-			return nil, errors.New("memberRequest.replaceEndpoint must identify the ordinal Pod of an independent StatefulSet")
+			return nil, errors.New("memberRequest.replacePod must identify the ordinal Pod of an independent StatefulSet")
 		}
 		pinned, err = pinRetirementForMember(ctx, kube, installation, topology, &member, retained, workloadRef, workload.Reference{Name: retained.Pod.Name, UID: retained.Pod.UID})
 		if err != nil && retained.Workload.Kind != "StatefulSet" && retained.Workload.Kind != "Deployment" {
-			return nil, errors.New("memberRequest.replaceEndpoint must identify an owned Deployment or independent StatefulSet")
+			return nil, errors.New("memberRequest.replacePod must identify an owned Deployment or independent StatefulSet")
 		}
 		if err != nil {
 			return nil, fmt.Errorf("cannot pin central member %s for replacement: %w", retained.Workload.Name, err)
@@ -284,7 +284,7 @@ func selectAddition(ctx context.Context, kube client.Reader, installation *api.K
 	if volume.UID == "" || volume.DeletionTimestamp != nil || volume.Status.Phase != corev1.VolumeBound || volume.Spec.ClaimRef == nil || volume.Spec.ClaimRef.UID != claim.UID || volume.Spec.ClaimRef.Name != claim.Name || volume.Spec.ClaimRef.Namespace != claim.Namespace {
 		return nil, errors.New("member volume is not durably bound to the requested claim")
 	}
-	for _, address := range []string{member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+	for _, address := range []string{member.NorthboundEndpoint, member.SouthboundEndpoint, member.NorthboundClientEndpoint, member.SouthboundClientEndpoint} {
 		if err := addressOnNode(address, node); err != nil {
 			return nil, err
 		}
@@ -303,9 +303,9 @@ func selectAddition(ctx context.Context, kube client.Reader, installation *api.K
 		for _, retained := range topology.Members {
 			peers = append(peers, retained.Databases[index].Address)
 		}
-		local := member.NorthboundAddress
+		local := member.NorthboundEndpoint
 		if index == 1 {
-			local = member.SouthboundAddress
+			local = member.SouthboundEndpoint
 		}
 		plan.Databases = append(plan.Databases, prepare.Database{Name: name, ClusterID: topology.Members[0].Databases[index].ClusterID, LocalAddress: local, RemoteAddresses: peers})
 	}
@@ -314,11 +314,11 @@ func selectAddition(ctx context.Context, kube client.Reader, installation *api.K
 		return nil, fmt.Errorf("validate member preparation plan: %w", err)
 	}
 	request := &Request{FormatVersion: 1, InstallationUID: string(installation.UID), InstallationGeneration: installation.Generation, OperationID: operationID, Databases: inventories(topology), AutomaticReplacement: automaticReplacement, Add: &Addition{
-		Workload:          workload.Request{InstallationGeneration: installation.Generation, Preparation: canonicalPlan, Node: workload.Reference{Name: node.Name, UID: node.UID}, Claim: workload.Reference{Name: claim.Name, UID: claim.UID}, Volume: workload.Reference{Name: volume.Name, UID: volume.UID}, Image: member.Image, TLSSecret: tlsSecret},
-		NorthboundAddress: member.NorthboundClientAddress, SouthboundAddress: member.SouthboundClientAddress,
+		Workload:           workload.Request{InstallationGeneration: installation.Generation, Preparation: canonicalPlan, Node: workload.Reference{Name: node.Name, UID: node.UID}, Claim: workload.Reference{Name: claim.Name, UID: claim.UID}, Volume: workload.Reference{Name: volume.Name, UID: volume.UID}, Image: member.Image, TLSSecret: tlsSecret},
+		NorthboundEndpoint: member.NorthboundClientEndpoint, SouthboundEndpoint: member.SouthboundClientEndpoint,
 	}}
 	if retirement != nil {
-		request.RemoveEndpoint = replaceEndpoint
+		request.RemoveEndpoint = replacePod
 		request.Retirement = retirement
 	}
 	setRemovalApproval(request, member.RemovalApprovalRef)
@@ -330,7 +330,7 @@ func selectAddition(ctx context.Context, kube client.Reader, installation *api.K
 
 // removalApprovalOperationID binds a pre-created permanent-loss decision to
 // the lifecycle request that will eventually reserve it. The approval must
-// exist before a lost endpoint can be replaced, so generating a second random
+// exist before a lost Pod can be replaced, so generating a second random
 // operation UUID here would make every valid approval unusable.
 func removalApprovalOperationID(ctx context.Context, kube client.Reader, installation *api.KubeOVNInstallation, ref *api.MemberRemovalApprovalReference) (string, error) {
 	if kube == nil || installation == nil || ref == nil {
@@ -358,8 +358,8 @@ func validateMemberSpec(member api.CentralMemberSpec) error {
 	if len(validation.IsDNS1123Label(member.Name)) != 0 {
 		return errors.New("memberRequest.name must be a DNS label")
 	}
-	if member.ReplaceEndpoint != "" && len(validation.IsDNS1123Subdomain(member.ReplaceEndpoint)) != 0 {
-		return errors.New("memberRequest.replaceEndpoint must be a DNS subdomain")
+	if member.ReplacePod != "" && len(validation.IsDNS1123Subdomain(member.ReplacePod)) != 0 {
+		return errors.New("memberRequest.replacePod must be a DNS subdomain")
 	}
 	if member.RemovalApprovalRef != nil {
 		if len(validation.IsDNS1123Subdomain(member.RemovalApprovalRef.Name)) != 0 || member.RemovalApprovalRef.UID == "" {
@@ -369,7 +369,7 @@ func validateMemberSpec(member api.CentralMemberSpec) error {
 	if member.TLSSecretRef != nil && len(validation.IsDNS1123Subdomain(member.TLSSecretRef.Name)) != 0 {
 		return errors.New("memberRequest.tlsSecretRef.name must be a DNS subdomain")
 	}
-	for _, value := range []string{member.NodeName, member.ClaimName, member.VolumeName, member.Image, member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+	for _, value := range []string{member.NodeName, member.ClaimName, member.VolumeName, member.Image, member.NorthboundEndpoint, member.SouthboundEndpoint, member.NorthboundClientEndpoint, member.SouthboundClientEndpoint} {
 		if strings.TrimSpace(value) == "" {
 			return errors.New("memberRequest requires node, storage, image and all NB/SB addresses")
 		}
@@ -390,7 +390,7 @@ func validateMemberSpec(member api.CentralMemberSpec) error {
 
 func memberAddressProtocol(member api.CentralMemberSpec) (string, error) {
 	protocol := ""
-	for _, address := range []string{member.NorthboundAddress, member.SouthboundAddress, member.NorthboundClientAddress, member.SouthboundClientAddress} {
+	for _, address := range []string{member.NorthboundEndpoint, member.SouthboundEndpoint, member.NorthboundClientEndpoint, member.SouthboundClientEndpoint} {
 		current, endpoint, found := strings.Cut(address, ":")
 		if !found || endpoint == "" || current != "tcp" && current != "ssl" {
 			return "", errors.New("member NB/SB addresses must use tcp or ssl")
@@ -478,15 +478,15 @@ func endpointAddressDrifted(ctx context.Context, kube client.Reader, member heal
 		for _, address := range []string{database.Address, database.ClientAddress} {
 			_, endpoint, ok := strings.Cut(address, ":")
 			if !ok {
-				return false, fmt.Errorf("retained endpoint %q has no protocol separator", address)
+				return false, fmt.Errorf("retained Pod %q has no protocol separator", address)
 			}
 			host, _, err := net.SplitHostPort(endpoint)
 			if err != nil {
-				return false, fmt.Errorf("retained endpoint %q is invalid: %w", address, err)
+				return false, fmt.Errorf("retained Pod %q is invalid: %w", address, err)
 			}
 			ip, err := netip.ParseAddr(host)
 			if err != nil {
-				return false, fmt.Errorf("retained endpoint %q has an invalid IP: %w", address, err)
+				return false, fmt.Errorf("retained Pod %q has an invalid IP: %w", address, err)
 			}
 			if !slices.Contains(internalIPs, ip) {
 				return true, nil
@@ -531,11 +531,11 @@ func pinRetirementForMember(ctx context.Context, kube client.Reader, installatio
 
 func endpointLostWithNode(ctx context.Context, kube client.Reader, installation *api.KubeOVNInstallation, retained health.CentralIdentity) (bool, error) {
 	if kube == nil || retained.Node.Name == "" || retained.Node.UID == "" || retained.Pod.Name == "" {
-		return false, errors.New("lost endpoint detection requires retained node and Pod identities")
+		return false, errors.New("lost Pod detection requires retained node and Pod identities")
 	}
 	pod := new(corev1.Pod)
 	if installation == nil {
-		return false, errors.New("lost endpoint detection requires an installation")
+		return false, errors.New("lost Pod detection requires an installation")
 	}
 	if err := kube.Get(ctx, client.ObjectKey{Namespace: installation.Namespace, Name: retained.Pod.Name}, pod); err == nil {
 		return pod.UID != retained.Pod.UID, nil
@@ -569,7 +569,7 @@ func memberRequestForEndpoint(installation *api.KubeOVNInstallation, endpoint st
 	}
 	for index := range installation.Spec.Central.MemberRequests {
 		member := &installation.Spec.Central.MemberRequests[index]
-		if member.ReplaceEndpoint == endpoint || member.RetireEndpoint == endpoint {
+		if member.ReplacePod == endpoint || member.RetirePod == endpoint {
 			return member
 		}
 	}

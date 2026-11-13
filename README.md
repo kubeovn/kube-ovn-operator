@@ -8,6 +8,11 @@ is still under development.
 
 ## Initial installation
 
+`spec.mode` accepts `full`, `centralOnly`, or `nodeNetworking`. `centralOnly`
+renders the OVN central workloads and supporting resources. `nodeNetworking` renders the
+node networking agents and controller against an external OVN central; it does
+not render local OVN central components.
+
 The operator defaults to workload management. Set `spec.chart.source` to an
 HTTPS `.tgz` URL or an `oci://` repository reference, and set
 `spec.chart.digest` to the SHA-256 of the downloaded archive or OCI chart layer
@@ -47,7 +52,7 @@ rendered topology is blocked until a lifecycle executor can authorize it.
 This checkpoint also survives an operator restart or a partially applied batch.
 The default binary wires a same-cluster Kubernetes HCP peer provider before
 workload apply. It finds the reciprocal `KubeOVNInstallation` in
-`centralNamespace`, checks the pair role/version contract, loads the
+`peerNamespace`, checks the pair role/version contract, loads the
 generation-pinned TLS Secret in memory, and probes both configured endpoints.
 Cross-cluster deployments can still inject another `PeerProvider`. The
 `internal/hcp.PeerProvider` boundary receives only the installation identity,
@@ -59,7 +64,7 @@ fresh peer observation. Secret data stays inside the provider and never enters
 the request, status, plan ConfigMap or rendered chart values. The controller
 exposes that evidence as `HCPReady` and `status.hcp`, and fails closed when the
 provider is absent or reports an invalid pair. When HCP is enabled, the local
-admission contract requires `centralNamespace`, a named `tlsSecretRef`, and
+admission contract requires `peerNamespace`, a named `tlsSecretRef`, and
 explicit OVN endpoints in `tcp:<host>:<port>` or `ssl:<host>:<port>` form. The
 operator validates the namespace, Secret name, protocol, host and port without
 reading or copying Secret data. A data-plane HCP installation maps these endpoints to
@@ -68,7 +73,7 @@ and remote peer coordination. A provider-side loader accepts either the
 standard Kubernetes `ca.crt`/`tls.crt`/`tls.key` keys or the native Kube-OVN
 `cacert`/`cert`/`key` keys, validates the bound generation and certificate
 lifetime, and constructs the client configuration only in memory. For a
-`dataPlaneOnly` HCP installation using `ssl:` endpoints, the Secret mounted by
+`nodeNetworking` HCP installation using `ssl:` endpoints, the Secret mounted by
 the upstream Kube-OVN chart must expose the native `cacert`/`cert`/`key` keys.
 The renderer removes the chart's live-lookup TLS template, rewrites its
 references to `tlsSecretRef`, and preserves those native file names. Standard
@@ -84,14 +89,14 @@ and keeps the original Chart Deployment at its retained replica count while
 the independent StatefulSet converges. Replica count alone never selects a
 member. These requests describe additions to an installation with a retained
 topology; the initial Chart install must omit them and add them only after the
-first retained topology is recorded. Set `replaceEndpoint` on a request to
-replace one exact retained central Pod at the same replica count; the endpoint,
+first retained topology is recorded. Set `replacePod` on a request to
+replace one exact retained central Pod at the same replica count; the Pod,
 workload UID, ReplicaSet UID (for a Chart Deployment) and full retirement spec
-are pinned before the replacement starts. Set `retireEndpoint` on a
+are pinned before the replacement starts. Set `retirePod` on a
 retirement-only request to select one exact Chart Deployment Pod for a one-step
 scale-in. The controller uses Pod deletion cost and verifies every surviving
 Pod UID before accepting the Deployment handoff. For a same-size replacement
-after unexpected member loss, a request may omit `replaceEndpoint` when it
+after unexpected member loss, a request may omit `replacePod` when it
 carries a UID-bound `removalApprovalRef`; the selector then accepts exactly one
 retained Pod that has disappeared or been replaced by a different UID. Multiple
 candidates, a transient Node condition, or a still-present original Pod leave
@@ -147,7 +152,7 @@ connection from each ovn-controller and a live `br-int` in ovs-vswitchd. The
 operator uses read-only appctl/vsctl commands and limits node probes to four
 concurrent requests. It rechecks pod/container identities, node identities and
 DaemonSet generation after sampling. Failed observations clear the affected
-runtime evidence. Control-plane-only and data-plane-only installations skip
+runtime evidence. centralOnly and nodeNetworking installations skip
 the component they do not manage.
 
 These runtime checks do not prove end-to-end packet delivery. Enable network
@@ -162,11 +167,11 @@ limited shipped RBAC still requires environment-specific review and expansion.
 data-plane and network conditions to pass in the same reconciliation. Failed
 or unavailable checks clear old network evidence and readiness. A rollout
 awaiting checks reports `VerificationPending`; a valid plan alone reports
-`PlanOnly`. Control-plane-only installations do not schedule data-plane probes.
+`PlanOnly`. centralOnly installations do not schedule data-plane probes.
 External databases and HCP pairs still require a peer provider. Installation and RAFT
 central operations acquire separate Leases with unique
 operation identities. Version-only upgrades now use a durable phased rollout:
-CRDs are applied and observed first, central/control-plane resources are
+CRDs are applied and observed first, central resources are
 applied next, and DaemonSet data-plane resources are held until workload, OVN
 database and northd readiness pass. The phase is stored in
 `status.upgrade.step` and can resume after an operator restart. This is still
@@ -301,9 +306,9 @@ authorizes startup and observes both databases catching up before removal.
 A backup capture and verification adapter is available as described below.
 The durable approval adapter is described below. Default-controller operation
 selection admits one addition at a time from an explicit `memberRequests` entry
-and admits reductions only when the retained endpoint is either an exactly
+and admits reductions only when the retained Pod is either an exactly
 one-member `OnDelete` StatefulSet or an explicitly selected stable Chart
-Deployment Pod. If a Chart Deployment endpoint has already disappeared with a
+Deployment Pod. If a Chart Deployment Pod has already disappeared with a
 deleted, replaced, cordoned or NotReady Node, the replacement request must also
 pin a pre-created `KubeOVNMemberRemovalApproval` through
 `memberRequests[].removalApprovalRef` (`name` and `uid`). The selector then pins
@@ -442,8 +447,8 @@ remain open. See [joint lifecycle contract](docs/joint-lifecycle.md).
 member from each of one or both OVN databases. It binds the installation name
 and UID, operation UUID, database/cluster/server UUIDs, literal-IP RAFT addresses,
 reason and expiry. The caller pins the approval name and UID. Creation permission
-is the approval authority; a self-reported `approvedBy` field is not authority.
-The existing recovery request's `approvedBy` value cannot authorize a kick.
+is the approval authority; a self-reported `requestedBy` field is not authority.
+The existing recovery request's `requestedBy` value cannot authorize a kick.
 
 `KubeOVNRecoveryRequest` now resolves its namespaced installation reference,
 pins the installation UID and generation, validates the requested mode and
@@ -452,7 +457,7 @@ pair for `reconvert` and `freshBootstrap`. The pair may come from
 `status.lastBackup` or a still-valid verified upgrade checkpoint, but it must
 match the observed version, destination and retained topology. It records a deterministic
 identity-bound plan in status and moves valid requests to
-`AwaitingExecution`. `approvedBy` is included in the plan digest for audit but
+`AwaitingExecution`. `requestedBy` is included in the plan digest for audit but
 is never treated as an authorization signal. Recreated installations, changed
 request generations, expired requests, HCP targets and mismatched backups are
 fenced with terminal status reasons. An explicit `RecoveryExecutor` is the
@@ -462,7 +467,7 @@ NB/SB restore executor; reconvert and fresh-bootstrap use the same durable
 Quiescing → Restoring → Workloads → Verifying phases and persist their
 execution phase, RPO and RTO. Plan-only mode leaves all destructive executors
 unset.
-Rejoin requests must also set `spec.targetMemberRef` to one named
+Rejoin requests must also set `spec.targetMemberName` to one named
 `central.memberRequests` entry. The plan stores a digest of that complete
 member slot and the retained topology, so changing its node, storage, image or
 listener addresses after admission invalidates the request instead of
@@ -542,7 +547,7 @@ both operation Leases, requires the retained topology and current observed
 version, persists `status.lastBackup`, and returns before Chart rendering; it
 does not change `status.applyCheckpoint` or authorize a Chart write. Scheduling
 is skipped while a lifecycle operation or version-only upgrade is in flight,
-and for HCP or data-plane-only installations. Set
+and for HCP or nodeNetworking installations. Set
 `spec.upgrade.backup.retention.keepLast` and/or
 `spec.upgrade.backup.retention.maxAge` to enable cleanup; leaving both empty
 disables deletion. The controller runs cleanup under both operation Leases,
@@ -622,7 +627,7 @@ Set `OVSDB_TEST_BIN` to a directory containing `ovsdb-tool`,
 renewal past the initial expiry, release, and loss cancellation.
 The CI `controller-deployment-handoff` job uses a three-control-plane kind
 cluster and a synthetic host-network central fixture to drive the real default
-controller through initial topology recording, explicit `replaceEndpoint`
+controller through initial topology recording, explicit `replacePod`
 replacement, and an approval-backed automatic replacement after a target Node
 is cordoned and its Pod is deleted. It checks the pinned
 Deployment/ReplicaSet/Pod identities, immutable lifecycle requests and

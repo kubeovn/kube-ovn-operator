@@ -52,7 +52,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "probe-smoke", Namespace: "kube-ovn-operator-system", Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}, NetworkProbe: &operatorv1alpha1.NetworkProbeSpec{Image: "kube-ovn-operator-probe:e2e"}}}
+	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "probe-smoke", Namespace: "kube-ovn-operator-system", Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}, NetworkProbe: &operatorv1alpha1.NetworkProbeSpec{Image: "kube-ovn-operator-probe:e2e"}}}
 	if err := kube.Create(ctx, installation); err != nil {
 		return err
 	}

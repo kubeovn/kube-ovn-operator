@@ -10,7 +10,7 @@ import (
 func TestValidateNetworkStack(t *testing.T) {
 	for _, stack := range []string{"", "ipv4", "ipv6", "dual_stack", "dual", "IPv4", " ipv4"} {
 		spec := operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.16.13", Mode: operatorv1alpha1.InstallationModeFull, NetworkStack: stack,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}}
 		valid := stack == "" || stack == "ipv4" || stack == "ipv6" || stack == "dual_stack"
 		if errs := ValidateInstallationSpec(spec); (len(errs) == 0) != valid {
 			t.Errorf("networkStack %q: valid=%v errors=%v", stack, valid, errs)
@@ -20,7 +20,7 @@ func TestValidateNetworkStack(t *testing.T) {
 
 func TestValidateUpgradeStrategy(t *testing.T) {
 	base := operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}}
 	for _, strategy := range []string{"", "gatedRolling"} {
 		base.Upgrade.Strategy = strategy
 		if errs := ValidateInstallationSpec(base); len(errs) != 0 {
@@ -36,7 +36,7 @@ func TestValidateUpgradeStrategy(t *testing.T) {
 func TestValidateAdoptionRequiresValidSelector(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central:  operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central:  operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		Adoption: operatorv1alpha1.AdoptionSpec{Enabled: true},
 	}
 	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "selector must contain") {
@@ -54,8 +54,8 @@ func TestValidateAdoptionRequiresValidSelector(t *testing.T) {
 
 func TestValidateDataPlaneNodeSelector(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly,
-		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
+		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		DataPlane: operatorv1alpha1.DataPlaneSpec{NodeSelector: map[string]string{"network.example/zone": "edge-a"}, ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example", SBEndpoint: "sb.example"}},
 	}
 	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
@@ -74,7 +74,7 @@ func TestValidateDataPlaneNodeSelector(t *testing.T) {
 func TestValidateBackupScheduleRequiresPolicyAndDestination(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		Upgrade: operatorv1alpha1.UpgradeSpec{Backup: operatorv1alpha1.BackupSpec{Schedule: "6h"}},
 	}
 	joined := JoinErrors(ValidateInstallationSpec(spec))
@@ -91,7 +91,7 @@ func TestValidateBackupScheduleRequiresPolicyAndDestination(t *testing.T) {
 func TestValidateBackupScheduleRejectsInvalidDuration(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		Upgrade: operatorv1alpha1.UpgradeSpec{Backup: operatorv1alpha1.BackupSpec{Required: true, Destination: "s3://example/kube-ovn", Schedule: "15s"}},
 	}
 	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "at least") {
@@ -101,12 +101,12 @@ func TestValidateBackupScheduleRejectsInvalidDuration(t *testing.T) {
 
 func TestValidateHCPConfigRequiresBoundedTransportInputs(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeDataPlaneOnly,
-		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
+		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example", SBEndpoint: "sb.example"}},
 		HCP: operatorv1alpha1.HCPConfig{
-			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PairRef: "management",
-			CentralNamespace: "hcp", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"},
+			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management",
+			PeerNamespace: "hcp", TLSSecretRef: &operatorv1alpha1.LocalObjectReference{Name: "ovn-tls"},
 			NBEndpoint: "tcp:nb.example:6641", SBEndpoint: "tcp:sb.example:6642",
 		},
 	}
@@ -129,9 +129,9 @@ func TestValidateHCPConfigRequiresBoundedTransportInputs(t *testing.T) {
 		t.Fatalf("invalid HCP endpoint was not rejected: %s", joined)
 	}
 	spec.HCP.NBEndpoint = "tcp:nb.example:6641"
-	spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+	spec.Mode = operatorv1alpha1.InstallationModeCentralOnly
 	joined = JoinErrors(ValidateInstallationSpec(spec))
-	if !strings.Contains(joined, "role=dataPlane requires spec.mode=dataPlaneOnly") {
+	if !strings.Contains(joined, "role=dataPlane requires spec.mode=nodeNetworking") {
 		t.Fatalf("HCP role/mode mismatch was not rejected: %s", joined)
 	}
 }
@@ -139,7 +139,7 @@ func TestValidateHCPConfigRequiresBoundedTransportInputs(t *testing.T) {
 func TestValidateMemberRequestsRequireDynamicMembershipAndPinnedImage(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "member-new", NodeName: "node", ClaimName: "claim", VolumeName: "volume", Image: "example/central:dev", NorthboundAddress: "tcp:192.0.2.10:6643", SouthboundAddress: "tcp:192.0.2.10:6644", NorthboundClientAddress: "tcp:192.0.2.10:6641", SouthboundClientAddress: "tcp:192.0.2.10:6642"}}},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 5, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "member-new", NodeName: "node", ClaimName: "claim", VolumeName: "volume", Image: "example/central:dev", NorthboundEndpoint: "tcp:192.0.2.10:6643", SouthboundEndpoint: "tcp:192.0.2.10:6644", NorthboundClientEndpoint: "tcp:192.0.2.10:6641", SouthboundClientEndpoint: "tcp:192.0.2.10:6642"}}},
 	}
 	joined := JoinErrors(ValidateInstallationSpec(spec))
 	if !strings.Contains(joined, "dynamicMembership") || !strings.Contains(joined, "sha256") {
@@ -154,20 +154,20 @@ func TestValidateMemberRequestsRequireDynamicMembershipAndPinnedImage(t *testing
 
 func TestValidateMemberRequestReplacementEndpoint(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
-			Name: "member-replacement", ReplaceEndpoint: "member-0-0", NodeName: "node", ClaimName: "claim", VolumeName: "volume",
-			Image: "example/central@sha256:" + strings.Repeat("a", 64), NorthboundAddress: "tcp:192.0.2.10:6643", SouthboundAddress: "tcp:192.0.2.10:6644", NorthboundClientAddress: "tcp:192.0.2.10:6641", SouthboundClientAddress: "tcp:192.0.2.10:6642",
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
+			Name: "member-replacement", ReplacePod: "member-0-0", NodeName: "node", ClaimName: "claim", VolumeName: "volume",
+			Image: "example/central@sha256:" + strings.Repeat("a", 64), NorthboundEndpoint: "tcp:192.0.2.10:6643", SouthboundEndpoint: "tcp:192.0.2.10:6644", NorthboundClientEndpoint: "tcp:192.0.2.10:6641", SouthboundClientEndpoint: "tcp:192.0.2.10:6642",
 		}}},
 	}
 	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
-		t.Fatalf("valid replacement endpoint was rejected: %v", errors)
+		t.Fatalf("valid replacement Pod was rejected: %v", errors)
 	}
 	spec.Central.MemberRequests[0].RemovalApprovalRef = &operatorv1alpha1.MemberRemovalApprovalReference{Name: "lost-approval", UID: "approval-uid"}
 	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
 		t.Fatalf("valid permanent-loss approval reference was rejected: %v", errors)
 	}
-	spec.Central.MemberRequests[0].ReplaceEndpoint = ""
+	spec.Central.MemberRequests[0].ReplacePod = ""
 	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
 		t.Fatalf("valid automatic replacement approval reference was rejected: %v", errors)
 	}
@@ -175,25 +175,25 @@ func TestValidateMemberRequestReplacementEndpoint(t *testing.T) {
 	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "removalApprovalRef") {
 		t.Fatalf("incomplete permanent-loss approval reference was accepted: %v", errors)
 	}
-	spec.Central.MemberRequests[0].ReplaceEndpoint = "bad endpoint"
-	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "replaceEndpoint") {
-		t.Fatalf("invalid replacement endpoint was accepted: %v", errors)
+	spec.Central.MemberRequests[0].ReplacePod = "bad endpoint"
+	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "replacePod") {
+		t.Fatalf("invalid replacement Pod was accepted: %v", errors)
 	}
 }
 
 func TestValidateMemberRequestTLSProtocolBinding(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{validMemberRequest("tls")}},
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{validMemberRequest("tls")}},
 	}
 	member := &spec.Central.MemberRequests[0]
-	member.NorthboundAddress = "ssl:192.0.2.10:6643"
+	member.NorthboundEndpoint = "ssl:192.0.2.10:6643"
 	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "one protocol") {
 		t.Fatalf("mixed member protocols were accepted: %v", errors)
 	}
-	member.SouthboundAddress = "ssl:192.0.2.10:6644"
-	member.NorthboundClientAddress = "ssl:192.0.2.10:6641"
-	member.SouthboundClientAddress = "ssl:192.0.2.10:6642"
+	member.SouthboundEndpoint = "ssl:192.0.2.10:6644"
+	member.NorthboundClientEndpoint = "ssl:192.0.2.10:6641"
+	member.SouthboundClientEndpoint = "ssl:192.0.2.10:6642"
 	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "tlsSecretRef") {
 		t.Fatalf("SSL member without a Secret was accepted: %v", errors)
 	}
@@ -209,32 +209,32 @@ func TestValidateMemberRequestTLSProtocolBinding(t *testing.T) {
 
 func TestValidateMemberRequestRetirementEndpoint(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire", RetireEndpoint: "ovn-central-abc-0"}}},
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire", RetirePod: "ovn-central-abc-0"}}},
 	}
 	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
 		t.Fatalf("valid retirement-only request was rejected: %v", errors)
 	}
-	spec.Central.MemberRequests[0].ReplaceEndpoint = "ovn-central-abc-0"
-	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "both replaceEndpoint and retireEndpoint") {
-		t.Fatalf("conflicting retirement and replacement endpoints were accepted: %v", errors)
+	spec.Central.MemberRequests[0].ReplacePod = "ovn-central-abc-0"
+	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "both replacePod and retirePod") {
+		t.Fatalf("conflicting retirement and replacement Pods were accepted: %v", errors)
 	}
 }
 
 func TestValidateMemberRequestsAllowOnlyOneReplacementTarget(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
-		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeControlPlaneOnly,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{
+		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{
 			validMemberRequest("first"), validMemberRequest("second"),
 		}},
 	}
-	spec.Central.MemberRequests[0].ReplaceEndpoint = "central-0"
-	spec.Central.MemberRequests[1].ReplaceEndpoint = "central-1"
-	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "only one replaceEndpoint") {
+	spec.Central.MemberRequests[0].ReplacePod = "central-0"
+	spec.Central.MemberRequests[1].ReplacePod = "central-1"
+	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "only one replacePod") {
 		t.Fatalf("expected multiple replacement targets to be rejected: %v", errors)
 	}
 
-	spec.Central.MemberRequests[1].ReplaceEndpoint = "central-0"
+	spec.Central.MemberRequests[1].ReplacePod = "central-0"
 	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "duplicates target") {
 		t.Fatalf("expected duplicate replacement target to be rejected: %v", errors)
 	}
@@ -243,8 +243,8 @@ func TestValidateMemberRequestsAllowOnlyOneReplacementTarget(t *testing.T) {
 func validMemberRequest(name string) operatorv1alpha1.CentralMemberSpec {
 	return operatorv1alpha1.CentralMemberSpec{
 		Name: name, NodeName: "node-" + name, ClaimName: "claim-" + name, VolumeName: "volume-" + name,
-		Image:             "example/central@sha256:" + strings.Repeat("a", 64),
-		NorthboundAddress: "tcp:192.0.2.10:6643", SouthboundAddress: "tcp:192.0.2.10:6644",
-		NorthboundClientAddress: "tcp:192.0.2.10:6641", SouthboundClientAddress: "tcp:192.0.2.10:6642",
+		Image:              "example/central@sha256:" + strings.Repeat("a", 64),
+		NorthboundEndpoint: "tcp:192.0.2.10:6643", SouthboundEndpoint: "tcp:192.0.2.10:6644",
+		NorthboundClientEndpoint: "tcp:192.0.2.10:6641", SouthboundClientEndpoint: "tcp:192.0.2.10:6642",
 	}
 }

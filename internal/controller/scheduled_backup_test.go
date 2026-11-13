@@ -110,7 +110,7 @@ func TestEnsureBackupRetentionProtectsActiveRecoveryRequest(t *testing.T) {
 	recoveryRef := "sha256:" + strings.Repeat("d", 64)
 	request := &api.KubeOVNRecoveryRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "recover", Namespace: installation.Namespace, UID: types.UID("request-uid"), Generation: 1},
-		Spec:       api.KubeOVNRecoveryRequestSpec{InstallationRef: installation.Name, BackupRef: recoveryRef},
+		Spec:       api.KubeOVNRecoveryRequestSpec{InstallationName: installation.Name, BackupRef: recoveryRef},
 		Status: api.KubeOVNRecoveryRequestStatus{
 			Phase: api.RecoveryPhaseAwaitingExecution,
 			Plan:  &api.RecoveryPlanStatus{InstallationUID: installation.UID, BackupRef: recoveryRef},
@@ -275,7 +275,7 @@ func scheduledBackupReconciler(captures *int, capture func(context.Context, *api
 func scheduledBackupInstallation(now time.Time) *api.KubeOVNInstallation {
 	return &api.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "installation", Generation: 1},
-		Spec:       api.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: api.InstallationModeFull, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3}, Upgrade: api.UpgradeSpec{Backup: api.BackupSpec{Required: true, Destination: "s3://example/kube-ovn", Schedule: "1h"}}},
+		Spec:       api.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: api.InstallationModeFull, Central: api.CentralSpec{Mode: api.CentralModeCluster, Replicas: 3}, Upgrade: api.UpgradeSpec{Backup: api.BackupSpec{Required: true, Destination: "s3://example/kube-ovn", Schedule: "1h"}}},
 		Status:     api.KubeOVNInstallationStatus{ApplyCheckpoint: &api.ApplyCheckpointStatus{Version: "v1.17.0"}, ObservedVersion: "v1.17.0", Topology: api.TopologyStatus{Inventory: &api.CentralTopologyReference{Name: "inventory", UID: "inventory-uid", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}, LastBackup: &api.BackupStatus{ID: "previous", DatabaseRefs: map[string]string{"OVN_Northbound": "nb", "OVN_Southbound": "sb"}, Destination: "s3://example/kube-ovn", Version: "v1.17.0", TopologyDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", CompletedAt: metav1.NewTime(now.Add(-2 * time.Hour))}},
 	}
 }

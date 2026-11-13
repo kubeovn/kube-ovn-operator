@@ -62,11 +62,11 @@ does not absorb external topology changes automatically. The default controller
 can select one safe replica reduction or an explicit same-size replacement. An
 implicit reduction requires an exactly one-member independent StatefulSet
 pinned successfully. A Chart Deployment reduction or replacement normally sets
-`central.memberRequests[].retireEndpoint` or `replaceEndpoint` to bind one exact
+`central.memberRequests[].retirePod` or `replacePod` to bind one exact
 Pod; admission pins the Deployment and ReplicaSet UIDs, target Pod UID, all
 survivor UIDs and the admitted spec before any database or scale-down mutation.
 A same-size request with a UID-bound `removalApprovalRef` may omit
-`replaceEndpoint`; automatic target inference is then allowed only for one
+`replacePod`; automatic target inference is then allowed only for one
 retained Pod that has disappeared or changed UID. Ambiguous candidates and
 transient Node conditions remain blocked. The selected path can authorize its
 next apply checkpoint only after the immutable completion receipt and successor
@@ -77,7 +77,7 @@ NB/SB snapshot.
 Retained metadata assumes trusted Kubernetes writers and cannot authenticate
 against an actor able to rewrite both records and status.
 
-An explicit same-size `replaceEndpoint`, or a same-size request carrying a
+An explicit same-size `replacePod`, or a same-size request carrying a
 UID-bound `removalApprovalRef` that selects one unique healthy target, admits a
 narrow node IP drift case. The retained target Pod and Node UID must still be
 present and every native identity, quorum, listener and storage check must pass,
@@ -89,7 +89,7 @@ named target and is rejected for ordinary observations, multiple replacement
 targets, Node UID replacement, Node deletion, or any other topology identity or
 non-target address change. The same explicit target may be cordoned during a
 planned drain; its replacement Node must still be Ready and schedulable. A
-separate explicit replacement path handles a Deployment endpoint that has
+separate explicit replacement path handles a Deployment Pod that has
 already disappeared with a failed Node: it requires a UID-pinned permanent-loss
 approval, retains all surviving Pod identities and permits one replacement Pod
 to be selected for the guarded post-convergence scale-down.

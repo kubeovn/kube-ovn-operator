@@ -95,7 +95,7 @@ func (p *Provider) VerifyPermanentLoss(ctx context.Context, snapshot ovnadmin.Sn
 	}
 	approved := false
 	for _, target := range record.Spec.Decision.Targets {
-		if target.Database == snapshot.Database && target.ClusterID == snapshot.ClusterID && target.ServerID == change.Member.ServerID && target.Address == change.Member.Address {
+		if target.Database == snapshot.Database && target.ClusterID == snapshot.ClusterID && target.ServerID == change.Member.ServerID && target.RaftAddress == change.Member.Address {
 			approved = true
 		}
 	}
@@ -204,7 +204,7 @@ func (p *Provider) read(ctx context.Context, ref membership.ApprovalReference, o
 			return nil, "", errors.New("approval has an invalid or duplicate database identity")
 		}
 		seen[target.Database] = true
-		if err := membership.ValidateMembers([]membership.Member{{ServerID: target.ServerID, Address: target.Address}}); err != nil {
+		if err := membership.ValidateMembers([]membership.Member{{ServerID: target.ServerID, Address: target.RaftAddress}}); err != nil {
 			return nil, "", fmt.Errorf("approval target: %w", err)
 		}
 	}

@@ -38,7 +38,7 @@ type NetworkObserver struct {
 
 func (o *NetworkObserver) Observe(ctx context.Context, installation *operatorv1alpha1.KubeOVNInstallation, nodes []operatorv1alpha1.DataPlaneNodeStatus) NetworkReport {
 	report := NetworkReport{Condition: metav1.Condition{Type: "NetworkReady", Status: metav1.ConditionUnknown, Reason: "ProviderUnavailable", Message: "Configure spec.networkProbe.image to enable network verification"}}
-	if installation.Spec.Mode == operatorv1alpha1.InstallationModeControlPlaneOnly {
+	if installation.Spec.Mode == operatorv1alpha1.InstallationModeCentralOnly {
 		report.Condition.Status, report.Condition.Reason, report.Condition.Message = metav1.ConditionTrue, "NotRequired", "This installation does not manage a data plane"
 		return report
 	}

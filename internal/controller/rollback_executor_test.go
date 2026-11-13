@@ -131,7 +131,7 @@ func TestRenderRollbackTargetPreservesRetainedDeploymentAndProbes(t *testing.T) 
 			Mode:         operatorv1alpha1.InstallationModeFull,
 			Version:      "v1.16.0",
 			Chart:        operatorv1alpha1.ChartSpec{Digest: chartDigest},
-			Central:      operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true},
+			Central:      operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true},
 			NetworkProbe: &operatorv1alpha1.NetworkProbeSpec{Image: "probe@" + chartDigest},
 		},
 	}

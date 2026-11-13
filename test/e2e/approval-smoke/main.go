@@ -69,8 +69,8 @@ func run() error {
 		InstallationRef: api.InstallationReference{Name: installation.Name, UID: installation.UID}, OperationID: uuid.New().String(),
 		Reason: "Synthetic smoke-test lost member", ExpiresAt: metav1.NewTime(time.Now().Add(time.Hour)),
 		Targets: []api.MemberRemovalTarget{
-			{Database: snapshot.Database, ClusterID: snapshot.ClusterID, ServerID: snapshot.Members[2].ServerID, Address: snapshot.Members[2].Address},
-			{Database: "OVN_Southbound", ClusterID: snapshot.ClusterID, ServerID: snapshot.Members[2].ServerID, Address: "tcp:192.0.2.3:6644"},
+			{Database: snapshot.Database, ClusterID: snapshot.ClusterID, ServerID: snapshot.Members[2].ServerID, RaftAddress: snapshot.Members[2].Address},
+			{Database: "OVN_Southbound", ClusterID: snapshot.ClusterID, ServerID: snapshot.Members[2].ServerID, RaftAddress: "tcp:192.0.2.3:6644"},
 		},
 	}
 	record := &api.KubeOVNMemberRemovalApproval{Name: "smoke-" + uuid.New().String(), Namespace: installation.Namespace, Spec: api.MemberRemovalApprovalSpec{Decision: decision}}

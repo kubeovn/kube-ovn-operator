@@ -44,12 +44,17 @@ spec:
                   message: Revocation cannot be reversed.
               properties:
                 installationRef:
+                  description: "Name and UID of the installation this approval authorizes."
                   type: object
                   required: [name, uid]
                   properties:
                     name: {type: string, minLength: 1, maxLength: 253}
                     uid: {type: string, minLength: 1, maxLength: 128}
-                installationGeneration: {type: integer, format: int64, minimum: 1}
+                installationGeneration:
+                  type: integer
+                  description: "Installation generation at which this decision was made."
+                  format: int64
+                  minimum: 1
                 requestRef:
                   type: object
                   required: [name, uid, generation]
@@ -57,10 +62,17 @@ spec:
                     name: {type: string, minLength: 1, maxLength: 253}
                     uid: {type: string, minLength: 1, maxLength: 128}
                     generation: {type: integer, format: int64, minimum: 1}
-                mode: {type: string, enum: [rollback, reconvert, freshBootstrap]}
+                mode:
+                  type: string
+                  description: "Destructive recovery operation authorized by this approval."
+                  enum: [rollback, reconvert, freshBootstrap]
                 sourceVersion: {type: string, minLength: 1, maxLength: 128}
                 targetVersion: {type: string, minLength: 1, maxLength: 128}
-                backupRef: {type: string, maxLength: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+                backupRef:
+                  type: string
+                  description: "Digest of the verified NB/SB backup pair to restore."
+                  maxLength: 71
+                  pattern: '^sha256:[0-9a-f]{64}$'
                 topologyDigest: {type: string, maxLength: 71, pattern: '^sha256:[0-9a-f]{64}$'}
                 chartDigest: {type: string, maxLength: 71, pattern: '^sha256:[0-9a-f]{64}$'}
                 reason: {type: string, minLength: 1, maxLength: 2048, pattern: '\S'}

@@ -23,8 +23,8 @@ before authorizing the workload. The launch request is a JSON object containing:
 | `formatVersion` | Must be `1`. |
 | `preparation` | The complete plan passed to `/member-prepare`. |
 | `prepared` | The exact returned result, including both generated server UUIDs. |
-| `northboundAddress` | Literal-IP client listener, such as `tcp:192.0.2.4:6641`. |
-| `southboundAddress` | Literal-IP client listener, such as `tcp:192.0.2.4:6642`. |
+| `northboundEndpoint` | Literal-IP client listener, such as `tcp:192.0.2.4:6641`. |
+| `southboundEndpoint` | Literal-IP client listener, such as `tcp:192.0.2.4:6642`. |
 | `northboundRemotes` | Explicit NB client endpoints for northd, including this member and peers. |
 | `southboundRemotes` | Explicit SB client endpoints for northd, including this member and peers. |
 | `tls` | Required when any client or RAFT listener uses SSL; omit for TCP-only launch. |

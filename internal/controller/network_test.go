@@ -26,7 +26,7 @@ func TestNetworkVerificationGatesReadyAndClearsOldEvidence(t *testing.T) {
 	for _, failure := range []string{"network", "database", "runtime", "rollout", "missing evidence", "missing provider", "topology", "missing topology provider"} {
 		t.Run(failure, func(t *testing.T) {
 			scheme := controllerScheme(t)
-			installation := &operatorv1alpha1.KubeOVNInstallation{Name: "network", Namespace: "default", UID: "installation", Generation: 1, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}}
+			installation := &operatorv1alpha1.KubeOVNInstallation{Name: "network", Namespace: "default", UID: "installation", Generation: 1, Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}}}
 			kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
 			workload := &observedWorkload{observation: apply.Observation{Ready: true, ReadyCentralReplicas: 3}}
 			ovn := health.OVNReport{Ready: true, Reason: "OVNDatabasesHealthy"}
