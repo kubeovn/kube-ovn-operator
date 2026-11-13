@@ -762,7 +762,7 @@ func recoveryInstallation() *operatorv1alpha1.KubeOVNInstallation {
 	return &operatorv1alpha1.KubeOVNInstallation{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: types.UID("installation-uid"), Generation: 2},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{
-			Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true,
+			Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true,
 			MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "member-recovery", NodeName: "node-recovery", ClaimName: "claim-recovery", VolumeName: "volume-recovery", Image: "example/central@sha256:" + strings.Repeat("a", 64), NorthboundEndpoint: "tcp:192.0.2.10:6643", SouthboundEndpoint: "tcp:192.0.2.10:6644", NorthboundClientEndpoint: "tcp:192.0.2.10:6641", SouthboundClientEndpoint: "tcp:192.0.2.10:6642"}},
 		}},
 		Status: operatorv1alpha1.KubeOVNInstallationStatus{Topology: operatorv1alpha1.TopologyStatus{Inventory: &operatorv1alpha1.CentralTopologyReference{Name: "retained", UID: types.UID("retained-uid"), Digest: "sha256:topology"}}},

@@ -22,7 +22,7 @@ func TestHCPProviderIsRequiredBeforeWorkloadApply(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "data-plane", Namespace: "default", UID: types.UID("hcp-installation"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 			HCP: operatorv1alpha1.HCPConfig{
 				Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 				NBEndpoint: "tcp:nb.example:6641", SBEndpoint: "tcp:sb.example:6642",
@@ -53,7 +53,7 @@ func TestHCPPeerRequestPinsTLSSecretGeneration(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "data-plane", Namespace: "default", UID: types.UID("hcp-installation"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 			HCP: operatorv1alpha1.HCPConfig{
 				Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 				NBEndpoint: "tcp:nb.example:6641", SBEndpoint: "tcp:sb.example:6642",
@@ -117,7 +117,7 @@ func TestHCPReportParticipatesInReadyGateAndStatus(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "data-plane", Namespace: "default", UID: types.UID("hcp-installation"), Generation: 1},
 		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
 			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 			HCP: operatorv1alpha1.HCPConfig{
 				Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 				NBEndpoint: "tcp:nb.example:6641", SBEndpoint: "tcp:sb.example:6642",

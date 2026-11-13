@@ -10,7 +10,7 @@ spec:
     digest: sha256:24df922c7aa78e4a21e77289a6eec9a19ac50cb00953df9ada9291b61a638475
   mode: full
   central:
-    mode: raft
+    mode: cluster
     replicas: 3
     placement:
       topologyKey: kubernetes.io/hostname

@@ -84,7 +84,7 @@ func TestAssessDatabaseRequiresOneClusterLeaderAndConnectedMembers(t *testing.T)
 		{Name: "OVN_Northbound", Model: "clustered", Connected: true, ClusterID: clusterID, ServerID: "33445566-1122-3344-5566-778899aabbcc", Index: 9},
 		{Name: "OVN_Northbound", Model: "clustered", Connected: true, ClusterID: clusterID, ServerID: "44556677-1122-3344-5566-778899aabbcc", Index: 10},
 	}
-	if got, err := assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeRaft, base); err != nil || got.LeaderServerID != serverID || got.ConnectedMembers != 3 {
+	if got, err := assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeCluster, base); err != nil || got.LeaderServerID != serverID || got.ConnectedMembers != 3 {
 		t.Fatalf("healthy observation: %+v %v", got, err)
 	}
 	for name, change := range map[string]func([]Database){
@@ -99,12 +99,12 @@ func TestAssessDatabaseRequiresOneClusterLeaderAndConnectedMembers(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			states := slices.Clone(base)
 			change(states)
-			if _, err := assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeRaft, states); err == nil {
+			if _, err := assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeCluster, states); err == nil {
 				t.Fatal("unhealthy database accepted")
 			}
 		})
 	}
-	if _, err := assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeRaft, nil); err == nil {
+	if _, err := assessDatabase("OVN_Northbound", operatorv1alpha1.CentralModeCluster, nil); err == nil {
 		t.Fatal("empty snapshot accepted")
 	}
 }

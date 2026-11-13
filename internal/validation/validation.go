@@ -33,9 +33,9 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 		errs = append(errs, fmt.Errorf("spec.upgrade.strategy must be empty or gatedRolling"))
 	}
 	switch spec.Central.Mode {
-	case operatorv1alpha1.CentralModeRaft:
+	case operatorv1alpha1.CentralModeCluster:
 		if spec.Central.Replicas != 2 && spec.Central.Replicas != 3 && spec.Central.Replicas != 5 {
-			errs = append(errs, fmt.Errorf("spec.central.replicas must be 2, 3 or 5 for raft mode"))
+			errs = append(errs, fmt.Errorf("spec.central.replicas must be 2, 3 or 5 for cluster mode"))
 		}
 	case operatorv1alpha1.CentralModeStandalone:
 		if spec.Central.Replicas != 1 {
@@ -45,7 +45,7 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 			errs = append(errs, fmt.Errorf("spec.central.storage.size is required for standalone mode"))
 		}
 	default:
-		errs = append(errs, fmt.Errorf("spec.central.mode must be raft or standalone"))
+		errs = append(errs, fmt.Errorf("spec.central.mode must be cluster or standalone"))
 	}
 	if spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking {
 		if !spec.HCP.Enabled && (strings.TrimSpace(spec.DataPlane.ExternalOVNCentral.NBEndpoint) == "" || strings.TrimSpace(spec.DataPlane.ExternalOVNCentral.SBEndpoint) == "") {
@@ -118,12 +118,12 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 			}
 		}
 	}
-	if spec.Central.Mode == operatorv1alpha1.CentralModeRaft && spec.Central.DynamicMembership && spec.Upgrade.Backup.Required && spec.Upgrade.Backup.Destination == "" {
+	if spec.Central.Mode == operatorv1alpha1.CentralModeCluster && spec.Central.DynamicMembership && spec.Upgrade.Backup.Required && spec.Upgrade.Backup.Destination == "" {
 		errs = append(errs, fmt.Errorf("dynamic membership cannot be enabled without a backup destination"))
 	}
 	if len(spec.Central.MemberRequests) != 0 {
-		if spec.Central.Mode != operatorv1alpha1.CentralModeRaft || spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking {
-			errs = append(errs, fmt.Errorf("central.memberRequests requires a local raft installation"))
+		if spec.Central.Mode != operatorv1alpha1.CentralModeCluster || spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking {
+			errs = append(errs, fmt.Errorf("central.memberRequests requires a local cluster installation"))
 		}
 		if !spec.Central.DynamicMembership {
 			errs = append(errs, fmt.Errorf("central.memberRequests requires central.dynamicMembership=true"))

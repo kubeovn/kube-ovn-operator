@@ -80,7 +80,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	installation := &api.KubeOVNInstallation{Name: "member-smoke", Namespace: "kube-ovn-operator-system", Spec: api.KubeOVNInstallationSpec{Version: "v1.16.13", Mode: api.InstallationModeCentralOnly, Central: api.CentralSpec{Mode: api.CentralModeRaft, Replicas: 3}}}
+	installation := &api.KubeOVNInstallation{Name: "member-smoke", Namespace: "kube-ovn-operator-system", Spec: api.KubeOVNInstallationSpec{Version: "v1.16.13", Mode: api.InstallationModeCentralOnly, Central: api.CentralSpec{Mode: api.CentralModeCluster, Replicas: 3}}}
 	if err := kube.Create(ctx, installation); err != nil {
 		return err
 	}

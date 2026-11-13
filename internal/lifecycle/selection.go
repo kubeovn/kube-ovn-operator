@@ -32,7 +32,7 @@ func SelectRemoval(ctx context.Context, kube client.Reader, installation *api.Ku
 	if kube == nil || installation == nil || installation.UID == "" || installation.Generation < 1 {
 		return nil, errors.New("automatic membership selection requires an identified installation and reader")
 	}
-	if installation.Spec.Central.Mode != api.CentralModeRaft || installation.Spec.Mode == api.InstallationModeNodeNetworking || installation.Spec.HCP.Enabled {
+	if installation.Spec.Central.Mode != api.CentralModeCluster || installation.Spec.Mode == api.InstallationModeNodeNetworking || installation.Spec.HCP.Enabled {
 		return nil, errors.New("automatic membership selection requires a local RAFT installation")
 	}
 	if err := topology.Validate(); err != nil {
@@ -143,7 +143,7 @@ func selectAddition(ctx context.Context, kube client.Reader, installation *api.K
 	if kube == nil || installation == nil || installation.UID == "" || installation.Generation < 1 {
 		return nil, errors.New("automatic membership selection requires an identified installation and reader")
 	}
-	if installation.Spec.Central.Mode != api.CentralModeRaft || installation.Spec.Mode == api.InstallationModeNodeNetworking || installation.Spec.HCP.Enabled {
+	if installation.Spec.Central.Mode != api.CentralModeCluster || installation.Spec.Mode == api.InstallationModeNodeNetworking || installation.Spec.HCP.Enabled {
 		return nil, errors.New("automatic membership selection requires a local RAFT installation")
 	}
 	if err := topology.Validate(); err != nil {

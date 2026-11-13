@@ -31,7 +31,7 @@ func healthFixture(t *testing.T) (*operatorv1alpha1.KubeOVNInstallation, client.
 			t.Fatal(err)
 		}
 	}
-	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "network", Namespace: "kube-system", UID: "installation", Spec: operatorv1alpha1.KubeOVNInstallationSpec{Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}}
+	installation := &operatorv1alpha1.KubeOVNInstallation{Name: "network", Namespace: "kube-system", UID: "installation", Spec: operatorv1alpha1.KubeOVNInstallationSpec{Mode: operatorv1alpha1.InstallationModeFull, Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}}}
 	deployment := &appsv1.Deployment{Name: "ovn-central", Namespace: installation.Namespace, UID: "deployment", Labels: map[string]string{apply.ManagedByLabel: apply.ManagedByValue, apply.InstallationLabel: installation.Name, apply.InstallationNamespaceLabel: installation.Namespace, apply.InstallationUIDLabel: string(installation.UID)}, OwnerReferences: []metav1.OwnerReference{{APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation", Name: installation.Name, UID: installation.UID, Controller: new(true)}}}
 	rs := &appsv1.ReplicaSet{Name: "ovn-central-rs", Namespace: installation.Namespace, UID: "replicaset", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: deployment.Name, UID: deployment.UID, Controller: new(true)}}}
 	objects := []client.Object{deployment, rs}

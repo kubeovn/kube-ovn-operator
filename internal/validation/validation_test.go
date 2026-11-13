@@ -10,7 +10,7 @@ import (
 func TestValidateNetworkStack(t *testing.T) {
 	for _, stack := range []string{"", "ipv4", "ipv6", "dual_stack", "dual", "IPv4", " ipv4"} {
 		spec := operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.16.13", Mode: operatorv1alpha1.InstallationModeFull, NetworkStack: stack,
-			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}}
 		valid := stack == "" || stack == "ipv4" || stack == "ipv6" || stack == "dual_stack"
 		if errs := ValidateInstallationSpec(spec); (len(errs) == 0) != valid {
 			t.Errorf("networkStack %q: valid=%v errors=%v", stack, valid, errs)
@@ -20,7 +20,7 @@ func TestValidateNetworkStack(t *testing.T) {
 
 func TestValidateUpgradeStrategy(t *testing.T) {
 	base := operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3}}
 	for _, strategy := range []string{"", "gatedRolling"} {
 		base.Upgrade.Strategy = strategy
 		if errs := ValidateInstallationSpec(base); len(errs) != 0 {
@@ -36,7 +36,7 @@ func TestValidateUpgradeStrategy(t *testing.T) {
 func TestValidateAdoptionRequiresValidSelector(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central:  operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central:  operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		Adoption: operatorv1alpha1.AdoptionSpec{Enabled: true},
 	}
 	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "selector must contain") {
@@ -55,7 +55,7 @@ func TestValidateAdoptionRequiresValidSelector(t *testing.T) {
 func TestValidateDataPlaneNodeSelector(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
-		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		DataPlane: operatorv1alpha1.DataPlaneSpec{NodeSelector: map[string]string{"network.example/zone": "edge-a"}, ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example", SBEndpoint: "sb.example"}},
 	}
 	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
@@ -74,7 +74,7 @@ func TestValidateDataPlaneNodeSelector(t *testing.T) {
 func TestValidateBackupScheduleRequiresPolicyAndDestination(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		Upgrade: operatorv1alpha1.UpgradeSpec{Backup: operatorv1alpha1.BackupSpec{Schedule: "6h"}},
 	}
 	joined := JoinErrors(ValidateInstallationSpec(spec))
@@ -91,7 +91,7 @@ func TestValidateBackupScheduleRequiresPolicyAndDestination(t *testing.T) {
 func TestValidateBackupScheduleRejectsInvalidDuration(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		Upgrade: operatorv1alpha1.UpgradeSpec{Backup: operatorv1alpha1.BackupSpec{Required: true, Destination: "s3://example/kube-ovn", Schedule: "15s"}},
 	}
 	if errors := ValidateInstallationSpec(spec); len(errors) == 0 || !strings.Contains(JoinErrors(errors), "at least") {
@@ -102,7 +102,7 @@ func TestValidateBackupScheduleRejectsInvalidDuration(t *testing.T) {
 func TestValidateHCPConfigRequiresBoundedTransportInputs(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
-		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central:   operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		DataPlane: operatorv1alpha1.DataPlaneSpec{ExternalOVNCentral: operatorv1alpha1.EndpointSpec{NBEndpoint: "nb.example", SBEndpoint: "sb.example"}},
 		HCP: operatorv1alpha1.HCPConfig{
 			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management",
@@ -139,7 +139,7 @@ func TestValidateHCPConfigRequiresBoundedTransportInputs(t *testing.T) {
 func TestValidateMemberRequestsRequireDynamicMembershipAndPinnedImage(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 5, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "member-new", NodeName: "node", ClaimName: "claim", VolumeName: "volume", Image: "example/central:dev", NorthboundEndpoint: "tcp:192.0.2.10:6643", SouthboundEndpoint: "tcp:192.0.2.10:6644", NorthboundClientEndpoint: "tcp:192.0.2.10:6641", SouthboundClientEndpoint: "tcp:192.0.2.10:6642"}}},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 5, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "member-new", NodeName: "node", ClaimName: "claim", VolumeName: "volume", Image: "example/central:dev", NorthboundEndpoint: "tcp:192.0.2.10:6643", SouthboundEndpoint: "tcp:192.0.2.10:6644", NorthboundClientEndpoint: "tcp:192.0.2.10:6641", SouthboundClientEndpoint: "tcp:192.0.2.10:6642"}}},
 	}
 	joined := JoinErrors(ValidateInstallationSpec(spec))
 	if !strings.Contains(joined, "dynamicMembership") || !strings.Contains(joined, "sha256") {
@@ -155,7 +155,7 @@ func TestValidateMemberRequestsRequireDynamicMembershipAndPinnedImage(t *testing
 func TestValidateMemberRequestReplacementEndpoint(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{
 			Name: "member-replacement", ReplacePod: "member-0-0", NodeName: "node", ClaimName: "claim", VolumeName: "volume",
 			Image: "example/central@sha256:" + strings.Repeat("a", 64), NorthboundEndpoint: "tcp:192.0.2.10:6643", SouthboundEndpoint: "tcp:192.0.2.10:6644", NorthboundClientEndpoint: "tcp:192.0.2.10:6641", SouthboundClientEndpoint: "tcp:192.0.2.10:6642",
 		}}},
@@ -184,7 +184,7 @@ func TestValidateMemberRequestReplacementEndpoint(t *testing.T) {
 func TestValidateMemberRequestTLSProtocolBinding(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{validMemberRequest("tls")}},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{validMemberRequest("tls")}},
 	}
 	member := &spec.Central.MemberRequests[0]
 	member.NorthboundEndpoint = "ssl:192.0.2.10:6643"
@@ -210,7 +210,7 @@ func TestValidateMemberRequestTLSProtocolBinding(t *testing.T) {
 func TestValidateMemberRequestRetirementEndpoint(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire", RetirePod: "ovn-central-abc-0"}}},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{{Name: "retire", RetirePod: "ovn-central-abc-0"}}},
 	}
 	if errors := ValidateInstallationSpec(spec); len(errors) != 0 {
 		t.Fatalf("valid retirement-only request was rejected: %v", errors)
@@ -224,7 +224,7 @@ func TestValidateMemberRequestRetirementEndpoint(t *testing.T) {
 func TestValidateMemberRequestsAllowOnlyOneReplacementTarget(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeCentralOnly,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3, DynamicMembership: true, MemberRequests: []operatorv1alpha1.CentralMemberSpec{
 			validMemberRequest("first"), validMemberRequest("second"),
 		}},
 	}

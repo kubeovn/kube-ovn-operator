@@ -64,7 +64,7 @@ spec:
   mode: full
   networkStack: ${network_stack}
   central:
-    mode: raft
+    mode: cluster
     replicas: 3
   dataPlane:
     ovsUpdateStrategy: RollingUpdate

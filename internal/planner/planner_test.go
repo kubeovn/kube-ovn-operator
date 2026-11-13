@@ -11,7 +11,7 @@ func TestBuildRejectsUnsafeNodeNetworkingSpec(t *testing.T) {
 	plan := Build(operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0",
 		Mode:    operatorv1alpha1.InstallationModeNodeNetworking,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 	}, "")
 	if plan.Phase != operatorv1alpha1.PhaseDegraded || plan.Blocking == "" {
 		t.Fatalf("expected a degraded plan, got %#v", plan)
@@ -22,7 +22,7 @@ func TestBuildOrdersMembershipAndHCPGates(t *testing.T) {
 	plan := Build(operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0",
 		Mode:    operatorv1alpha1.InstallationModeCentralOnly,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		HCP: operatorv1alpha1.HCPConfig{
 			Enabled: true, Role: operatorv1alpha1.HCPRoleManagement, PeerName: "tenant-a", PeerNamespace: "hcp",
 			NBEndpoint: "tcp:nb.example:6641", SBEndpoint: "ssl:sb.example:6642",
@@ -52,7 +52,7 @@ func TestBuildListsDurableUpgradeRolloutBoundaries(t *testing.T) {
 	plan := Build(operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.18.0",
 		Mode:    operatorv1alpha1.InstallationModeFull,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 	}, "v1.17.0")
 	want := []string{"MigrateCRDs", "WaitForCRDsReady", "RollCentralBeforeDataPlane", "VerifyCentralReadiness", "RollDataPlane", "VerifyNetworkProbes"}
 	for _, action := range want {
@@ -78,7 +78,7 @@ func TestBuildListsDurableUpgradeRolloutBoundaries(t *testing.T) {
 func TestBuildMapsHCPDataPlaneEndpointsToChartValues(t *testing.T) {
 	plan := Build(operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeNodeNetworking,
-		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeCluster, Replicas: 3},
 		HCP: operatorv1alpha1.HCPConfig{
 			Enabled: true, Role: operatorv1alpha1.HCPRoleDataPlane, PeerName: "management", PeerNamespace: "hcp",
 			NBEndpoint: "tcp:nb.example:30641", SBEndpoint: "tcp:sb.example:30642",

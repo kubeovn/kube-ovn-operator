@@ -307,7 +307,7 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 		now = r.Clock
 	}
 	plan := planner.Build(installation.Spec, installation.Status.ObservedVersion)
-	if plan.Blocking == "" && installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Central.Replicas == 2 && !raftReplicaTransitionReady(installation) {
+	if plan.Blocking == "" && installation.Spec.Central.Mode == operatorv1alpha1.CentralModeCluster && installation.Spec.Central.Replicas == 2 && !raftReplicaTransitionReady(installation) {
 		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "Validate", "spec.central.replicas=2 is permitted only for an existing retained RAFT topology transition"
 	}
 	if err := r.checkExecutingRecovery(ctx, installation); err != nil {
@@ -763,7 +763,7 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 			err = fmt.Errorf("workload management requires an operation lease manager")
 		} else {
 			err = r.withInstallationLease(ctx, installation, func(operationCtx context.Context) error {
-				if installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Mode != operatorv1alpha1.InstallationModeNodeNetworking {
+				if installation.Spec.Central.Mode == operatorv1alpha1.CentralModeCluster && installation.Spec.Mode != operatorv1alpha1.InstallationModeNodeNetworking {
 					return r.Leases.With(operationCtx, installation, lease.Central, operation)
 				}
 				return operation(operationCtx)
@@ -1309,7 +1309,7 @@ func conditionMetricValue(status metav1.ConditionStatus) float64 {
 }
 
 func localRaft(installation *operatorv1alpha1.KubeOVNInstallation) bool {
-	return installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Mode != operatorv1alpha1.InstallationModeNodeNetworking && !installation.Spec.HCP.Enabled
+	return installation.Spec.Central.Mode == operatorv1alpha1.CentralModeCluster && installation.Spec.Mode != operatorv1alpha1.InstallationModeNodeNetworking && !installation.Spec.HCP.Enabled
 }
 
 func topologyFailureReason(err error) string {
@@ -2715,8 +2715,8 @@ func recoveryTarget(request *operatorv1alpha1.KubeOVNRecoveryRequest, installati
 	if request.Spec.Mode != operatorv1alpha1.RecoveryModeRejoin {
 		return "", "", "", errors.New("spec.targetMemberName is only supported for rejoin recovery")
 	}
-	if installation.Spec.Central.Mode != operatorv1alpha1.CentralModeRaft || installation.Spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking || !installation.Spec.Central.DynamicMembership {
-		return "", "", "", errors.New("rejoin target requires a local raft installation with dynamic membership enabled")
+	if installation.Spec.Central.Mode != operatorv1alpha1.CentralModeCluster || installation.Spec.Mode == operatorv1alpha1.InstallationModeNodeNetworking || !installation.Spec.Central.DynamicMembership {
+		return "", "", "", errors.New("rejoin target requires a local cluster installation with dynamic membership enabled")
 	}
 	retained := installation.Status.Topology.Inventory
 	if retained == nil || retained.Digest == "" {

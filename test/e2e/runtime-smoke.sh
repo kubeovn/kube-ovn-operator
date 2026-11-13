@@ -44,7 +44,7 @@ spec:
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   mode: nodeNetworking
   central:
-    mode: raft
+    mode: cluster
     replicas: 3
   dataPlane:
     externalOvnCentral:

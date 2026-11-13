@@ -9,8 +9,8 @@ func TestRollbackContractRequiresBothRestoreCapabilitiesAndFence(t *testing.T) {
 	contract := RollbackContract{
 		FromVersion:     "v1.17.0",
 		ToVersion:       "v1.16.0",
-		FromCentralMode: "raft",
-		ToCentralMode:   "raft",
+		FromCentralMode: "cluster",
+		ToCentralMode:   "cluster",
 		AllowRollback:   true,
 		BackupID:        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		DatabaseRefs: map[string]string{
@@ -45,7 +45,7 @@ func TestRollbackContractRequiresBothRestoreCapabilitiesAndFence(t *testing.T) {
 
 func TestRollbackContractRequiresExplicitQuorumApproval(t *testing.T) {
 	contract := RollbackContract{
-		FromVersion: "v1.17.0", ToVersion: "v1.16.0", FromCentralMode: "raft", ToCentralMode: "raft", AllowRollback: true,
+		FromVersion: "v1.17.0", ToVersion: "v1.16.0", FromCentralMode: "cluster", ToCentralMode: "cluster", AllowRollback: true,
 		BackupID: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", DatabaseRefs: map[string]string{"OVN_Northbound": "nb", "OVN_Southbound": "sb"},
 		TopologyDigest:       "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		ChartDigest:          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

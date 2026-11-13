@@ -522,7 +522,7 @@ func (r *HelmRenderer) bootstrapNodes(ctx context.Context, spec operatorv1alpha1
 	// here would reject every add or replacement before the lifecycle join can
 	// run. The retained Chart members still must fit within the requested size;
 	// the lifecycle handoff validates the complete final inventory.
-	if spec.Central.Mode == operatorv1alpha1.CentralModeRaft {
+	if spec.Central.Mode == operatorv1alpha1.CentralModeCluster {
 		if !spec.Central.DynamicMembership || len(spec.Central.MemberRequests) == 0 {
 			if len(addresses) != int(spec.Central.Replicas) {
 				return fmt.Errorf("central placement selected %d addresses, expected %d", len(addresses), spec.Central.Replicas)

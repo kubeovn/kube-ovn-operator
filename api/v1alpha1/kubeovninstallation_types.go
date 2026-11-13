@@ -19,7 +19,7 @@ const (
 type CentralMode string
 
 const (
-	CentralModeRaft       CentralMode = "raft"
+	CentralModeCluster    CentralMode = "cluster"
 	CentralModeStandalone CentralMode = "standalone"
 )
 

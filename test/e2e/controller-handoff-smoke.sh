@@ -236,7 +236,7 @@ spec:
     digest: ${digest}
   mode: centralOnly
   central:
-    mode: raft
+    mode: cluster
     replicas: 3
     dynamicMembership: true
     placement:

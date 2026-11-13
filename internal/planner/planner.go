@@ -37,7 +37,7 @@ func Build(spec operatorv1alpha1.KubeOVNInstallationSpec, observedVersion string
 			actions = append(actions, "RecordRollbackCheckpoint")
 		}
 	}
-	if spec.Central.Mode == operatorv1alpha1.CentralModeRaft {
+	if spec.Central.Mode == operatorv1alpha1.CentralModeCluster {
 		actions = append(actions, "AcquireCentralMembershipLease", "ValidateQuorum", "JoinBeforeReplicaIncrease", "LeaveBeforeReplicaDecrease")
 	}
 	if spec.HCP.Enabled {
