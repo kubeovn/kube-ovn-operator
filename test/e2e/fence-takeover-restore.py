@@ -313,7 +313,7 @@ def create_recovery(name, backup_ref, *, suspend=False):
     print(f"Recovery watch cache ready at {cached['metadata']['resourceVersion']} before creating {name}", flush=True)
     request = {"apiVersion": "operator.kubeovn.io/v1alpha1", "kind": "KubeOVNRecoveryRequest",
                "metadata": {"name": name, "namespace": NAMESPACE},
-               "spec": {"suspend": suspend, "installationRef": INSTALLATION, "reason": "Disposable Kind native restore acceptance",
+               "spec": {"suspend": suspend, "installationName": INSTALLATION, "reason": "Disposable Kind native restore acceptance",
                         "mode": "reconvert", "backupRef": backup_ref, "requestedBy": "kind-e2e-audit",
                         "expiresAt": (datetime.datetime.now(datetime.timezone.utc)
                                       + datetime.timedelta(minutes=15)).isoformat().replace("+00:00", "Z")}}
