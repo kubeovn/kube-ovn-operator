@@ -307,6 +307,9 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 		now = r.Clock
 	}
 	plan := planner.Build(installation.Spec, installation.Status.ObservedVersion)
+	if plan.Blocking == "" && installation.Spec.Central.Mode == operatorv1alpha1.CentralModeRaft && installation.Spec.Central.Replicas == 2 && !raftReplicaTransitionReady(installation) {
+		plan.Phase, plan.Step, plan.Blocking = operatorv1alpha1.PhaseDegraded, "Validate", "spec.central.replicas=2 is permitted only for an existing retained RAFT topology transition"
+	}
 	if err := r.checkExecutingRecovery(ctx, installation); err != nil {
 		if !errors.Is(err, errRecoveryExecuting) {
 			return reconcile.Result{}, err
@@ -828,6 +831,14 @@ func (r *KubeOVNInstallationReconciler) reconcile(ctx context.Context, req recon
 	return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
+func raftReplicaTransitionReady(installation *operatorv1alpha1.KubeOVNInstallation) bool {
+	if installation == nil || installation.Status.Topology.Inventory == nil || strings.TrimSpace(installation.Status.Topology.Inventory.Digest) == "" {
+		return false
+	}
+	checkpoint := installation.Status.ApplyCheckpoint
+	return checkpoint != nil && strings.TrimSpace(checkpoint.Version) != "" && strings.TrimSpace(installation.Status.ObservedVersion) != "" && checkpoint.Version == installation.Status.ObservedVersion
+}
+
 var errRecoveryExecuting = errors.New("an identity-bound recovery request is executing")
 
 // checkExecutingRecovery lets an admitted recovery own the installation across
@@ -1135,7 +1146,6 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 		workloadMessage = observation.Message
 		if observation.Ready {
 			workloadStatus, workloadReason = metav1.ConditionTrue, "RolloutComplete"
-			status.ObservedVersion = installation.Spec.Version
 			readyReason = "VerificationPending"
 		}
 	}
@@ -1210,6 +1220,10 @@ func (r *KubeOVNInstallationReconciler) updateStatus(ctx context.Context, instal
 	if topologyState.Status == metav1.ConditionTrue && hcpCondition.Status == metav1.ConditionTrue && plan.Blocking == "" && workloadStatus == metav1.ConditionTrue && ovnStatus == metav1.ConditionTrue && northd.Status == metav1.ConditionTrue && dataPlane.Status == metav1.ConditionTrue && networkVerified {
 		readyStatus, readyReason, message = metav1.ConditionTrue, "VerificationComplete", "Workloads, OVN databases, runtime and configured network probes passed verification"
 		status.Phase = operatorv1alpha1.PhaseReady
+		// ObservedVersion is the durable upgrade completion marker. Workload
+		// rollout alone is insufficient: a failed runtime or network check must
+		// keep the old version visible so the next reconcile resumes the upgrade.
+		status.ObservedVersion = installation.Spec.Version
 		status.Upgrade.Step = "Verified"
 	}
 	for _, condition := range []metav1.Condition{
@@ -2310,7 +2324,7 @@ func (r *KubeOVNInstallationReconciler) ensureApplyCheckpoint(ctx context.Contex
 				return nil
 			}
 			if !lifecycleHandoffAuthorizesApply(installation) && !upgradeAuthorizesApply(installation) {
-				return fmt.Errorf("installation inputs changed after the first apply checkpoint; a lifecycle executor is required")
+				return fmt.Errorf("installation inputs changed after the first apply checkpoint; resource removal or installation mode migration requires a lifecycle executor")
 			}
 			previous := *existing
 			installation.Status.ApplyCheckpoint = &checkpoint
@@ -2531,6 +2545,13 @@ func (r *RecoveryRequestReconciler) Reconcile(ctx context.Context, req reconcile
 		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, reason, err.Error(), now, reason == "Expired")
 	}
 	planStatus := recoveryPlanStatus(plan)
+	// RecoveryPlanStatus predates OperationID in the digest. Keep an admitted
+	// request restart-safe when it still carries that legacy digest; all newly
+	// created plans use the operation-bound digest above.
+	if request.Status.Plan != nil && request.Status.Plan.Digest == recoveryPlanDigestLegacy(plan) {
+		plan.Digest = request.Status.Plan.Digest
+		planStatus.Digest = request.Status.Plan.Digest
+	}
 	if request.Status.Plan != nil && !sameRecoveryPlan(request.Status.Plan, planStatus) {
 		return reconcile.Result{}, r.setRecoveryFailure(ctx, request, "PlanChanged", "installation identity or RecoveryRequest inputs changed after the immutable plan was recorded", now, false)
 	}
@@ -2842,6 +2863,47 @@ func recoveryPlanDigest(plan RecoveryPlan) string {
 		InstallationNamespace: plan.InstallationNamespace, InstallationName: plan.InstallationName, InstallationUID: plan.InstallationUID,
 		InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration,
 		Reason: plan.Reason, OperationID: plan.OperationID, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest,
+		TargetMemberRef: plan.TargetMemberRef, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest,
+		BackupRef: plan.BackupRef, DatabaseRefs: plan.DatabaseRefs, ApprovalRef: plan.ApprovalRef, Approver: plan.Approver,
+		ExpiresAt: plan.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	}, stdjson.Deterministic(true))
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+}
+
+// recoveryPlanDigestLegacy matches the digest written before OperationID was
+// added to the recovery plan identity. It is accepted only for an already
+// persisted, otherwise unchanged plan and is never used for new requests.
+func recoveryPlanDigestLegacy(plan RecoveryPlan) string {
+	data, err := stdjson.Marshal(struct {
+		RequestNamespace       string
+		RequestName            string
+		RequestUID             types.UID
+		InstallationNamespace  string
+		InstallationName       string
+		InstallationUID        types.UID
+		InstallationGeneration int64
+		RequestGeneration      int64
+		Reason                 string
+		Mode                   operatorv1alpha1.RecoveryMode
+		SourceVersion          string
+		TargetVersion          string
+		ChartDigest            string
+		TargetMemberRef        string
+		TargetMemberDigest     string
+		TopologyDigest         string
+		BackupRef              string
+		DatabaseRefs           map[string]string
+		ApprovalRef            *operatorv1alpha1.RecoveryApprovalReference
+		Approver               string
+		ExpiresAt              string
+	}{
+		RequestNamespace: plan.RequestNamespace, RequestName: plan.RequestName, RequestUID: plan.RequestUID,
+		InstallationNamespace: plan.InstallationNamespace, InstallationName: plan.InstallationName, InstallationUID: plan.InstallationUID,
+		InstallationGeneration: plan.InstallationGeneration, RequestGeneration: plan.RequestGeneration,
+		Reason: plan.Reason, Mode: plan.Mode, SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, ChartDigest: plan.ChartDigest,
 		TargetMemberRef: plan.TargetMemberRef, TargetMemberDigest: plan.TargetMemberDigest, TopologyDigest: plan.TopologyDigest,
 		BackupRef: plan.BackupRef, DatabaseRefs: plan.DatabaseRefs, ApprovalRef: plan.ApprovalRef, Approver: plan.Approver,
 		ExpiresAt: plan.ExpiresAt.UTC().Format(time.RFC3339Nano),

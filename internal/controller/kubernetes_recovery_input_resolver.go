@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/approval"
 	"github.com/kubeovn/kube-ovn-operator/internal/recovery"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -140,6 +141,9 @@ func (r *KubernetesOfflineRebuildWorkloadResolver) validateOptions(plan Recovery
 	if r.Namespace != plan.RequestNamespace || plan.RequestNamespace != plan.InstallationNamespace {
 		return errors.New("kubernetes offline rebuild resolver namespace does not match the admitted plan")
 	}
+	if plan.InstallationGeneration < 1 || plan.RequestGeneration < 1 || plan.OperationID == "" || plan.SourceVersion == "" || plan.TargetVersion == "" || plan.ChartDigest == "" || plan.TopologyDigest == "" {
+		return errors.New("kubernetes offline rebuild resolver requires a complete admitted plan identity")
+	}
 	if len(plan.DatabaseRefs) != 2 || plan.BackupRef == "" {
 		return errors.New("kubernetes offline rebuild resolver requires an admitted backup pair")
 	}
@@ -179,21 +183,35 @@ func (r *KubernetesOfflineRebuildWorkloadResolver) resolveApproval(ctx context.C
 	if plan.ApprovalRef == nil || strings.TrimSpace(plan.ApprovalRef.Name) == "" || plan.ApprovalRef.UID == "" {
 		return errors.New("offline rebuild recovery approval binding is missing")
 	}
-	approval := new(operatorv1alpha1.KubeOVNRecoveryApproval)
-	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: r.Namespace, Name: plan.ApprovalRef.Name}, approval); err != nil {
+	binding := approval.RecoveryBinding{
+		InstallationName: plan.InstallationName, InstallationUID: plan.InstallationUID, InstallationGeneration: plan.InstallationGeneration,
+		RequestName: plan.RequestName, RequestUID: plan.RequestUID, RequestGeneration: plan.RequestGeneration,
+		Mode: string(plan.Mode), SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, BackupRef: plan.BackupRef,
+		TopologyDigest: plan.TopologyDigest, ChartDigest: plan.ChartDigest,
+	}
+	digest, err := approval.ValidateRecoveryApproval(ctx, r.Reader, r.Namespace, operatorv1alpha1.InstallationReference{Name: plan.InstallationName, UID: plan.InstallationUID}, *plan.ApprovalRef, binding, true)
+	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("%w: offline rebuild recovery approval %q is not available", ErrRecoveryWorkloadNotReady, plan.ApprovalRef.Name)
 		}
-		return fmt.Errorf("read offline rebuild recovery approval %q: %w", plan.ApprovalRef.Name, err)
+		return fmt.Errorf("validate offline rebuild recovery approval %q: %w", plan.ApprovalRef.Name, err)
 	}
-	if approval.UID != plan.ApprovalRef.UID || approval.DeletionTimestamp != nil {
-		return errors.New("offline rebuild recovery approval identity changed or is being deleted")
-	}
-	if approval.Status.Phase != operatorv1alpha1.RecoveryApprovalReserved && approval.Status.Phase != operatorv1alpha1.RecoveryApprovalCompleted {
-		return errors.New("offline rebuild recovery approval is not reserved or completed")
-	}
-	if !validRecoverySHA256(approval.Status.DecisionDigest) || approval.Status.DecisionDigest != canonical.Approval.DecisionDigest {
+	if digest != canonical.Approval.DecisionDigest || !validRecoverySHA256(digest) {
 		return errors.New("offline rebuild recovery approval decision digest does not match the canonical plan")
+	}
+	approvalRecord := new(operatorv1alpha1.KubeOVNRecoveryApproval)
+	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: r.Namespace, Name: plan.ApprovalRef.Name}, approvalRecord); err != nil {
+		return fmt.Errorf("read offline rebuild recovery approval status: %w", err)
+	}
+	secondDigest, err := approval.ValidateRecoveryApprovalRecord(approvalRecord, r.Namespace, operatorv1alpha1.InstallationReference{Name: plan.InstallationName, UID: plan.InstallationUID}, *plan.ApprovalRef, binding, true)
+	if err != nil {
+		return fmt.Errorf("revalidate offline rebuild recovery approval snapshot: %w", err)
+	}
+	if secondDigest != digest || approvalRecord.Status.DecisionDigest != secondDigest {
+		return errors.New("offline rebuild recovery approval decision digest does not match the canonical plan")
+	}
+	if err := approval.ValidateRecoveryApprovalStatus(approvalRecord, digest); err != nil {
+		return fmt.Errorf("offline rebuild recovery approval reservation audit is invalid: %w", err)
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	"github.com/kubeovn/kube-ovn-operator/internal/approval"
 	"github.com/kubeovn/kube-ovn-operator/internal/lease"
 	"github.com/kubeovn/kube-ovn-operator/internal/lifecycle"
 	"github.com/kubeovn/kube-ovn-operator/internal/workload"
@@ -15,6 +16,45 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestValidateRecoveryApprovalForPlanAllowsOnlyInitialQuiescingAuditGap(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	plan := RecoveryPlan{
+		RequestNamespace: "test", RequestName: "recovery", RequestUID: "request-uid", RequestGeneration: 3,
+		InstallationName: "ovn", InstallationUID: "installation-uid", InstallationGeneration: 2,
+		Mode: operatorv1alpha1.RecoveryModeReconvert, SourceVersion: "v1.16.0", TargetVersion: "v1.17.0",
+		BackupRef: "sha256:" + strings.Repeat("a", 64), TopologyDigest: "sha256:" + strings.Repeat("b", 64), ChartDigest: "sha256:" + strings.Repeat("c", 64),
+		ApprovalRef: &operatorv1alpha1.RecoveryApprovalReference{Name: "recovery-approval", UID: types.UID("approval-uid")},
+	}
+	record := &operatorv1alpha1.KubeOVNRecoveryApproval{
+		ObjectMeta: metav1.ObjectMeta{Name: plan.ApprovalRef.Name, Namespace: plan.RequestNamespace, UID: plan.ApprovalRef.UID, Generation: 1, CreationTimestamp: metav1.NewTime(now.Add(-time.Minute))},
+		Spec: operatorv1alpha1.RecoveryApprovalSpec{
+			InstallationRef: operatorv1alpha1.InstallationReference{Name: plan.InstallationName, UID: plan.InstallationUID}, InstallationGeneration: plan.InstallationGeneration,
+			RequestRef: &operatorv1alpha1.RecoveryRequestReference{Name: plan.RequestName, UID: plan.RequestUID, Generation: plan.RequestGeneration},
+			Mode:       string(plan.Mode), SourceVersion: plan.SourceVersion, TargetVersion: plan.TargetVersion, BackupRef: plan.BackupRef,
+			TopologyDigest: plan.TopologyDigest, ChartDigest: plan.ChartDigest, Reason: "test approval", ExpiresAt: metav1.NewTime(now.Add(time.Hour)),
+		},
+	}
+	scheme := controllerScheme(t)
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(record).WithObjects(record).Build()
+	if err := validateRecoveryApprovalForPlan(t.Context(), kube, plan, false); err != nil {
+		t.Fatalf("initial quiescing admission rejected an unreserved approval: %v", err)
+	}
+	if err := validateRecoveryApprovalForPlan(t.Context(), kube, plan, true); err == nil {
+		t.Fatal("later recovery phase accepted an approval without a reservation audit")
+	}
+	digest, err := approval.RecoveryApprovalDecisionDigest(record.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservedAt := metav1.NewTime(now)
+	completedAt := metav1.NewTime(now.Add(time.Second))
+	record.Status = operatorv1alpha1.RecoveryApprovalStatus{Phase: operatorv1alpha1.RecoveryApprovalCompleted, DecisionDigest: digest, ReservedAt: &reservedAt, CompletedAt: &completedAt}
+	kube = fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(record).WithObjects(record).Build()
+	if err := validateRecoveryApprovalForPlan(t.Context(), kube, plan, true); err != nil {
+		t.Fatalf("completed approval was rejected for a retry: %v", err)
+	}
+}
 
 func TestPinRecoveryOperationIDUsesPlanDigest(t *testing.T) {
 	request := &lifecycle.Request{Add: &lifecycle.Addition{Workload: workload.Request{}}}

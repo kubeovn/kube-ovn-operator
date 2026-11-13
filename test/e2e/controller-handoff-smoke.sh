@@ -203,6 +203,7 @@ mkdir -m 0700 "${backup_dir}"
   --leader-elect=false \
   --metrics-bind-address=0 \
   --health-probe-bind-address=:18083 \
+  --chart-allowed-hosts=127.0.0.1 \
   --backup-dir="${backup_dir}" \
   --fence-endpoint-template='https://{node}:8443' \
   --fence-ca-file="${fence_dir}/ca.crt" \

@@ -109,6 +109,55 @@ func TestUpdateStatusEmitsPhaseAndReadyEvents(t *testing.T) {
 	}
 }
 
+func TestUpdateStatusPinsObservedVersionOnlyAfterVerification(t *testing.T) {
+	scheme := controllerScheme(t)
+	installation := &operatorv1alpha1.KubeOVNInstallation{
+		ObjectMeta: metav1.ObjectMeta{Name: "observed-version", Namespace: "default", UID: types.UID("observed-version-uid"), Generation: 2},
+		Spec: operatorv1alpha1.KubeOVNInstallationSpec{
+			Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
+			Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3},
+		},
+		Status: operatorv1alpha1.KubeOVNInstallationStatus{
+			ObservedVersion: "v1.16.0",
+			ApplyCheckpoint: &operatorv1alpha1.ApplyCheckpointStatus{Version: "v1.16.0"},
+		},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(installation).WithObjects(installation).Build()
+	reconciler := &KubeOVNInstallationReconciler{Client: kube, Scheme: scheme}
+	observation := &apply.Observation{Ready: true, ReadyCentralReplicas: 3}
+	plan := planner.Plan{Phase: operatorv1alpha1.PhaseUpgrading, Step: "Verification"}
+	if err := reconciler.updateStatus(t.Context(), installation, plan, time.Unix(10, 0), observation, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), clientKey(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.ObservedVersion != "v1.16.0" {
+		t.Fatalf("rollout readiness advanced observed version before verification: %q", got.Status.ObservedVersion)
+	}
+
+	ovn := &health.OVNReport{Ready: true}
+	runtime := &health.RuntimeReport{
+		Northd:    metav1.Condition{Type: "NorthdReady", Status: metav1.ConditionTrue},
+		DataPlane: metav1.Condition{Type: "DataPlaneReady", Status: metav1.ConditionTrue},
+	}
+	network := &health.NetworkReport{
+		Condition: metav1.Condition{Type: "NetworkReady", Status: metav1.ConditionTrue, Reason: "NetworkProbesPassed"},
+		Evidence:  &operatorv1alpha1.NetworkStatus{ObservedNodes: 1, SuccessfulProbes: 1, AddressFamilies: []string{"IPv4"}},
+	}
+	topology := &metav1.Condition{Type: "TopologyRecorded", Status: metav1.ConditionTrue}
+	if err := reconciler.updateStatus(t.Context(), got, plan, time.Unix(11, 0), observation, ovn, runtime, network, topology); err != nil {
+		t.Fatal(err)
+	}
+	if err := kube.Get(t.Context(), clientKey(installation), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.ObservedVersion != "v1.17.0" || got.Status.Phase != operatorv1alpha1.PhaseReady {
+		t.Fatalf("full verification did not advance observed version: phase=%q version=%q", got.Status.Phase, got.Status.ObservedVersion)
+	}
+}
+
 func TestMapNodeToInstallationsWakesMatchingPlacements(t *testing.T) {
 	scheme := controllerScheme(t)
 	central := &operatorv1alpha1.KubeOVNInstallation{
@@ -543,6 +592,9 @@ func TestReconcileRuntimeHealthInvalidatesEvidenceWithoutClaimingNetworkReadines
 			if !meta.IsStatusConditionTrue(got.Status.Conditions, "NorthdReady") || !meta.IsStatusConditionTrue(got.Status.Conditions, "DataPlaneReady") || meta.IsStatusConditionTrue(got.Status.Conditions, "Ready") || meta.IsStatusConditionTrue(got.Status.Conditions, "NetworkReady") {
 				t.Fatalf("runtime health was confused with network health: %+v", got.Status.Conditions)
 			}
+			if got.Status.ObservedVersion != "" {
+				t.Fatalf("workload readiness claimed an observed version before full verification: %q", got.Status.ObservedVersion)
+			}
 			if len(got.Status.Topology.NorthdProcesses) != 1 || len(got.Status.Topology.Nodes) != 1 || got.Status.Topology.NorthdProcesses[0].LastObserved.IsZero() || got.Status.Topology.Nodes[0].LastObserved.IsZero() {
 				t.Fatalf("missing runtime evidence: %+v", got.Status.Topology)
 			}
@@ -823,7 +875,7 @@ func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 	if err := kube.Get(t.Context(), req.NamespacedName, got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Status.ApplyCheckpoint == nil || got.Status.ObservedVersion != "v1.17.0" || got.Status.Topology.ReadyCentralReplicas != 3 {
+	if got.Status.ApplyCheckpoint == nil || got.Status.ObservedVersion != "" || got.Status.Topology.ReadyCentralReplicas != 3 {
 		t.Fatalf("missing observed evidence: %+v", got.Status)
 	}
 	if meta.IsStatusConditionTrue(got.Status.Conditions, "Ready") || !meta.IsStatusConditionTrue(got.Status.Conditions, "WorkloadsReady") {
@@ -867,6 +919,23 @@ func TestReconcileObservesRolloutAndPinsFirstApplyAcrossRestart(t *testing.T) {
 	}
 	if workload.applyCalls != 2 {
 		t.Fatal("network stack migration bypassed the first-apply checkpoint")
+	}
+	if err := kube.Get(t.Context(), req.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	got.Spec.Mode = operatorv1alpha1.InstallationModeControlPlaneOnly
+	if err := kube.Update(t.Context(), got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	modeGot := new(operatorv1alpha1.KubeOVNInstallation)
+	if err := kube.Get(t.Context(), req.NamespacedName, modeGot); err != nil {
+		t.Fatal(err)
+	}
+	if workload.applyCalls != 2 || !meta.IsStatusConditionTrue(modeGot.Status.Conditions, "Degraded") {
+		t.Fatal("installation mode migration bypassed the first-apply checkpoint")
 	}
 }
 
@@ -1453,6 +1522,23 @@ func TestReplicaOnlySpecChangePinsTheRetainedMemberCount(t *testing.T) {
 	ok, err = replicaOnlySpecChange(installation, 3)
 	if err != nil || ok {
 		t.Fatalf("unrelated spec change was admitted: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestRaftReplicaTransitionRequiresRetainedEvidence(t *testing.T) {
+	installation := &operatorv1alpha1.KubeOVNInstallation{}
+	if raftReplicaTransitionReady(installation) {
+		t.Fatal("empty installation was accepted as a retained RAFT transition")
+	}
+	installation.Status.ApplyCheckpoint = &operatorv1alpha1.ApplyCheckpointStatus{Version: "v1.17.0"}
+	installation.Status.ObservedVersion = "v1.17.0"
+	installation.Status.Topology.Inventory = &operatorv1alpha1.CentralTopologyReference{Digest: "sha256:topology"}
+	if !raftReplicaTransitionReady(installation) {
+		t.Fatal("retained topology and version-bound checkpoint were rejected")
+	}
+	installation.Status.ApplyCheckpoint.Version = "v1.18.0"
+	if raftReplicaTransitionReady(installation) {
+		t.Fatal("checkpoint from a different observed version was accepted")
 	}
 }
 

@@ -180,7 +180,7 @@ func TestRollbackRestoreFailureDoesNotResumeOrApplyWorkloads(t *testing.T) {
 	installation.Spec.Chart.Digest = chartDigest
 	installation.Status.ObservedVersion = "v1.17.0"
 	installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{
-		ID: testBackupPairID(), Version: installation.Spec.Version, TopologyDigest: installation.Status.Topology.Inventory.Digest,
+		ID: testBackupPairID(), Version: installation.Status.ObservedVersion, TopologyDigest: installation.Status.Topology.Inventory.Digest,
 		DatabaseRefs: testBackupPairRefs(), CompletedAt: metav1.NewTime(time.Unix(100, 0).UTC()),
 	}
 	kube := fake.NewClientBuilder().WithScheme(controllerScheme(t)).WithObjects(installation).Build()
@@ -233,7 +233,7 @@ func TestRollbackVerificationReportsPendingGate(t *testing.T) {
 			installation.Spec.Chart.Digest = chartDigest
 			installation.Status.ObservedVersion = "v1.17.0"
 			installation.Status.LastBackup = &operatorv1alpha1.BackupStatus{
-				ID: testBackupPairID(), Version: installation.Spec.Version, TopologyDigest: installation.Status.Topology.Inventory.Digest,
+				ID: testBackupPairID(), Version: installation.Status.ObservedVersion, TopologyDigest: installation.Status.Topology.Inventory.Digest,
 				DatabaseRefs: testBackupPairRefs(), CompletedAt: metav1.NewTime(time.Unix(100, 0).UTC()),
 			}
 			retained := additionTopologyFixture()

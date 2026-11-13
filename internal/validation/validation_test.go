@@ -18,6 +18,21 @@ func TestValidateNetworkStack(t *testing.T) {
 	}
 }
 
+func TestValidateUpgradeStrategy(t *testing.T) {
+	base := operatorv1alpha1.KubeOVNInstallationSpec{Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,
+		Central: operatorv1alpha1.CentralSpec{Mode: operatorv1alpha1.CentralModeRaft, Replicas: 3}}
+	for _, strategy := range []string{"", "gatedRolling"} {
+		base.Upgrade.Strategy = strategy
+		if errs := ValidateInstallationSpec(base); len(errs) != 0 {
+			t.Fatalf("strategy %q was rejected: %v", strategy, errs)
+		}
+	}
+	base.Upgrade.Strategy = "RollingUpdate"
+	if errs := ValidateInstallationSpec(base); len(errs) == 0 || !strings.Contains(JoinErrors(errs), "upgrade.strategy") {
+		t.Fatalf("unsupported upgrade strategy was accepted: %v", errs)
+	}
+}
+
 func TestValidateAdoptionRequiresValidSelector(t *testing.T) {
 	spec := operatorv1alpha1.KubeOVNInstallationSpec{
 		Version: "v1.17.0", Mode: operatorv1alpha1.InstallationModeFull,

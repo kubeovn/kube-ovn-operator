@@ -46,6 +46,12 @@ type HelmRenderer struct {
 	Capabilities *chartutil.Capabilities
 	HTTPClient   *http.Client
 	FenceAgent   *FenceAgentConfig
+	// AllowedChartHosts is the exact HTTPS/OCI host allowlist for chart
+	// archives. A nil slice preserves the in-process renderer's legacy test
+	// behavior; production wiring supplies a non-nil list, so an empty list
+	// rejects every remote chart until an operator administrator configures a
+	// trusted registry.
+	AllowedChartHosts []string
 }
 
 // FenceAgentConfig configures the shared central membership fence sidecar.
@@ -346,6 +352,9 @@ func (r *HelmRenderer) fetch(ctx context.Context, spec operatorv1alpha1.ChartSpe
 	if err != nil || source.Host == "" || source.User != nil || source.RawQuery != "" || source.Fragment != "" {
 		return nil, errors.New("spec.chart.source must be an archive or OCI URL without credentials, query or fragment")
 	}
+	if r.AllowedChartHosts != nil && !chartHostAllowed(source, r.AllowedChartHosts) {
+		return nil, fmt.Errorf("spec.chart.source host %q is not in the operator chart host allowlist", source.Hostname())
+	}
 	if source.Scheme == registry.OCIScheme {
 		return r.fetchOCI(ctx, source, expected)
 	}
@@ -356,13 +365,7 @@ func (r *HelmRenderer) fetch(ctx context.Context, spec operatorv1alpha1.ChartSpe
 	if err != nil {
 		return nil, err
 	}
-	httpClient := r.chartHTTPClient()
-	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 || !allowedChartURL(req.URL) {
-			return errors.New("chart redirect rejected")
-		}
-		return nil
-	}
+	httpClient := r.chartHTTPClientWithRedirectPolicy()
 	response, err := httpClient.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -388,6 +391,21 @@ func (r *HelmRenderer) fetch(ctx context.Context, spec operatorv1alpha1.ChartSpe
 	return data, nil
 }
 
+func chartHostAllowed(source *url.URL, allowed []string) bool {
+	if source == nil || source.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(source.Host))
+	hostname := strings.ToLower(strings.TrimSpace(source.Hostname()))
+	for _, candidate := range allowed {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == host || candidate == hostname {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *HelmRenderer) fetchOCI(ctx context.Context, source *url.URL, expected []byte) ([]byte, error) {
 	if source == nil || source.Host == "" || source.Path == "" || source.User != nil || source.RawQuery != "" || source.Fragment != "" {
 		return nil, errors.New("OCI chart source must identify a repository reference without credentials, query or fragment")
@@ -395,7 +413,7 @@ func (r *HelmRenderer) fetchOCI(ctx context.Context, source *url.URL, expected [
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	client, err := registry.NewClient(registry.ClientOptHTTPClient(r.chartHTTPClient()), registry.ClientOptEnableCache(false))
+	client, err := registry.NewClient(registry.ClientOptHTTPClient(r.chartHTTPClientWithRedirectPolicy()), registry.ClientOptEnableCache(false))
 	if err != nil {
 		return nil, fmt.Errorf("create OCI chart client: %w", err)
 	}
@@ -424,6 +442,17 @@ func (r *HelmRenderer) chartHTTPClient() *http.Client {
 	if r.HTTPClient != nil {
 		copy := *r.HTTPClient
 		httpClient = &copy
+	}
+	return httpClient
+}
+
+func (r *HelmRenderer) chartHTTPClientWithRedirectPolicy() *http.Client {
+	httpClient := r.chartHTTPClient()
+	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 || !allowedChartURL(req.URL) || r.AllowedChartHosts != nil && !chartHostAllowed(req.URL, r.AllowedChartHosts) {
+			return errors.New("chart redirect rejected")
+		}
+		return nil
 	}
 	return httpClient
 }
@@ -487,8 +516,20 @@ func (r *HelmRenderer) bootstrapNodes(ctx context.Context, spec operatorv1alpha1
 	if len(addresses) == 0 {
 		return errors.New("no central nodes with InternalIP match the placement selector")
 	}
-	if spec.Central.Mode == operatorv1alpha1.CentralModeRaft && len(addresses) != int(spec.Central.Replicas) {
-		return fmt.Errorf("central placement selected %d addresses, expected %d", len(addresses), spec.Central.Replicas)
+	// During a dynamic membership transition, explicitly prepared member
+	// requests are rendered as independently managed workloads. Their nodes
+	// are intentionally excluded above, so requiring the final desired count
+	// here would reject every add or replacement before the lifecycle join can
+	// run. The retained Chart members still must fit within the requested size;
+	// the lifecycle handoff validates the complete final inventory.
+	if spec.Central.Mode == operatorv1alpha1.CentralModeRaft {
+		if !spec.Central.DynamicMembership || len(spec.Central.MemberRequests) == 0 {
+			if len(addresses) != int(spec.Central.Replicas) {
+				return fmt.Errorf("central placement selected %d addresses, expected %d", len(addresses), spec.Central.Replicas)
+			}
+		} else if len(addresses) > int(spec.Central.Replicas) {
+			return fmt.Errorf("central placement selected %d retained addresses, exceeding desired replicas %d", len(addresses), spec.Central.Replicas)
+		}
 	}
 	values["MASTER_NODES"] = strings.Join(addresses, ",")
 	return nil

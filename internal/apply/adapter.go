@@ -2,17 +2,23 @@
 package apply
 
 import (
+	"bytes"
 	"context"
+	stdjson "encoding/json"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 	"strings"
 
 	operatorv1alpha1 "github.com/kubeovn/kube-ovn-operator/api/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
@@ -352,13 +358,15 @@ func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, obj
 			return nil, err
 		}
 		labels := copy.GetLabels()
-		if labels == nil {
-			labels = make(map[string]string)
+		if !sharedClusterResource(copy) {
+			if labels == nil {
+				labels = make(map[string]string)
+			}
+			for label, value := range identity.labels() {
+				labels[label] = value
+			}
+			copy.SetLabels(labels)
 		}
-		for label, value := range identity.labels() {
-			labels[label] = value
-		}
-		copy.SetLabels(labels)
 		if namespaced && !retainResource(copy) {
 			copy.SetOwnerReferences([]metav1.OwnerReference{{
 				APIVersion: operatorv1alpha1.GroupVersion.String(), Kind: "KubeOVNInstallation",
@@ -374,6 +382,11 @@ func (c *Client) prepare(ctx context.Context, identity InstallationIdentity, obj
 		default:
 			if existing.GetName() != copy.GetName() || existing.GetNamespace() != copy.GetNamespace() {
 				return nil, ownershipConflict(copy, "live resource identity differs from requested identity")
+			}
+			if sharedClusterResource(copy) {
+				if err := checkSharedCRDCompatibility(existing, copy); err != nil {
+					return nil, err
+				}
 			}
 			if err := checkOwnership(existing, identity, true, namespaced && !retainResource(copy)); err != nil {
 				return nil, err
@@ -579,6 +592,15 @@ func (i InstallationIdentity) labels() map[string]string {
 }
 
 func checkOwnership(object *unstructured.Unstructured, identity InstallationIdentity, existing, namespaced bool) error {
+	if sharedClusterResource(object) {
+		// CRDs are cluster capabilities shared by all installations. They have
+		// no installation owner or identity labels; compatibility is enforced by
+		// the pinned manifest and the upgrade readiness gate.
+		if len(object.GetOwnerReferences()) != 0 {
+			return ownershipConflict(object, "shared cluster resource has an owner reference")
+		}
+		return nil
+	}
 	labels := object.GetLabels()
 	for label, expected := range identity.labels() {
 		actual, present := labels[label]
@@ -600,6 +622,132 @@ func checkOwnership(object *unstructured.Unstructured, identity InstallationIden
 		return ownershipConflict(object, "multiple owner references are not supported")
 	}
 	return nil
+}
+
+func sharedClusterResource(object *unstructured.Unstructured) bool {
+	return object != nil && object.GroupVersionKind().Group == "apiextensions.k8s.io" && object.GetKind() == "CustomResourceDefinition"
+}
+
+// checkSharedCRDCompatibility prevents one installation from silently
+// replacing the API contract established by another installation. CRDs are
+// shared cluster capabilities, so ownership labels cannot provide isolation.
+func checkSharedCRDCompatibility(live, desired *unstructured.Unstructured) error {
+	if live == nil || desired == nil {
+		return errors.New("shared CRD compatibility requires live and desired objects")
+	}
+	var liveCRD, desiredCRD apiextensionsv1.CustomResourceDefinition
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(live.Object, &liveCRD); err != nil {
+		return fmt.Errorf("decode live CRD %s: %w", objectKey(live), err)
+	}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(desired.Object, &desiredCRD); err != nil {
+		return fmt.Errorf("decode desired CRD %s: %w", objectKey(desired), err)
+	}
+	if liveCRD.Spec.Group != desiredCRD.Spec.Group || liveCRD.Spec.Scope != desiredCRD.Spec.Scope ||
+		!equivalentCRDNames(liveCRD.Spec.Names, desiredCRD.Spec.Names) {
+		return ownershipConflict(desired, "shared CRD group, names, or scope is incompatible with the live contract")
+	}
+	if len(liveCRD.Spec.Versions) != len(desiredCRD.Spec.Versions) {
+		return ownershipConflict(desired, "shared CRD version set is incompatible with the live contract")
+	}
+	liveVersions := make(map[string]apiextensionsv1.CustomResourceDefinitionVersion, len(liveCRD.Spec.Versions))
+	for _, version := range liveCRD.Spec.Versions {
+		liveVersions[version.Name] = version
+	}
+	for _, desiredVersion := range desiredCRD.Spec.Versions {
+		liveVersion, ok := liveVersions[desiredVersion.Name]
+		if !ok || liveVersion.Served != desiredVersion.Served || liveVersion.Storage != desiredVersion.Storage ||
+			!equivalentCRDValidation(liveVersion.Schema, desiredVersion.Schema) || !equivalentCRDSubresources(liveVersion.Subresources, desiredVersion.Subresources) {
+			return ownershipConflict(desired, fmt.Sprintf("shared CRD version %q is incompatible with the live contract", desiredVersion.Name))
+		}
+	}
+	if !compatibleCRDConversion(liveCRD.Spec.Conversion, desiredCRD.Spec.Conversion) {
+		return ownershipConflict(desired, "shared CRD conversion is incompatible with the live contract")
+	}
+	return nil
+}
+
+func compatibleCRDConversion(live, desired *apiextensionsv1.CustomResourceConversion) bool {
+	if live == nil {
+		live = &apiextensionsv1.CustomResourceConversion{Strategy: apiextensionsv1.NoneConverter}
+	}
+	if desired == nil {
+		desired = &apiextensionsv1.CustomResourceConversion{Strategy: apiextensionsv1.NoneConverter}
+	}
+	return live.Strategy == desired.Strategy && equivalentCRDWebhook(live.Webhook, desired.Webhook)
+}
+
+func equivalentCRDNames(live, desired apiextensionsv1.CustomResourceDefinitionNames) bool {
+	return live.Plural == desired.Plural && live.Singular == desired.Singular && live.Kind == desired.Kind && live.ListKind == desired.ListKind &&
+		equivalentCRDStrings(live.ShortNames, desired.ShortNames) && equivalentCRDStrings(live.Categories, desired.Categories)
+}
+
+func equivalentCRDStrings(live, desired []string) bool {
+	live = slices.Clone(live)
+	desired = slices.Clone(desired)
+	slices.Sort(live)
+	slices.Sort(desired)
+	if len(live) != len(desired) {
+		return false
+	}
+	for i := range live {
+		if live[i] != desired[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// equivalentCRDValidation compares the API contract while tolerating the
+// apiserver's nil/empty normalization of optional schema collections. A nil
+// schema and a non-nil schema remain incompatible because they differ in
+// whether structural validation is enabled.
+func equivalentCRDValidation(live, desired *apiextensionsv1.CustomResourceValidation) bool {
+	if live == nil || desired == nil {
+		return live == desired
+	}
+	if live.OpenAPIV3Schema == nil || desired.OpenAPIV3Schema == nil {
+		return live.OpenAPIV3Schema == desired.OpenAPIV3Schema
+	}
+	return equivalentCRDJSON(live.OpenAPIV3Schema, desired.OpenAPIV3Schema)
+}
+
+func equivalentCRDSubresources(live, desired *apiextensionsv1.CustomResourceSubresources) bool {
+	if live == nil || desired == nil {
+		return live == desired
+	}
+	if (live.Status != nil) != (desired.Status != nil) {
+		return false
+	}
+	return reflect.DeepEqual(live.Scale, desired.Scale)
+}
+
+func equivalentCRDWebhook(live, desired *apiextensionsv1.WebhookConversion) bool {
+	if live == nil || desired == nil {
+		return live == desired
+	}
+	if !equivalentCRDClientConfig(live.ClientConfig, desired.ClientConfig) || !equivalentCRDStrings(live.ConversionReviewVersions, desired.ConversionReviewVersions) {
+		return false
+	}
+	return true
+}
+
+func equivalentCRDClientConfig(live, desired *apiextensionsv1.WebhookClientConfig) bool {
+	if live == nil || desired == nil {
+		return live == desired
+	}
+	return reflect.DeepEqual(live.URL, desired.URL) && reflect.DeepEqual(live.Service, desired.Service) && bytes.Equal(live.CABundle, desired.CABundle)
+}
+
+func equivalentCRDJSON(live, desired any) bool {
+	liveJSON, err := stdjson.Marshal(live)
+	if err != nil {
+		return false
+	}
+	desiredJSON, err := stdjson.Marshal(desired)
+	if err != nil {
+		return false
+	}
+	return string(liveJSON) == string(desiredJSON)
 }
 
 func objectKey(object *unstructured.Unstructured) string {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,6 +56,7 @@ func main() {
 	var fenceAgentServerTLSSecret string
 	var fenceAgentClientCASecret string
 	var fenceAgentPort int
+	var chartAllowedHosts string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true, "Enable leader election for controller manager.")
@@ -70,6 +72,7 @@ func main() {
 	flag.StringVar(&fenceAgentServerTLSSecret, "fence-agent-server-tls-secret", "", "Secret name in each installation namespace containing fence-agent tls.crt and tls.key.")
 	flag.StringVar(&fenceAgentClientCASecret, "fence-agent-client-ca-secret", "", "Secret name in each installation namespace containing the operator client CA as ca.crt.")
 	flag.IntVar(&fenceAgentPort, "fence-agent-port", 8443, "HTTPS port used by injected fence-agent sidecars.")
+	flag.StringVar(&chartAllowedHosts, "chart-allowed-hosts", "", "Comma-separated exact HTTPS/OCI registry hosts allowed for installation charts; empty rejects chart rendering.")
 	flag.Parse()
 	if strings.TrimSpace(fenceAgentImage) != "" && strings.TrimSpace(fenceEndpointTemplate) == "" {
 		_, _ = fmt.Fprintln(os.Stderr, "invalid fence-agent configuration: --fence-agent-image requires --fence-endpoint-template")
@@ -152,13 +155,14 @@ func main() {
 		}
 		caps := chartutil.DefaultCapabilities.Copy()
 		caps.KubeVersion = chartutil.KubeVersion{Version: version.GitVersion, Major: version.Major, Minor: version.Minor}
+		allowedChartHosts := parseChartAllowedHosts(chartAllowedHosts)
 		var fenceAgent *chart.FenceAgentConfig
 		if strings.TrimSpace(fenceAgentImage) != "" {
 			fenceAgent = &chart.FenceAgentConfig{Image: fenceAgentImage, ServerTLSSecret: fenceAgentServerTLSSecret, ClientCASecret: fenceAgentClientCASecret, Port: int32(fenceAgentPort)}
 		}
 		lifecycleManager.FenceAgent = fenceAgent
 		reconciler.RendererFactory = func(installation *operatorv1alpha1.KubeOVNInstallation) chart.Renderer {
-			return &chart.HelmRenderer{Name: installation.Name, Namespace: installation.Namespace, Reader: mgr.GetAPIReader(), Mapper: mgr.GetRESTMapper(), Capabilities: caps, FenceAgent: fenceAgent}
+			return &chart.HelmRenderer{Name: installation.Name, Namespace: installation.Namespace, Reader: mgr.GetAPIReader(), Mapper: mgr.GetRESTMapper(), Capabilities: caps, FenceAgent: fenceAgent, AllowedChartHosts: allowedChartHosts}
 		}
 		reconciler.WorkloadFactory = func(identity apply.InstallationIdentity) apply.ApplyClient {
 			return &apply.Client{Dynamic: dynamicClient, Mapper: mgr.GetRESTMapper(), Identity: identity, BeforeWrite: lease.CheckAll}
@@ -192,6 +196,20 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		os.Exit(1)
 	}
+}
+
+func parseChartAllowedHosts(value string) []string {
+	hosts := make([]string, 0)
+	for item := range strings.SplitSeq(value, ",") {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item == "" {
+			continue
+		}
+		if !slices.Contains(hosts, item) {
+			hosts = append(hosts, item)
+		}
+	}
+	return hosts
 }
 
 func configuredBackupStore(backupDir string, installation *operatorv1alpha1.KubeOVNInstallation) (backup.Store, error) {

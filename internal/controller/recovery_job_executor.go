@@ -58,6 +58,9 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if request.DeletionTimestamp != nil || request.UID != plan.RequestUID || request.Generation != plan.RequestGeneration || request.Status.Plan == nil || request.Status.Plan.Digest != plan.Digest {
 		return errors.New("offline rebuild request identity or immutable plan changed")
 	}
+	if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan, true); err != nil {
+		return err
+	}
 	spec, err := e.Builder.Build(ctx, plan)
 	if err != nil {
 		return fmt.Errorf("build offline rebuild workload: %w", err)
@@ -65,7 +68,7 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if err := spec.Validate(); err != nil {
 		return fmt.Errorf("validate offline rebuild workload: %w", err)
 	}
-	if spec.Namespace != request.Namespace || spec.PlanDigest != plan.Digest || spec.InstallationUID != string(plan.InstallationUID) {
+	if spec.Namespace != request.Namespace || spec.PlanDigest != plan.Digest || spec.InstallationUID != string(plan.InstallationUID) || spec.OperationID != plan.OperationID {
 		return errors.New("offline rebuild workload is bound to a different namespace, installation or plan")
 	}
 	owner := recoveryRequestOwner(request)
@@ -102,6 +105,9 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 		}
 		current = desired.DeepCopy()
 		current.Spec.Suspend = new(true)
+		if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan, true); err != nil {
+			return err
+		}
 		if err := e.Client.Create(ctx, current); err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				return ErrRecoveryInProgress
@@ -120,6 +126,9 @@ func (e *RecoveryJobExecutor) Execute(ctx context.Context, plan RecoveryPlan) er
 	if recoveryJobSuspended(current) {
 		// An optimistic update prevents activating a replacement or a Job
 		// that changed since its spec and UID were checked.
+		if err := validateRecoveryApprovalForPlan(ctx, e.Client, plan, true); err != nil {
+			return err
+		}
 		current.Spec.Suspend = new(false)
 		if err := e.Client.Update(ctx, current); err != nil {
 			return recoveryJobActivationError(err)

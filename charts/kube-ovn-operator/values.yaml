@@ -4,6 +4,9 @@ image:
   pullPolicy: IfNotPresent
 replicaCount: 1
 leaderElect: true
+# Exact HTTPS/OCI registry hosts from which installation charts may be fetched.
+# Keep empty to fail closed until an administrator selects a trusted registry.
+chartAllowedHosts: []
 serviceAccount:
   create: true
   name: ""

@@ -27,10 +27,15 @@ func ValidateInstallationSpec(spec operatorv1alpha1.KubeOVNInstallationSpec) []e
 	default:
 		errs = append(errs, fmt.Errorf("spec.mode must be full, controlPlaneOnly, or dataPlaneOnly"))
 	}
+	switch spec.Upgrade.Strategy {
+	case "", "gatedRolling":
+	default:
+		errs = append(errs, fmt.Errorf("spec.upgrade.strategy must be empty or gatedRolling"))
+	}
 	switch spec.Central.Mode {
 	case operatorv1alpha1.CentralModeRaft:
-		if spec.Central.Replicas != 3 && spec.Central.Replicas != 5 {
-			errs = append(errs, fmt.Errorf("spec.central.replicas must be 3 or 5 for raft mode"))
+		if spec.Central.Replicas != 2 && spec.Central.Replicas != 3 && spec.Central.Replicas != 5 {
+			errs = append(errs, fmt.Errorf("spec.central.replicas must be 2, 3 or 5 for raft mode"))
 		}
 	case operatorv1alpha1.CentralModeSingle:
 		if spec.Central.Replicas != 1 {

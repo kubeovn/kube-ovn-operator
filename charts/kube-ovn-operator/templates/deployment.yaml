@@ -22,6 +22,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --leader-elect={{ .Values.leaderElect }}
+            - --chart-allowed-hosts={{ join "," .Values.chartAllowedHosts | quote }}
             {{- if .Values.fenceAgent.enabled }}
             - --fence-endpoint-template={{ required "fenceAgent.endpointTemplate is required when fenceAgent.enabled" .Values.fenceAgent.endpointTemplate }}
             - --fence-agent-image={{ required "fenceAgent.image is required when fenceAgent.enabled" .Values.fenceAgent.image }}

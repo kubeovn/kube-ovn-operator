@@ -16,6 +16,9 @@ with an `appVersion` matching `spec.version`. OCI authentication comes from the
 operator process's existing Helm/Docker registry credential store; the operator
 does not create, copy, or persist credentials.
 HTTP is accepted only for literal loopback addresses in local integration tests.
+The production binary requires `--chart-allowed-hosts` to list the exact HTTPS
+or OCI registry hosts permitted for chart sources; an empty value rejects all
+remote chart rendering.
 
 The Helm SDK renders the original chart templates with the installation name
 and namespace. It maps version, mode, external NB/SB endpoints, central storage
